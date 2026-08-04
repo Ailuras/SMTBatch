@@ -1,0 +1,15 @@
+# smtbatch solver configuration. Discovered automatically (nearest
+# smtbatch.toml walking upward from the current directory).
+
+[defaults]
+inputs = "benchmarks"
+results = "results"
+
+[solvers.z3]
+binary = "/Users/ailura/z3/build/z3"
+command = ["gtimeout", "--kill-after=1", "{timeout}", "{binary}", "model=true", "{input}"]
+
+[solvers.cvc5]
+binary = "/Users/ailura/cvc5/build/bin/cvc5"
+command = ["gtimeout", "--kill-after=1", "{timeout}", "{binary}", "--lang", "smt2.6", "--strings-exp", "--produce-models", "{input}"]
+version_args = ["--version"]
