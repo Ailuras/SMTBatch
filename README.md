@@ -3,7 +3,7 @@
 Local SMT-LIB batch experiment console. One tool, shared by every project:
 
 - `smtbatch run` — bounded parallel queue of solver × formula jobs with streaming state.
-- `smtbatch serve` — local dashboard (submit experiments, live per-example results, filtering/sorting, Excel download) that runs in the background by default.
+- `smtbatch serve` — local dashboard (submit experiments, live run state, on-demand analysis, Excel download) that runs in the background by default.
 - `smtbatch export` — Excel workbook for completed runs (log paths only, never raw output).
 - `smtbatch collect` — copy cases matching a cross-solver consistency class.
 
@@ -62,6 +62,10 @@ smtbatch export results/baseline --output exports/baseline.xlsx
 The dashboard lives at <http://127.0.0.1:8000/>. Experiments submitted from the
 page run in independent background sessions; closing the browser does not stop
 them. Options: `--host`, `--port`, `--inputs-root`, `--results`.
+
+Select a run from the history to load its separate report page. The report
+loads its summary first; scatter data and server-paginated formula rows load
+only when requested, keeping large experiments responsive.
 
 Every run directory contains `jobs.tsv` (immutable queue), `results.tsv`
 (streaming results), `progress.json` (live progress), `metadata.txt`

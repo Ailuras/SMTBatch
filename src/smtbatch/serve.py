@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import heapq
 import json
 import math
 import mimetypes
@@ -29,7 +30,7 @@ from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from .config import Config, load_config
-from .task import RESULT_FIELDS, load_jobs
+from .task import RESULT_FIELDS, classify_consistency, load_jobs, result_label
 
 
 RUN_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}")
@@ -38,6 +39,10 @@ LOOPBACK_HOSTS = {"127.0.0.1", "localhost"}
 
 def dashboard_path() -> Path:
     return Path(str(resources.files("smtbatch").joinpath("dashboard.html")))
+
+
+def report_path() -> Path:
+    return Path(str(resources.files("smtbatch").joinpath("report.html")))
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -109,7 +114,8 @@ class ExperimentManager:
         self._config: Config | None = None
         self._config_error: str = ""
         self._progress_cache: dict[str, tuple[tuple[float, float], dict[str, object]]] = {}
-        self._examples_cache: dict[str, tuple[tuple[float, float, int], dict[str, object]]] = {}
+        self._run_cache: dict[str, tuple[tuple[float, float, int, float], dict[str, object]]] = {}
+        self._history_cache: tuple[float, dict[tuple[str, str], float]] | None = None
 
     def _solver_config(self) -> Config:
         if self._config is None:
@@ -185,7 +191,7 @@ class ExperimentManager:
             parsed = float(value)
         except (TypeError, ValueError):
             raise ValueError(f"{name} must be a positive number") from None
-        if parsed <= 0:
+        if not math.isfinite(parsed) or parsed <= 0:
             raise ValueError(f"{name} must be a positive number")
         return parsed
 
@@ -230,15 +236,18 @@ class ExperimentManager:
         files = self._files(input_dir, limit)
         pairs = len(files) * len(solvers)
         batches = math.ceil(pairs / jobs) if pairs else 0
+        history = self._historical_durations()
+        predicted = [history.get((str(path), solver), timeout) for path in files for solver in solvers]
+        estimated_seconds = self._scheduled_duration(predicted, jobs)
+        watchdog_seconds = timeout + max(15.0, timeout * 0.5)
         return {
             "input": str(input_dir),
             "file_count": len(files),
             "solvers": solvers,
-            "pair_count": pairs,
-            "parallel_batches": batches,
-            "timeout_seconds": timeout,
-            # This is an upper bound from configured solver timeouts, not a runtime prediction.
-            "max_wall_seconds": batches * timeout,
+            "estimated_seconds": estimated_seconds,
+            "worst_case_seconds": batches * watchdog_seconds,
+            "historical_pairs": sum((str(path), solver) in history for path in files for solver in solvers),
+            "fallback_pairs": pairs - sum((str(path), solver) in history for path in files for solver in solvers),
         }
 
     def launch(self, request: object) -> dict[str, object]:
@@ -291,18 +300,69 @@ class ExperimentManager:
         self.processes[run_id] = process
         return {"run_id": run_id, "status": "starting"}
 
-    def examples(self, run_id: str) -> dict[str, object]:
+    @staticmethod
+    def _scheduled_duration(durations: list[float], workers: int) -> float:
+        """Simulate the bounded worker queue to estimate its wall-clock duration."""
+        if not durations:
+            return 0.0
+        slots = [0.0] * min(workers, len(durations))
+        heapq.heapify(slots)
+        for duration in sorted(durations, reverse=True):
+            earliest = heapq.heappop(slots)
+            heapq.heappush(slots, earliest + duration)
+        return round(max(slots), 3)
+
+    def _historical_durations(self) -> dict[tuple[str, str], float]:
+        """Average recorded durations by exact formula path and solver for preview estimates."""
+        now = time.monotonic()
+        if self._history_cache is not None and now - self._history_cache[0] < 30.0:
+            return self._history_cache[1]
+        sums: dict[tuple[str, str], tuple[float, int]] = {}
+        if self.results_root.is_dir():
+            for dirpath, dirnames, filenames in os.walk(self.results_root):
+                dirnames[:] = [name for name in dirnames if name != "logs" and not name.startswith(".")]
+                if "jobs.tsv" not in filenames or "results.tsv" not in filenames:
+                    continue
+                run_dir = Path(dirpath)
+                try:
+                    jobs = {job.job_id: job for job in load_jobs(run_dir / "jobs.tsv")}
+                    with (run_dir / "results.tsv").open("r", encoding="utf-8", newline="") as handle:
+                        reader = csv.DictReader(handle, delimiter="\t")
+                        if reader.fieldnames != RESULT_FIELDS:
+                            continue
+                        for row in reader:
+                            job = jobs.get(int(row.get("job_id") or ""))
+                            duration = float(row.get("time") or "")
+                            if job is None or not math.isfinite(duration) or duration < 0:
+                                continue
+                            key = (str(job.file_path), job.solver)
+                            total, count = sums.get(key, (0.0, 0))
+                            sums[key] = (total + duration, count + 1)
+                except (OSError, ValueError, csv.Error):
+                    continue
+        averages = {key: total / count for key, (total, count) in sums.items() if count}
+        self._history_cache = (now, averages)
+        return averages
+
+    def _run_data(self, run_id: str) -> dict[str, object]:
         run_dir = self._run_dir(run_id)
         jobs_path = run_dir / "jobs.tsv"
         results_path = run_dir / "results.tsv"
+        progress_path = run_dir / "progress.json"
         try:
-            jobs_mtime = jobs_path.stat().st_mtime
+            jobs_stat = jobs_path.stat()
             results_stat = results_path.stat()
-            cache_key: tuple[float, float, int] | None = (jobs_mtime, results_stat.st_mtime, results_stat.st_size)
+            progress_mtime = progress_path.stat().st_mtime
+            cache_key: tuple[float, float, int, float] | None = (
+                jobs_stat.st_mtime,
+                results_stat.st_mtime,
+                results_stat.st_size,
+                progress_mtime,
+            )
         except OSError:
             cache_key = None
         if cache_key is not None:
-            cached = self._examples_cache.get(run_id)
+            cached = self._run_cache.get(run_id)
             if cached is not None and cached[0] == cache_key:
                 return cached[1]
         try:
@@ -310,7 +370,7 @@ class ExperimentManager:
         except (OSError, ValueError) as exc:
             raise ValueError(f"unable to read experiment queue: {exc}") from None
 
-        results: dict[int, dict[str, str]] = {}
+        results: dict[int, dict[str, object]] = {}
         if results_path.is_file():
             try:
                 with results_path.open("r", encoding="utf-8", newline="") as handle:
@@ -321,7 +381,7 @@ class ExperimentManager:
                         job_id = int(row.get("job_id") or "")
                         results[job_id] = {
                             "result": row.get("result") or "error",
-                            "time": row.get("time") or "",
+                            "time": float(row.get("time") or ""),
                             "log_url": _data_url(row.get("output_path"), self.results_root),
                         }
             except (OSError, ValueError, csv.Error) as exc:
@@ -346,7 +406,7 @@ class ExperimentManager:
                     "file_url": f"/api/runs/{quote(run_id, safe='')}/file?path={quote(file_name, safe='')}",
                     "results": {},
                     "times": {},
-                    "summary": "pending",
+                    "state": "pending",
                     "done": 0,
                     "total": 0,
                 }
@@ -354,10 +414,8 @@ class ExperimentManager:
                 cases.append(case)
             result = results.get(job.job_id)
             case_results = case["results"]
-            case_times = case["times"]
-            assert isinstance(case_results, dict) and isinstance(case_times, dict)
-            case_results[job.solver] = result or {"result": "pending", "time": ""}
-            case_times[job.solver] = float(result["time"]) if result and result["time"] else None
+            assert isinstance(case_results, dict)
+            case_results[job.solver] = result or {"result": "pending", "time": None, "log_url": ""}
             case["total"] = int(case["total"]) + 1
             if result:
                 case["done"] = int(case["done"]) + 1
@@ -366,23 +424,143 @@ class ExperimentManager:
             case_results = case["results"]
             assert isinstance(case_results, dict)
             if int(case["done"]) < int(case["total"]):
-                case["summary"] = "pending"
+                case["state"] = "pending"
                 continue
-            labels = [item["result"] for item in case_results.values() if isinstance(item, dict)]
-            if "sat" in labels and "unsat" in labels:
-                case["summary"] = "conflict"
-            elif all(label in {"sat", "unsat"} for label in labels):
-                case["summary"] = "consistent"
-            elif all(label in {"unknown", "timeout"} for label in labels):
-                case["summary"] = "hard"
-            elif any(label == "error" for label in labels):
-                case["summary"] = "error"
-            else:
-                case["summary"] = "other"
-        payload: dict[str, object] = {"run_id": run_id, "solvers": solvers, "completed_pairs": completed_pairs, "cases": cases}
+            labels = [result_label(str(item.get("result") or "")) for item in case_results.values() if isinstance(item, dict)]
+            case["state"] = classify_consistency(labels).lower()
+        progress = self._progress(run_id)
+        payload: dict[str, object] = {
+            "run_id": run_id,
+            "solvers": solvers,
+            "completed_pairs": completed_pairs,
+            "cases": cases,
+            "progress": progress,
+        }
         if cache_key is not None:
-            self._examples_cache[run_id] = (cache_key, payload)
+            self._run_cache[run_id] = (cache_key, payload)
         return payload
+
+    def report_summary(self, run_id: str, state: str) -> dict[str, object]:
+        data = self._run_data(run_id)
+        solvers = data["solvers"]
+        assert isinstance(solvers, list)
+        if state not in {"all", "pending", "consistent", "conflict", "hard", "error", "other"}:
+            raise ValueError("invalid formula state")
+        cases = [case for case in data["cases"] if isinstance(case, dict) and (state == "all" or case.get("state") == state)]
+        by_solver: dict[str, dict[str, object]] = {
+            solver: {
+                "completed": 0,
+                "solved": 0,
+                "outcomes": {result: 0 for result in ("sat", "unsat", "unknown", "timeout", "error")},
+                "cactus": [],
+            }
+            for solver in solvers
+        }
+        for case in cases:
+            results = case["results"]
+            assert isinstance(results, dict)
+            for solver in solvers:
+                result = results.get(solver)
+                if not isinstance(result, dict):
+                    continue
+                label = str(result.get("result") or "pending")
+                if label not in {"sat", "unsat", "unknown", "timeout", "error"}:
+                    continue
+                summary = by_solver[solver]
+                outcomes = summary["outcomes"]
+                assert isinstance(outcomes, dict)
+                summary["completed"] = int(summary["completed"]) + 1
+                outcomes[label] = int(outcomes[label]) + 1
+                value = result.get("time")
+                if isinstance(value, (int, float)) and math.isfinite(value) and value >= 0:
+                    if label in {"sat", "unsat"}:
+                        summary["solved"] = int(summary["solved"]) + 1
+        for solver, summary in by_solver.items():
+            solved_times = sorted(
+                float(case["results"][solver]["time"])
+                for case in cases
+                if isinstance(case["results"], dict)
+                and isinstance(case["results"].get(solver), dict)
+                and case["results"][solver].get("result") in {"sat", "unsat"}
+                and isinstance(case["results"][solver].get("time"), (int, float))
+            )
+            elapsed = 0.0
+            cactus: list[dict[str, float]] = []
+            for count, duration in enumerate(solved_times, start=1):
+                elapsed += duration
+                cactus.append({"time": round(elapsed, 3), "solved": count})
+            summary["cactus"] = cactus
+        return {
+            "run_id": run_id,
+            "status": data["progress"].get("status", "unknown"),
+            "updated_at": data["progress"].get("updated_at", ""),
+            "case_count": len(cases),
+            "completed_pairs": sum(int(case["done"]) for case in cases),
+            "solvers": solvers,
+            "by_solver": by_solver,
+        }
+
+    def report_formulas(self, run_id: str, query: str, state: str, page: int, page_size: int) -> dict[str, object]:
+        data = self._run_data(run_id)
+        solvers = data["solvers"]
+        assert isinstance(solvers, list)
+        if state not in {"all", "pending", "consistent", "conflict", "hard", "error", "other"}:
+            raise ValueError("invalid formula state")
+        needle = query.strip().lower()
+        cases = [
+            case
+            for case in data["cases"]
+            if isinstance(case, dict)
+            and (not needle or needle in str(case["file"]).lower())
+            and (state == "all" or case.get("state") == state)
+        ]
+        cases.sort(key=lambda case: str(case["file"]))
+        total = len(cases)
+        start = (page - 1) * page_size
+        page_cases = []
+        for case in cases[start : start + page_size]:
+            results = case["results"]
+            assert isinstance(results, dict)
+            page_cases.append(
+                {
+                    "file": case["file"],
+                    "file_url": case["file_url"],
+                    "state": case["state"],
+                    "done": case["done"],
+                    "total": case["total"],
+                    "results": {solver: results.get(solver, {}) for solver in solvers},
+                }
+            )
+        return {"solvers": solvers, "total": total, "page": page, "page_size": page_size, "cases": page_cases}
+
+    def report_scatter(self, run_id: str, left: str, right: str, state: str) -> dict[str, object]:
+        data = self._run_data(run_id)
+        solvers = data["solvers"]
+        assert isinstance(solvers, list)
+        if left not in solvers or right not in solvers or left == right:
+            raise ValueError("choose two different solvers from this run")
+        if state not in {"all", "pending", "consistent", "conflict", "hard", "error", "other"}:
+            raise ValueError("invalid formula state")
+        points: list[dict[str, object]] = []
+        for case in data["cases"]:
+            assert isinstance(case, dict)
+            if state != "all" and case.get("state") != state:
+                continue
+            results = case["results"]
+            assert isinstance(results, dict)
+            left_result, right_result = results.get(left), results.get(right)
+            if not isinstance(left_result, dict) or not isinstance(right_result, dict):
+                continue
+            x, y = left_result.get("time"), right_result.get("time")
+            if not isinstance(x, (int, float)) or not isinstance(y, (int, float)) or x < 0 or y < 0:
+                continue
+            points.append({"file": case["file"], "x": x, "y": y, "left": left_result.get("result"), "right": right_result.get("result")})
+        total = len(points)
+        limit = 5_000
+        if total > limit:
+            step = math.ceil(total / limit)
+            points = points[::step]
+        return {"left": left, "right": right, "total_points": total, "sampled": total > len(points), "points": points}
 
     def example_file(self, run_id: str, path: str) -> Path:
         """Resolve a case file only if it belongs to the run's immutable queue."""
@@ -512,6 +690,7 @@ def scan_runs(results_root: Path) -> list[dict[str, Any]]:
 def handler_factory(manager: ExperimentManager) -> type[BaseHTTPRequestHandler]:
     resolved_results = manager.results_root
     dashboard = dashboard_path()
+    report = report_path()
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "SMTBatchDashboard/1"
@@ -564,19 +743,48 @@ def handler_factory(manager: ExperimentManager) -> type[BaseHTTPRequestHandler]:
             if request_path == "/api/config":
                 self._send_json(manager.config())
                 return
-            match = re.fullmatch(r"/api/runs/(.+)/examples", request_path)
+            match = re.fullmatch(r"/api/runs/(.+)/analysis/summary", request_path)
             if match:
                 try:
-                    self._send_json(manager.examples(match.group(1)))
+                    query = parse_qs(urlparse(self.path).query)
+                    self._send_json(manager.report_summary(match.group(1), query.get("state", ["all"])[0]))
                 except ValueError as exc:
                     self._send_json({"error": str(exc)}, HTTPStatus.CONFLICT)
                 return
-            match = re.fullmatch(r"/api/runs/(.+)/detail", request_path)
+            match = re.fullmatch(r"/api/runs/(.+)/analysis/formulas", request_path)
             if match:
+                query = parse_qs(urlparse(self.path).query)
                 try:
-                    self._send_json(manager._progress(match.group(1)))
+                    page = int(query.get("page", ["1"])[0])
+                    page_size = int(query.get("page_size", ["20"])[0])
+                    if page < 1 or not 1 <= page_size <= 200:
+                        raise ValueError("page and page_size are out of range")
+                    self._send_json(
+                        manager.report_formulas(
+                            match.group(1),
+                            query.get("query", [""])[0],
+                            query.get("state", ["all"])[0],
+                            page,
+                            page_size,
+                        )
+                    )
                 except ValueError as exc:
-                    self._send_json({"error": str(exc)}, HTTPStatus.CONFLICT)
+                    self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+                return
+            match = re.fullmatch(r"/api/runs/(.+)/analysis/scatter", request_path)
+            if match:
+                query = parse_qs(urlparse(self.path).query)
+                try:
+                    self._send_json(
+                        manager.report_scatter(
+                            match.group(1),
+                            query.get("left", [""])[0],
+                            query.get("right", [""])[0],
+                            query.get("state", ["all"])[0],
+                        )
+                    )
+                except ValueError as exc:
+                    self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
                 return
             match = re.fullmatch(r"/api/runs/(.+)/file", request_path)
             if match:
@@ -590,6 +798,9 @@ def handler_factory(manager: ExperimentManager) -> type[BaseHTTPRequestHandler]:
                 return
             if request_path in {"/", "/dashboard.html"}:
                 self._send_file(dashboard)
+                return
+            if re.fullmatch(r"/runs/.+/report", request_path):
+                self._send_file(report)
                 return
             if request_path == "/favicon.ico":
                 self.send_response(HTTPStatus.NO_CONTENT)
