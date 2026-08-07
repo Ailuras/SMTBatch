@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import argparse
 import csv
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from smtbatch.run import _RunLock
 from smtbatch.serve import ExperimentManager
 from smtbatch.task import RESULT_FIELDS
 
@@ -95,6 +99,18 @@ command = ["{binary}", "{input}"]
         self.assertTrue(preview["input_valid"])
         self.assertEqual(preview["input_error"], "")
         self.assertEqual(preview["file_count"], 1)
+        self.assertEqual(preview["total_file_count"], 1)
+        self.assertEqual(preview["selected_file_count"], 1)
+
+    def test_preview_keeps_total_count_separate_from_formula_limit(self) -> None:
+        for index in range(3):
+            (self.inputs / f"extra-{index}.smt2").write_text("(check-sat)\n", encoding="utf-8")
+        request = {"input": str(self.inputs), "solvers": ["alpha"], "timeout": 30, "jobs": 2, "limit": 2}
+        preview = self.manager.preview(request)
+        self.assertEqual(preview["file_count"], 4)
+        self.assertEqual(preview["total_file_count"], 4)
+        self.assertEqual(preview["selected_file_count"], 2)
+        self.assertEqual(preview["historical_pairs"] + preview["fallback_pairs"], 2)
 
     def test_preview_rejects_directory_without_smt2_files(self) -> None:
         request = {"input": str(self.empty), "solvers": ["alpha"], "timeout": 30, "jobs": 2, "limit": 0}
@@ -112,6 +128,7 @@ command = ["{binary}", "{input}"]
             [{"name": "alpha", "label": "Alpha engine"}, {"name": "beta", "label": "beta"}],
         )
         self.assertEqual(config["config_path"], str(self.config_path))
+        self.assertIsInstance(config["browse_available"], bool)
 
     def test_config_api_reloads_solver_menu_after_toml_change(self) -> None:
         self.config_path.write_text(
@@ -133,6 +150,172 @@ command = ["{binary}", "{input}"]
         config = self.manager.config()
         self.assertEqual(config["solvers"], ["alpha", "gamma"])
         self.assertEqual(config["solver_options"][1], {"name": "gamma", "label": "Gamma engine"})
+
+    def _interrupted_run(self, name: str) -> Path:
+        run_dir = self.results / name
+        run_dir.mkdir()
+        (run_dir / "jobs.tsv").write_text(
+            f"job_id\tsolver\tfile\n1\talpha\t{self.formula}\n2\tbeta\t{self.formula}\n",
+            encoding="utf-8",
+        )
+        (run_dir / "results.tsv").write_text(
+            "job_id\tsolver\tfile\tresult\ttime\tcode\toutput_path\n",
+            encoding="utf-8",
+        )
+        (run_dir / "progress.json").write_text(
+            json.dumps({"status": "interrupted", "updated_at": "2026-01-01T00:00:00+00:00", "total_jobs": 2, "completed_jobs": 1}),
+            encoding="utf-8",
+        )
+        (run_dir / "metadata.txt").write_text(
+            "solvers=alpha,beta\ntimeout=30\njobs=2\nlog=all\n",
+            encoding="utf-8",
+        )
+        return run_dir
+
+    def test_resume_rejects_complete_experiment(self) -> None:
+        with self.assertRaisesRegex(ValueError, "already complete"):
+            self.manager.resume("sample-run", {"jobs": 2})
+
+    def test_resume_accepts_stale_running_experiment_without_live_pid(self) -> None:
+        run_dir = self._interrupted_run("running-run")
+        (run_dir / "progress.json").write_text(
+            json.dumps({"status": "running", "updated_at": "2026-01-01T00:00:00+00:00"}),
+            encoding="utf-8",
+        )
+        with mock.patch("smtbatch.serve.subprocess.Popen") as popen:
+            popen.return_value.poll.return_value = None
+            response = self.manager.resume("running-run", {"jobs": 2})
+        self.assertEqual(response["status"], "resuming")
+
+    def test_runs_exposes_stale_running_experiment_as_interrupted(self) -> None:
+        run_dir = self._interrupted_run("stale-run")
+        (run_dir / "progress.json").write_text(
+            json.dumps({"status": "running", "updated_at": "2026-01-01T00:00:00+00:00"}),
+            encoding="utf-8",
+        )
+        run = next(item for item in self.manager.runs() if item["run_id"] == "stale-run")
+        self.assertEqual(run["status"], "interrupted")
+        self.assertEqual(run["stale_status"], "running")
+
+    def test_run_lock_keeps_running_state_live_without_pid_probe(self) -> None:
+        run_dir = self._interrupted_run("locked-run")
+        (run_dir / "progress.json").write_text(
+            json.dumps({"status": "running", "updated_at": "2026-01-01T00:00:00+00:00"}),
+            encoding="utf-8",
+        )
+        lock = _RunLock(run_dir)
+        lock.acquire()
+        try:
+            run = next(item for item in self.manager.runs() if item["run_id"] == "locked-run")
+            self.assertEqual(run["status"], "running")
+            with self.assertRaisesRegex(ValueError, "still running"):
+                self.manager.resume("locked-run", {"jobs": 2})
+        finally:
+            lock.release()
+
+    def test_resume_rejects_zero_or_missing_jobs(self) -> None:
+        self._interrupted_run("interrupted-run")
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            self.manager.resume("interrupted-run", {"jobs": 0})
+        with self.assertRaisesRegex(ValueError, "non-negative integer"):
+            self.manager.resume("interrupted-run", {"jobs": -1})
+
+    def test_resume_launches_resume_command(self) -> None:
+        run_dir = self._interrupted_run("interrupted-run")
+        with mock.patch("smtbatch.serve.subprocess.Popen") as popen:
+            popen.return_value.poll.return_value = None
+            response = self.manager.resume("interrupted-run", {"jobs": 4})
+        self.assertEqual(response["status"], "resuming")
+        command = popen.call_args.args[0]
+        self.assertIn("--resume", command)
+        self.assertEqual(command[command.index("--jobs") + 1], "4")
+        self.assertIn(str(run_dir), command)
+        self.assertIn("--output", command)
+
+    def test_resume_rejects_duplicate_request_before_pid_file_exists(self) -> None:
+        self._interrupted_run("interrupted-run")
+        with mock.patch("smtbatch.serve.subprocess.Popen") as popen:
+            popen.return_value.poll.return_value = None
+            self.manager.resume("interrupted-run", {"jobs": 2})
+            with self.assertRaisesRegex(ValueError, "still running"):
+                self.manager.resume("interrupted-run", {"jobs": 2})
+        self.assertEqual(popen.call_count, 1)
+
+    def test_cancel_requires_active_process(self) -> None:
+        with self.assertRaisesRegex(ValueError, "no active run process"):
+            self.manager.cancel_run("sample-run")
+
+    def test_config_port_defaults_to_8000_and_reads_toml(self) -> None:
+        from smtbatch.config import load_config
+
+        self.assertEqual(load_config(self.config_path.parent).port, 8000)
+        self.config_path.write_text(
+            self.config_path.read_text(encoding="utf-8").replace(
+                '[defaults]\ninputs = "inputs"\nresults = "results"',
+                '[defaults]\ninputs = "inputs"\nresults = "results"\nport = 8011',
+            ),
+            encoding="utf-8",
+        )
+        self.assertEqual(load_config(self.config_path.parent).port, 8011)
+
+    def test_config_port_rejects_non_integer_toml_values(self) -> None:
+        from smtbatch.config import load_config
+
+        original = self.config_path.read_text(encoding="utf-8")
+        for value in ("true", "8000.5"):
+            self.config_path.write_text(original.replace('results = "results"', f'results = "results"\nport = {value}'), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "port must be an integer"):
+                load_config(self.config_path.parent)
+
+    def test_resolve_port_prefers_flag_over_config(self) -> None:
+        from smtbatch.serve import _resolve_port
+
+        old_cwd = Path.cwd()
+        try:
+            os.chdir(self.config_path.parent)
+            self.assertEqual(_resolve_port(argparse.Namespace(port=None)), 8000)
+            self.assertEqual(_resolve_port(argparse.Namespace(port=9000)), 9000)
+        finally:
+            os.chdir(old_cwd)
+
+    def test_resolve_port_reports_invalid_config_instead_of_falling_back(self) -> None:
+        from smtbatch.serve import _resolve_port
+
+        self.config_path.write_text(
+            self.config_path.read_text(encoding="utf-8").replace('results = "results"', 'results = "results"\nport = 70000'),
+            encoding="utf-8",
+        )
+        old_cwd = Path.cwd()
+        try:
+            os.chdir(self.config_path.parent)
+            with self.assertRaisesRegex(RuntimeError, "between 1 and 65535"):
+                _resolve_port(argparse.Namespace(port=None))
+        finally:
+            os.chdir(old_cwd)
+
+    def test_launch_persists_last_run_and_config_reports_it(self) -> None:
+        request = {"input": str(self.inputs), "solvers": ["alpha", "beta"], "timeout": 30, "jobs": 3, "limit": 5, "name": "mem-run"}
+        with mock.patch("smtbatch.serve.subprocess.Popen") as popen:
+            popen.return_value.poll.return_value = None
+            self.manager.launch(request)
+        state = self.manager._read_last_run()
+        self.assertEqual(state["input"], str(self.inputs))
+        self.assertEqual(state["solvers"], ["alpha", "beta"])
+        self.assertEqual(state["timeout"], 30)
+        self.assertEqual(state["jobs"], 3)
+        self.assertEqual(state["limit"], 5)
+        self.assertEqual(self.manager.config()["last_run"]["jobs"], 3)
+
+    def test_launch_reports_last_run_persistence_failure_as_warning(self) -> None:
+        request = {"input": str(self.inputs), "solvers": ["alpha"], "timeout": 30, "jobs": 1, "limit": 0, "name": "warning-run"}
+        with (
+            mock.patch("smtbatch.serve.subprocess.Popen") as popen,
+            mock.patch.object(self.manager, "_save_last_run", side_effect=OSError("disk full")),
+        ):
+            popen.return_value.poll.return_value = None
+            response = self.manager.launch(request)
+        self.assertEqual(response["status"], "starting")
+        self.assertIn("disk full", response["warning"])
 
 
 if __name__ == "__main__":

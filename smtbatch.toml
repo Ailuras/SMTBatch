@@ -4,6 +4,7 @@
 [defaults]
 inputs = "benchmarks"
 results = "results"
+port = 8000
 
 [solvers.my-solver]
 label = "My solver"

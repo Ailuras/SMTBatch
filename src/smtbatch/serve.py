@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import fcntl
 import heapq
 import json
 import math
@@ -20,6 +21,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from http import HTTPStatus
@@ -55,7 +57,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="controller action (default: start)",
     )
     parser.add_argument("--host", default="127.0.0.1", help="bind address (default: 127.0.0.1)")
-    parser.add_argument("--port", type=int, default=8000, help="bind port (default: 8000)")
+    parser.add_argument("--port", type=int, default=None, help="bind port (default: config [defaults] port or 8000)")
     parser.add_argument("--results", type=Path, default=None, help="results root to scan (default: config [defaults] or ./results)")
     parser.add_argument("--inputs-root", type=Path, default=None, help="default benchmark root (default: config [defaults] or ./benchmarks)")
     return parser.parse_args(argv)
@@ -71,6 +73,17 @@ def resolve_roots(args: argparse.Namespace) -> tuple[Path, Path]:
     inputs_root = (args.inputs_root or default_inputs).expanduser().resolve()
     results_root = (args.results or default_results).expanduser().resolve()
     return inputs_root, results_root
+
+
+def _resolve_port(args: argparse.Namespace) -> int:
+    """Resolve the bind port: an explicit --port flag, then config [defaults], then 8000."""
+    if args.port is not None:
+        return args.port
+    try:
+        config_path = find_config_path()
+    except RuntimeError:
+        return 8000
+    return load_config(config_path.parent).port
 
 
 def _metadata(path: Path) -> dict[str, str]:
@@ -111,11 +124,12 @@ class ExperimentManager:
         self.inputs_root = inputs_root.expanduser().resolve()
         self.host_cwd = host_cwd
         self.processes: dict[str, subprocess.Popen[str]] = {}
+        self._process_lock = threading.RLock()
         self._config: Config | None = None
         self._config_signature: tuple[str, int, int] | None = None
         self._config_error: str = ""
-        self._progress_cache: dict[str, tuple[tuple[float, float], dict[str, object]]] = {}
-        self._run_cache: dict[str, tuple[tuple[float, float, int, float], dict[str, object]]] = {}
+        self._progress_cache: dict[str, tuple[tuple[int, int], dict[str, object]]] = {}
+        self._run_cache: dict[str, tuple[tuple[int, int, int, int], dict[str, object]]] = {}
         self._history_cache: tuple[float, dict[tuple[str, str], float]] | None = None
 
     def _solver_config(self) -> Config:
@@ -159,17 +173,94 @@ class ExperimentManager:
             "solvers": solvers,
             "solver_options": solver_options,
             "config_error": error,
+            "browse_available": shutil.which("osascript") is not None,
             "defaults": {"timeout": 30, "jobs": max(1, (os.cpu_count() or 2) // 2)},
+            "last_run": self._read_last_run(),
         }
 
     @staticmethod
     def _applescript_escape(value: str) -> str:
         return value.replace("\\", "\\\\").replace('"', '\\"')
 
+    def _last_run_path(self) -> Path:
+        return self.results_root / ".last-run.json"
+
+    def _read_last_run(self) -> dict[str, object]:
+        path = self._last_run_path()
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _save_last_run(self, request: dict) -> None:
+        """Persist the launched experiment's form values so the next session opens with them."""
+        state: dict[str, object] = {
+            "input": request.get("input", ""),
+            "solvers": list(dict.fromkeys(value for value in request.get("solvers", []) if isinstance(value, str))),
+            "timeout": request.get("timeout"),
+            "jobs": request.get("jobs"),
+            "limit": request.get("limit", 0),
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self.results_root.mkdir(parents=True, exist_ok=True)
+        path = self._last_run_path()
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        try:
+            temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _managed_process_alive(self, run_id: str) -> bool:
+        with self._process_lock:
+            process = self.processes.get(run_id)
+            if process is None:
+                return False
+            if process.poll() is None:
+                return True
+            self.processes.pop(run_id, None)
+            return False
+
+    def _reap_managed_processes(self) -> None:
+        """Drop exited child handles in O(number of launched children), not O(history)."""
+        with self._process_lock:
+            for run_id, process in list(self.processes.items()):
+                if process.poll() is not None:
+                    self.processes.pop(run_id, None)
+
+    def _run_is_live(self, run_id: str) -> bool:
+        if self._managed_process_alive(run_id):
+            return True
+        run_dir = self._run_dir(run_id)
+        return _read_run_pid(run_dir / ".run.pid") is not None or _run_lock_held(run_dir / ".run.lock")
+
+    def runs(self) -> list[dict[str, Any]]:
+        """Return history with stale active states repaired from actual process liveness."""
+        self._reap_managed_processes()
+        normalized: list[dict[str, Any]] = []
+        for source in scan_runs(self.results_root):
+            run = dict(source)
+            run_id = str(run.get("run_id") or "")
+            status = str(run.get("status") or "unknown")
+            # Completed history is the common case; avoid pid/lock probes for it.
+            live = status in {"running", "starting", "cancelling", "interrupted", "failed"} and self._run_is_live(run_id)
+            if not live and status in {"running", "starting", "cancelling"}:
+                run["stale_status"] = status
+                run["status"] = "interrupted"
+            elif live and status in {"interrupted", "failed"}:
+                # A resume child can be live briefly before it publishes its first snapshot.
+                run["status"] = "starting"
+            normalized.append(run)
+        return normalized
+
     def pick_directory(self) -> dict[str, object]:
         """Open the macOS system folder picker and return the chosen absolute path."""
         if shutil.which("osascript") is None:
-            raise RuntimeError("system folder picker is unavailable on this platform")
+            raise RuntimeError(
+                "no graphical folder picker is available on this server; "
+                "type the benchmark directory path directly into the input field"
+            )
         script = 'POSIX path of (choose folder with prompt "Select benchmark folder"'
         if self.inputs_root.is_dir():
             script += f' default location POSIX file "{self._applescript_escape(str(self.inputs_root))}"'
@@ -252,23 +343,41 @@ class ExperimentManager:
 
     def preview(self, request: object) -> dict[str, object]:
         input_dir, solvers, timeout, jobs, limit = self._run_options(request)
-        files = self._files(input_dir, limit)
+        all_files = self._files(input_dir, 0)
+        files = all_files if limit == 0 else all_files[:limit]
+        total_file_count = len(all_files)
+        selected_file_count = len(files)
         pairs = len(files) * len(solvers)
         batches = math.ceil(pairs / jobs) if pairs else 0
         history = self._historical_durations()
-        predicted = [history.get((str(path), solver), timeout) for path in files for solver in solvers]
+        predicted: list[float] = []
+        historical_pairs = 0
+        for path in files:
+            file_name = str(path)
+            for solver in solvers:
+                key = (file_name, solver)
+                duration = history.get(key)
+                if duration is None:
+                    predicted.append(timeout)
+                else:
+                    historical_pairs += 1
+                    predicted.append(duration)
         estimated_seconds = self._scheduled_duration(predicted, jobs)
         watchdog_seconds = timeout + max(15.0, timeout * 0.5)
         return {
             "input": str(input_dir),
-            "file_count": len(files),
-            "input_valid": bool(files),
-            "input_error": "" if files else f"no .smt2 files found in {input_dir}",
+            # Keep the total benchmark-set size separate from the limit-bounded
+            # selection used for scheduling and runtime estimation.
+            "file_count": total_file_count,
+            "total_file_count": total_file_count,
+            "selected_file_count": selected_file_count,
+            "input_valid": bool(all_files),
+            "input_error": "" if all_files else f"no .smt2 files found in {input_dir}",
             "solvers": solvers,
             "estimated_seconds": estimated_seconds,
             "worst_case_seconds": batches * watchdog_seconds,
-            "historical_pairs": sum((str(path), solver) in history for path in files for solver in solvers),
-            "fallback_pairs": pairs - sum((str(path), solver) in history for path in files for solver in solvers),
+            "historical_pairs": historical_pairs,
+            "fallback_pairs": pairs - historical_pairs,
         }
 
     def launch(self, request: object) -> dict[str, object]:
@@ -281,8 +390,6 @@ class ExperimentManager:
         if not RUN_NAME.fullmatch(run_id):
             raise ValueError("name may contain only letters, digits, '.', '_' and '-'")
         output_dir = self.results_root / run_id
-        if output_dir.exists() or run_id in self.processes:
-            raise ValueError(f"experiment already exists: {run_id}")
 
         input_dir, solvers, timeout, jobs, limit = self._run_options(request)
         if not self._files(input_dir, limit):
@@ -310,18 +417,131 @@ class ExperimentManager:
         for solver in solvers:
             command.extend(("--solver", solver))
         controller_log = self.results_root / f".{run_id}.controller.log"
-        with controller_log.open("w", encoding="utf-8") as log_handle:
-            process = subprocess.Popen(
-                command,
-                cwd=self.host_cwd,
-                stdin=subprocess.DEVNULL,
-                stdout=log_handle,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-                text=True,
+        with self._process_lock:
+            if output_dir.exists() or self._managed_process_alive(run_id):
+                raise ValueError(f"experiment already exists: {run_id}")
+            with controller_log.open("w", encoding="utf-8") as log_handle:
+                process = subprocess.Popen(
+                    command,
+                    cwd=self.host_cwd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_handle,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                    text=True,
+                )
+            self.processes[run_id] = process
+        warning = ""
+        try:
+            self._save_last_run(
+                {
+                    "input": str(input_dir),
+                    "solvers": solvers,
+                    "timeout": timeout,
+                    "jobs": jobs,
+                    "limit": limit,
+                }
             )
-        self.processes[run_id] = process
-        return {"run_id": run_id, "status": "starting"}
+        except OSError as exc:
+            warning = f"experiment started, but the last-run form could not be saved: {exc}"
+        return {"run_id": run_id, "status": "starting", "warning": warning}
+
+    def cancel_run(self, run_id: str) -> dict[str, object]:
+        """Gracefully interrupt a running experiment by signalling its batch process.
+
+        The run controller marks progress.json as interrupted and lets the small
+        number of in-flight solver jobs drain, preserving their results. The pid
+        comes from the ``.run.pid`` file written by the run process, so cancelling
+        works even after the dashboard itself restarted.
+        """
+        run_dir = self._run_dir(run_id)
+        pid = _read_run_pid(run_dir / ".run.pid")
+        if pid is None:
+            # The run may still be initializing before it writes its pid file; fall back
+            # to the process handle this dashboard itself launched.
+            with self._process_lock:
+                process = self.processes.get(run_id)
+                if process is not None and process.poll() is None:
+                    pid = process.pid
+        if pid is None:
+            raise ValueError("experiment has no active run process")
+        try:
+            os.kill(pid, signal.SIGINT)
+        except ProcessLookupError:
+            raise ValueError("run process has already exited") from None
+        return {"run_id": run_id, "status": "interrupting"}
+
+    def resume(self, run_id: str, request: object) -> dict[str, object]:
+        """Relaunch an interrupted or failed run, rerunning only its missing jobs."""
+        if not isinstance(request, dict):
+            raise ValueError("request body must be a JSON object")
+        run_dir = self._run_dir(run_id)
+        try:
+            initial_status = self._progress(run_id).get("status")
+        except ValueError as exc:
+            raise ValueError(f"unable to read experiment progress: {exc}") from None
+        if initial_status == "complete":
+            raise ValueError("experiment is already complete")
+        metadata = _metadata(run_dir / "metadata.txt")
+        solvers = [name for name in (metadata.get("solvers") or "").split(",") if name]
+        if not solvers:
+            raise ValueError("no solver list recorded in experiment metadata")
+        try:
+            timeout = float(metadata.get("timeout") or "")
+        except ValueError:
+            raise ValueError("experiment metadata has an invalid timeout") from None
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("experiment metadata has no valid timeout")
+        jobs = self._nonnegative_int(request.get("jobs"), "jobs")
+        if jobs == 0:
+            raise ValueError("jobs must be a positive integer")
+        log = metadata.get("log", "all")
+        if log not in {"all", "fail", "none"}:
+            raise ValueError("experiment metadata has an invalid log policy")
+
+        command = [
+            sys.executable,
+            "-m",
+            "smtbatch",
+            "run",
+            "--resume",
+            "--output",
+            str(run_dir),
+            "--jobs",
+            str(jobs),
+            "--log",
+            log,
+        ]
+        controller_log = self.results_root / f".{run_id}.controller.log"
+        with self._process_lock:
+            if (
+                self._managed_process_alive(run_id)
+                or _read_run_pid(run_dir / ".run.pid") is not None
+                or _run_lock_held(run_dir / ".run.lock")
+            ):
+                raise ValueError("experiment is still running")
+            try:
+                status = self._progress(run_id).get("status")
+            except ValueError as exc:
+                raise ValueError(f"unable to read experiment progress: {exc}") from None
+            if status == "complete":
+                raise ValueError("experiment is already complete")
+            # A running/starting/cancelling snapshot without a live controller is stale
+            # state left by an ungraceful exit and is therefore safe to resume.
+            with controller_log.open("a", encoding="utf-8") as log_handle:
+                log_handle.write(f"\n[dashboard] resume requested at {datetime.now(timezone.utc).isoformat()}\n")
+                log_handle.flush()
+                process = subprocess.Popen(
+                    command,
+                    cwd=self.host_cwd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_handle,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                    text=True,
+                )
+            self.processes[run_id] = process
+        return {"run_id": run_id, "status": "resuming"}
 
     @staticmethod
     def _scheduled_duration(durations: list[float], workers: int) -> float:
@@ -375,12 +595,12 @@ class ExperimentManager:
         try:
             jobs_stat = jobs_path.stat()
             results_stat = results_path.stat()
-            progress_mtime = progress_path.stat().st_mtime
-            cache_key: tuple[float, float, int, float] | None = (
-                jobs_stat.st_mtime,
-                results_stat.st_mtime,
+            progress_stat = progress_path.stat()
+            cache_key: tuple[int, int, int, int] | None = (
+                jobs_stat.st_mtime_ns,
+                results_stat.st_mtime_ns,
                 results_stat.st_size,
-                progress_mtime,
+                progress_stat.st_mtime_ns,
             )
         except OSError:
             cache_key = None
@@ -612,7 +832,7 @@ class ExperimentManager:
         progress_path = run_dir / "progress.json"
         metadata_path = run_dir / "metadata.txt"
         try:
-            cache_key = (progress_path.stat().st_mtime, metadata_path.stat().st_mtime)
+            cache_key = (progress_path.stat().st_mtime_ns, metadata_path.stat().st_mtime_ns)
         except OSError as exc:
             raise ValueError(f"unable to read experiment progress: {exc}") from None
         cached = self._progress_cache.get(run_id)
@@ -665,7 +885,7 @@ class ExperimentManager:
         return export_path
 
 
-_RUN_CACHE: dict[Path, tuple[float, dict[str, Any]]] = {}
+_RUN_CACHE: dict[Path, tuple[tuple[int, int], dict[str, Any]]] = {}
 
 
 def scan_runs(results_root: Path) -> list[dict[str, Any]]:
@@ -680,11 +900,12 @@ def scan_runs(results_root: Path) -> list[dict[str, Any]]:
             continue
         progress_path = Path(dirpath) / "progress.json"
         try:
-            mtime = progress_path.stat().st_mtime
+            stat = progress_path.stat()
+            signature = (stat.st_mtime_ns, stat.st_size)
         except OSError:
             continue
         cached = _RUN_CACHE.get(progress_path)
-        if cached is not None and cached[0] == mtime:
+        if cached is not None and cached[0] == signature:
             runs.append(cached[1])
             continue
         run_dir = progress_path.parent
@@ -705,7 +926,7 @@ def scan_runs(results_root: Path) -> list[dict[str, Any]]:
         payload["run_id"] = run_id
         if len(_RUN_CACHE) > 512:
             _RUN_CACHE.clear()
-        _RUN_CACHE[progress_path] = (mtime, payload)
+        _RUN_CACHE[progress_path] = (signature, payload)
         runs.append(payload)
     return sorted(runs, key=lambda item: str(item.get("updated_at") or ""), reverse=True)
 
@@ -759,7 +980,7 @@ def handler_factory(manager: ExperimentManager) -> type[BaseHTTPRequestHandler]:
                     {
                         "generated_at": datetime.now(timezone.utc).isoformat(),
                         "results_root": str(resolved_results),
-                        "runs": scan_runs(resolved_results),
+                        "runs": manager.runs(),
                     }
                 )
                 return
@@ -882,6 +1103,27 @@ def handler_factory(manager: ExperimentManager) -> type[BaseHTTPRequestHandler]:
                     return
                 self._send_json(response, HTTPStatus.CREATED)
                 return
+            match = re.fullmatch(r"/api/runs/(.+)/cancel", request_path)
+            if match:
+                try:
+                    response = manager.cancel_run(match.group(1))
+                except ValueError as exc:
+                    self._send_json({"error": str(exc)}, HTTPStatus.CONFLICT)
+                    return
+                self._send_json(response)
+                return
+            match = re.fullmatch(r"/api/runs/(.+)/resume", request_path)
+            if match:
+                try:
+                    response = manager.resume(match.group(1), self._read_json())
+                except ValueError as exc:
+                    self._send_json({"error": str(exc)}, HTTPStatus.CONFLICT)
+                    return
+                except OSError as exc:
+                    self._send_json({"error": f"unable to start resume: {exc}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+                    return
+                self._send_json(response, HTTPStatus.ACCEPTED)
+                return
             match = re.fullmatch(r"/api/runs/(.+)/export", request_path)
             if match:
                 try:
@@ -925,6 +1167,51 @@ def _read_pid(path: Path) -> int | None:
     if completed.returncode != 0 or "smtbatch" not in completed.stdout:
         return None
     return pid
+
+
+def _read_run_pid(path: Path) -> int | None:
+    """Read the batch controller pid from an experiment's ``.run.pid`` file."""
+    try:
+        pid = int(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+    if pid <= 0:
+        return None
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return None
+    # Guard against pid reuse: only accept processes running a smtbatch run controller.
+    completed = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "command="],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0 or "smtbatch" not in completed.stdout:
+        return None
+    if " run " not in f" {completed.stdout} ":
+        return None
+    return pid
+
+
+def _run_lock_held(path: Path) -> bool:
+    """Check the crash-safe controller lock without relying on a pid or process name."""
+    if not path.is_file():
+        return False
+    try:
+        handle = path.open("a+", encoding="utf-8")
+    except OSError:
+        return False
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return False
+    finally:
+        handle.close()
 
 
 def _stop_process(pid: int, timeout: float = 5.0) -> None:
@@ -1034,6 +1321,7 @@ def status_background(args: argparse.Namespace) -> int:
 
 def foreground(args: argparse.Namespace) -> int:
     inputs_root, results_root = resolve_roots(args)
+    results_root.mkdir(parents=True, exist_ok=True)
     manager = ExperimentManager(results_root, inputs_root, Path.cwd())
     server = ThreadingHTTPServer((args.host, args.port), handler_factory(manager))
     url = f"http://{args.host}:{args.port}/"
@@ -1049,6 +1337,11 @@ def foreground(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    try:
+        args.port = _resolve_port(args)
+    except (OSError, RuntimeError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     if not 1 <= args.port <= 65535:
         print("error: --port must be between 1 and 65535")
         return 2

@@ -25,6 +25,7 @@ wins, so no environment variable is ever needed.
 [defaults]
 inputs = "benchmarks"    # default benchmark root, relative to the config file
 results = "results"      # default results root, relative to the config file
+port = 8000              # dashboard port (optional)
 
 [solvers.my-solver]
 label = "My solver"             # optional label shown in the dashboard
@@ -54,6 +55,7 @@ all resolve from the project's `smtbatch.toml`:
 
 ```bash
 smtbatch run --solver my-solver --solver another-solver --input benchmarks --output results/baseline --timeout 30 --jobs 8
+smtbatch run --resume --output results/baseline --jobs 8
 
 smtbatch serve            # start the dashboard in the background (default)
 smtbatch serve restart    # stop, then start (use after upgrades)
@@ -66,7 +68,15 @@ smtbatch export results/baseline --output exports/baseline.xlsx
 
 The dashboard lives at <http://127.0.0.1:8000/>. Experiments submitted from the
 page run in independent background sessions; closing the browser does not stop
-them. Options: `--host`, `--port`, `--inputs-root`, `--results`.
+them. Running experiments can be cancelled after their in-flight jobs drain,
+and interrupted, failed, or stale runs can be resumed from their durable queue.
+Options: `--host`, `--port`, `--inputs-root`, `--results`. An explicit `--port`
+overrides `[defaults] port`.
+
+Resume treats `jobs.tsv` as immutable and accepts only complete result rows that
+match it exactly. It also verifies the recorded solver binary hash and, for new
+runs, the command template before appending results. A per-run OS lock prevents
+concurrent controllers from writing the same result stream.
 
 Select a run from the history to load its separate report page. The report
 loads its summary first; scatter data and server-paginated formula rows load
@@ -74,5 +84,7 @@ only when requested, keeping large experiments responsive.
 
 Every run directory contains `jobs.tsv` (immutable queue), `results.tsv`
 (streaming results), `progress.json` (live progress), `metadata.txt`
-(provenance), and `logs/` (one output file per job, kept for debugging). The
-Excel export contains only log paths.
+(immutable initial provenance), and `logs/` (one output file per job, kept for
+debugging). Resumed runs additionally contain append-only
+`resume_history.jsonl`, preserving each resume attempt and its worker count.
+The Excel export contains only log paths.

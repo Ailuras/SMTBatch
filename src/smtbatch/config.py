@@ -9,6 +9,7 @@ Config schema:
     [defaults]
     inputs = "benchmarks"     # default benchmark root, relative to the config file
     results = "results"       # default results root, relative to the config file
+    port = 8000               # optional dashboard port
 
     [solvers.my-solver]
     label = "My solver"             # optional label shown in the dashboard
@@ -70,6 +71,7 @@ class Config:
     solvers: dict[str, SolverSpec]
     inputs_root: Path
     results_root: Path
+    port: int = 8000
 
     @property
     def solver_options(self) -> tuple[dict[str, str], ...]:
@@ -108,7 +110,16 @@ def load_config(start: Path | None = None) -> Config:
         raise RuntimeError(f"[defaults] must be a table in {path}")
     inputs_root = _resolve_root(defaults.get("inputs", "benchmarks"), path)
     results_root = _resolve_root(defaults.get("results", "results"), path)
-    return Config(path.resolve(), solvers, inputs_root, results_root)
+    return Config(path.resolve(), solvers, inputs_root, results_root, _parse_port(defaults.get("port", 8000), path))
+
+
+def _parse_port(value: object, path: Path) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise RuntimeError(f"[defaults] port must be an integer in {path}")
+    port = value
+    if not 1 <= port <= 65535:
+        raise RuntimeError(f"[defaults] port must be between 1 and 65535 in {path}")
+    return port
 
 
 def _resolve_root(value: object, config_path: Path) -> Path:
