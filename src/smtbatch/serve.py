@@ -12,6 +12,7 @@ import argparse
 import csv
 import fcntl
 import heapq
+import itertools
 import json
 import math
 import mimetypes
@@ -854,19 +855,31 @@ class ExperimentManager:
         assert isinstance(solvers, list)
         if state not in {"all", "pending", "consistent", "conflict", "hard", "error", "other"}:
             raise ValueError("invalid formula state")
+        settings = data["progress"].get("settings") or {}
+        try:
+            timeout = float(settings.get("timeout") or "")
+        except (TypeError, ValueError):
+            timeout = math.nan
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("experiment metadata has no valid timeout")
         cases = [case for case in data["cases"] if isinstance(case, dict) and (state == "all" or case.get("state") == state)]
         by_solver: dict[str, dict[str, object]] = {
             solver: {
                 "completed": 0,
                 "solved": 0,
+                "sat_seconds": 0.0,
+                "unsat_seconds": 0.0,
+                "unique_solved": 0,
                 "outcomes": {result: 0 for result in ("sat", "unsat", "unknown", "timeout", "error")},
                 "cactus": [],
             }
             for solver in solvers
         }
+        solved_times_by_solver: dict[str, list[float]] = {solver: [] for solver in solvers}
         for case in cases:
             results = case["results"]
             assert isinstance(results, dict)
+            solved_solvers: set[str] = set()
             for solver in solvers:
                 result = results.get(solver)
                 if not isinstance(result, dict):
@@ -877,26 +890,41 @@ class ExperimentManager:
                 summary = by_solver[solver]
                 outcomes = summary["outcomes"]
                 assert isinstance(outcomes, dict)
-                summary["completed"] = int(summary["completed"]) + 1
-                outcomes[label] = int(outcomes[label]) + 1
+                summary["completed"] += 1
+                outcomes[label] += 1
                 value = result.get("time")
                 if isinstance(value, (int, float)) and math.isfinite(value) and value >= 0:
+                    if label == "sat":
+                        summary["sat_seconds"] += value
+                    elif label == "unsat":
+                        summary["unsat_seconds"] += value
                     if label in {"sat", "unsat"}:
-                        summary["solved"] = int(summary["solved"]) + 1
+                        summary["solved"] += 1
+                        solved_solvers.add(solver)
+                        solved_times_by_solver[solver].append(value)
+            if len(solved_solvers) == 1:
+                unique_solver = next(iter(solved_solvers))
+                by_solver[unique_solver]["unique_solved"] += 1
         for solver, summary in by_solver.items():
-            solved_times = sorted(
-                float(case["results"][solver]["time"])
-                for case in cases
-                if isinstance(case["results"], dict)
-                and isinstance(case["results"].get(solver), dict)
-                and case["results"][solver].get("result") in {"sat", "unsat"}
-                and isinstance(case["results"][solver].get("time"), (int, float))
-            )
-            elapsed = 0.0
+            outcomes = summary["outcomes"]
+            solved_count = summary["solved"]
+            sat_count = outcomes["sat"]
+            unsat_count = outcomes["unsat"]
+            solved_seconds = summary["sat_seconds"] + summary["unsat_seconds"]
+            summary["avg_solved_seconds"] = round(solved_seconds / solved_count, 3) if solved_count else None
+            summary["avg_sat_seconds"] = round(summary["sat_seconds"] / sat_count, 3) if sat_count else None
+            summary["avg_unsat_seconds"] = round(summary["unsat_seconds"] / unsat_count, 3) if unsat_count else None
+            solved_times = sorted(solved_times_by_solver[solver])
+            limit = timeout
             cactus: list[dict[str, float]] = []
-            for count, duration in enumerate(solved_times, start=1):
-                elapsed += duration
-                cactus.append({"time": round(elapsed, 3), "solved": count})
+            seen = 0
+            for duration, group in itertools.groupby(solved_times):
+                if duration > limit:
+                    break
+                seen += sum(1 for _ in group)
+                cactus.append({"time": round(duration, 3), "solved": seen})
+            if not cactus or cactus[-1]["time"] < limit:
+                cactus.append({"time": round(limit, 3), "solved": seen})
             summary["cactus"] = cactus
         return {
             "run_id": run_id,
@@ -905,6 +933,7 @@ class ExperimentManager:
             "case_count": len(cases),
             "completed_pairs": sum(int(case["done"]) for case in cases),
             "solvers": solvers,
+            "timeout": timeout,
             "by_solver": by_solver,
         }
 
@@ -945,8 +974,8 @@ class ExperimentManager:
         data = self._run_data(run_id)
         solvers = data["solvers"]
         assert isinstance(solvers, list)
-        if left not in solvers or right not in solvers or left == right:
-            raise ValueError("choose two different solvers from this run")
+        if left not in solvers or right not in solvers:
+            raise ValueError("choose two solvers from this run")
         if state not in {"all", "pending", "consistent", "conflict", "hard", "error", "other"}:
             raise ValueError("invalid formula state")
         points: list[dict[str, object]] = []

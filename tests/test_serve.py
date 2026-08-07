@@ -80,6 +80,103 @@ command = ["{binary}", "{input}"]
         self.assertEqual(page["total"], 1)
         self.assertEqual(page["cases"][0]["state"], "other")
 
+    def test_report_summary_cactus_uses_time_budget(self) -> None:
+        run_dir = self.results / "cactus-run"
+        run_dir.mkdir()
+        files = {index: self.inputs / f"case-{index}.smt2" for index in range(4)}
+        for path in files.values():
+            path.write_text("(check-sat)\n", encoding="utf-8")
+        rows = [
+            (1, "alpha", files[0], "sat", "2.0"),
+            (2, "beta", files[0], "timeout", "30.0"),
+            (3, "alpha", files[1], "sat", "8.0"),
+            (4, "beta", files[1], "sat", "15.0"),
+            (5, "alpha", files[2], "sat", "8.0"),
+            (6, "beta", files[2], "unknown", "1.0"),
+            (7, "alpha", files[3], "timeout", "30.0"),
+            (8, "beta", files[3], "error", "0.5"),
+        ]
+        (run_dir / "jobs.tsv").write_text(
+            "job_id\tsolver\tfile\n"
+            + "\n".join(f"{job_id}\t{solver}\t{file}" for job_id, solver, file, _, _ in rows)
+            + "\n",
+            encoding="utf-8",
+        )
+        (run_dir / "results.tsv").write_text(
+            "job_id\tsolver\tfile\tresult\ttime\tcode\toutput_path\n"
+            + "\n".join(
+                f"{job_id}\t{solver}\t{file}\t{result}\t{time}\t0\t"
+                for job_id, solver, file, result, time in rows
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (run_dir / "progress.json").write_text(
+            json.dumps(
+                {
+                    "status": "complete",
+                    "updated_at": "2026-01-01T00:00:00+00:00",
+                    "total_jobs": 8,
+                    "completed_jobs": 8,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (run_dir / "metadata.txt").write_text("solvers=alpha,beta\ntimeout=30\njobs=2\nlog=all\n", encoding="utf-8")
+        summary = self.manager.report_summary("cactus-run", "all")
+        self.assertEqual(summary["timeout"], 30.0)
+        alpha = summary["by_solver"]["alpha"]
+        beta = summary["by_solver"]["beta"]
+        self.assertEqual(
+            alpha["cactus"],
+            [{"time": 2.0, "solved": 1}, {"time": 8.0, "solved": 3}, {"time": 30.0, "solved": 3}],
+        )
+        self.assertEqual(beta["cactus"], [{"time": 15.0, "solved": 1}, {"time": 30.0, "solved": 1}])
+        self.assertEqual(alpha["solved"], 3)
+        self.assertEqual(alpha["unique_solved"], 2)
+        self.assertEqual(alpha["avg_solved_seconds"], 6.0)
+        self.assertEqual(alpha["avg_sat_seconds"], 6.0)
+        self.assertIsNone(alpha["avg_unsat_seconds"])
+        self.assertEqual(beta["solved"], 1)
+        self.assertEqual(beta["unique_solved"], 0)
+        self.assertEqual(beta["avg_solved_seconds"], 15.0)
+
+    def test_report_summary_single_solver(self) -> None:
+        run_dir = self.results / "single-solver-run"
+        run_dir.mkdir()
+        formula = self.inputs / "only.smt2"
+        formula.write_text("(check-sat)\n", encoding="utf-8")
+        (run_dir / "jobs.tsv").write_text(f"job_id\tsolver\tfile\n1\talpha\t{formula}\n", encoding="utf-8")
+        (run_dir / "results.tsv").write_text(
+            "job_id\tsolver\tfile\tresult\ttime\tcode\toutput_path\n"
+            f"1\talpha\t{formula}\tunsat\t3.5\t0\t\n",
+            encoding="utf-8",
+        )
+        (run_dir / "progress.json").write_text(
+            json.dumps(
+                {
+                    "status": "complete",
+                    "updated_at": "2026-01-01T00:00:00+00:00",
+                    "total_jobs": 1,
+                    "completed_jobs": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (run_dir / "metadata.txt").write_text("solvers=alpha\ntimeout=30\njobs=1\nlog=all\n", encoding="utf-8")
+        summary = self.manager.report_summary("single-solver-run", "all")
+        alpha = summary["by_solver"]["alpha"]
+        self.assertEqual(alpha["solved"], 1)
+        self.assertEqual(alpha["unique_solved"], 1)
+        self.assertEqual(alpha["avg_solved_seconds"], 3.5)
+        self.assertEqual(alpha["avg_unsat_seconds"], 3.5)
+        self.assertIsNone(alpha["avg_sat_seconds"])
+        self.assertEqual(alpha["cactus"], [{"time": 3.5, "solved": 1}, {"time": 30.0, "solved": 1}])
+        scatter = self.manager.report_scatter("single-solver-run", "alpha", "alpha", "all")
+        self.assertEqual(scatter["total_points"], 1)
+        self.assertEqual(scatter["points"][0]["x"], 3.5)
+        self.assertEqual(scatter["points"][0]["y"], 3.5)
+
     def test_formula_pagination_and_scatter_are_bounded(self) -> None:
         page = self.manager.report_formulas("sample-run", "sample", "all", 1, 1)
         self.assertEqual(page["total"], 1)
