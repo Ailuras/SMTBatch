@@ -23,6 +23,7 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -32,7 +33,14 @@ from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from .config import Config, find_config_path, load_config
-from .task import RESULT_FIELDS, classify_consistency, load_jobs, result_label
+from .task import (
+    RESULT_FIELDS,
+    VALID_TASK_RESULTS,
+    classify_consistency,
+    load_jobs,
+    result_label,
+    summarize_performance,
+)
 
 
 RUN_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}")
@@ -116,6 +124,53 @@ def _data_url(path: object, results_root: Path) -> str:
     return "/data/" + quote(relative.as_posix())
 
 
+@dataclass
+class _PerformanceTotals:
+    completed_jobs: int = 0
+    solved_jobs: int = 0
+    solved_seconds: float = 0.0
+    par2_seconds: float = 0.0
+
+    def summary(self) -> dict[str, object]:
+        return summarize_performance(
+            self.completed_jobs,
+            self.solved_jobs,
+            self.solved_seconds,
+            self.par2_seconds,
+        )
+
+
+@dataclass
+class _MetricsState:
+    """Incremental reader state for a run created by an older batch process."""
+
+    identity: tuple[int, int]
+    timeout: float
+    expected_jobs: dict[int, tuple[str, str]]
+    offset: int = 0
+    tail: bytes = b""
+    record_buffer: bytes = b""
+    in_quotes: bool = False
+    header_seen: bool = False
+    invalid: bool = False
+    completed_ids: set[int] = field(default_factory=set)
+    by_solver: dict[str, _PerformanceTotals] = field(default_factory=dict)
+
+    def payload(self) -> dict[str, object]:
+        aggregate = _PerformanceTotals()
+        for totals in self.by_solver.values():
+            aggregate.completed_jobs += totals.completed_jobs
+            aggregate.solved_jobs += totals.solved_jobs
+            aggregate.solved_seconds += totals.solved_seconds
+            aggregate.par2_seconds += totals.par2_seconds
+        return {
+            "performance": aggregate.summary(),
+            "by_solver_performance": {
+                solver: totals.summary() for solver, totals in self.by_solver.items()
+            },
+        }
+
+
 class ExperimentManager:
     """Validate local UI requests and launch the regular batch CLI without a shell."""
 
@@ -131,6 +186,8 @@ class ExperimentManager:
         self._progress_cache: dict[str, tuple[tuple[int, int], dict[str, object]]] = {}
         self._run_cache: dict[str, tuple[tuple[int, int, int, int], dict[str, object]]] = {}
         self._history_cache: tuple[float, dict[tuple[str, str], float]] | None = None
+        self._metrics_lock = threading.Lock()
+        self._metrics_cache: dict[str, _MetricsState] = {}
 
     def _solver_config(self) -> Config:
         """Return the current project config, reloading it when TOML changes."""
@@ -235,6 +292,108 @@ class ExperimentManager:
         run_dir = self._run_dir(run_id)
         return _read_run_pid(run_dir / ".run.pid") is not None or _run_lock_held(run_dir / ".run.lock")
 
+    @staticmethod
+    def _update_quote_state(state: _MetricsState, data: bytes) -> None:
+        index = 0
+        while index < len(data):
+            if data[index] != ord('"'):
+                index += 1
+                continue
+            if state.in_quotes and index + 1 < len(data) and data[index + 1] == ord('"'):
+                index += 2
+                continue
+            state.in_quotes = not state.in_quotes
+            index += 1
+
+    @staticmethod
+    def _consume_metrics_record(state: _MetricsState, record: bytes) -> None:
+        try:
+            decoded = record.rstrip(b"\r").decode("utf-8")
+            row = next(csv.reader([decoded], delimiter="\t", strict=True))
+        except (UnicodeDecodeError, csv.Error, StopIteration):
+            state.invalid = True
+            return
+        if not state.header_seen:
+            state.header_seen = True
+            if row != RESULT_FIELDS:
+                state.invalid = True
+            return
+        if len(row) != len(RESULT_FIELDS):
+            state.invalid = True
+            return
+        values = dict(zip(RESULT_FIELDS, row, strict=True))
+        try:
+            job_id = int(values["job_id"])
+            duration = float(values["time"])
+        except ValueError:
+            state.invalid = True
+            return
+        expected = state.expected_jobs.get(job_id)
+        result = values["result"].lower()
+        if (
+            expected is None
+            or job_id in state.completed_ids
+            or expected != (values["solver"], values["file"])
+            or result not in VALID_TASK_RESULTS
+            or not math.isfinite(duration)
+            or duration < 0
+        ):
+            state.invalid = True
+            return
+        state.completed_ids.add(job_id)
+        totals = state.by_solver.setdefault(values["solver"], _PerformanceTotals())
+        totals.completed_jobs += 1
+        if result in {"sat", "unsat"}:
+            totals.solved_jobs += 1
+            totals.solved_seconds += duration
+            totals.par2_seconds += duration
+        else:
+            totals.par2_seconds += 2 * state.timeout
+
+    def _incremental_run_metrics(self, run_id: str) -> dict[str, object] | None:
+        """Backfill metrics once, then consume only bytes appended by an old runner."""
+        run_dir = self._run_dir(run_id)
+        results_path = run_dir / "results.tsv"
+        with self._metrics_lock:
+            try:
+                with results_path.open("rb") as handle:
+                    stat = os.fstat(handle.fileno())
+                    identity = (stat.st_dev, stat.st_ino)
+                    state = self._metrics_cache.get(run_id)
+                    if state is None or state.identity != identity or stat.st_size < state.offset:
+                        metadata = _metadata(run_dir / "metadata.txt")
+                        timeout = float(metadata.get("timeout") or "")
+                        if not math.isfinite(timeout) or timeout <= 0:
+                            return None
+                        jobs = load_jobs(run_dir / "jobs.tsv")
+                        state = _MetricsState(
+                            identity,
+                            timeout,
+                            {job.job_id: (job.solver, str(job.file_path)) for job in jobs},
+                        )
+                        self._metrics_cache[run_id] = state
+                    if state.invalid:
+                        return None
+                    handle.seek(state.offset)
+                    data = state.tail + handle.read()
+                    state.offset = handle.tell()
+            except (OSError, UnicodeError, ValueError, csv.Error):
+                return None
+
+            physical_lines = data.split(b"\n")
+            state.tail = physical_lines.pop()
+            for physical_line in physical_lines:
+                state.record_buffer += physical_line
+                self._update_quote_state(state, physical_line)
+                if state.in_quotes:
+                    state.record_buffer += b"\n"
+                    continue
+                self._consume_metrics_record(state, state.record_buffer)
+                state.record_buffer = b""
+                if state.invalid:
+                    return None
+            return state.payload() if state.header_seen else None
+
     def runs(self) -> list[dict[str, Any]]:
         """Return history with stale active states repaired from actual process liveness."""
         self._reap_managed_processes()
@@ -251,6 +410,12 @@ class ExperimentManager:
             elif live and status in {"interrupted", "failed"}:
                 # A resume child can be live briefly before it publishes its first snapshot.
                 run["status"] = "starting"
+            if not isinstance(run.get("performance"), dict) and (
+                live or run_id in self._metrics_cache
+            ):
+                metrics = self._incremental_run_metrics(run_id)
+                if metrics is not None:
+                    run.update(metrics)
             normalized.append(run)
         return normalized
 

@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 from .config import Config, SolverSpec, load_config
-from .task import RESULT_FIELDS, JobSpec, load_jobs, write_jobs
+from .task import RESULT_FIELDS, JobSpec, load_jobs, summarize_performance, write_jobs
 
 
 RESULT_ORDER = ("sat", "unsat", "unknown", "timeout", "error")
@@ -65,6 +65,7 @@ class ProgressTracker:
     total_jobs: int
     refresh_seconds: float
     recent_limit: int
+    timeout: float = 0.0
     started_monotonic: float = field(default_factory=time.monotonic)
     started_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     status: str = "running"
@@ -72,11 +73,15 @@ class ProgressTracker:
     running: dict[int, JobSpec] = field(default_factory=dict)
     outcomes: Counter[str] = field(default_factory=Counter)
     by_solver: dict[str, Counter[str]] = field(default_factory=dict)
+    solved_seconds: dict[str, float] = field(default_factory=dict)
+    par2_seconds: dict[str, float] = field(default_factory=dict)
     recent_errors: deque[dict[str, object]] = field(default_factory=deque)
     _last_render: float = 0.0
 
     def __post_init__(self) -> None:
         self.by_solver = {solver: Counter() for solver in self.solvers}
+        self.solved_seconds = {solver: 0.0 for solver in self.solvers}
+        self.par2_seconds = {solver: 0.0 for solver in self.solvers}
         self.recent_errors = deque(maxlen=self.recent_limit)
 
     @property
@@ -91,6 +96,11 @@ class ProgressTracker:
         self.completed_jobs += 1
         self.outcomes[result.result] += 1
         self.by_solver[result.job.solver][result.result] += 1
+        if result.result in {"sat", "unsat"}:
+            self.solved_seconds[result.job.solver] += result.duration_sec
+            self.par2_seconds[result.job.solver] += result.duration_sec
+        else:
+            self.par2_seconds[result.job.solver] += 2 * self.timeout
         record = {
             "job_id": result.job.job_id,
             "solver": result.job.solver,
@@ -105,6 +115,17 @@ class ProgressTracker:
 
     def snapshot(self) -> dict[str, object]:
         elapsed = time.monotonic() - self.started_monotonic
+        by_solver_performance = {}
+        for solver, counts in self.by_solver.items():
+            completed = sum(counts.values())
+            solved = counts["sat"] + counts["unsat"]
+            by_solver_performance[solver] = summarize_performance(
+                completed,
+                solved,
+                self.solved_seconds[solver],
+                self.par2_seconds[solver],
+            )
+        solved_jobs = self.outcomes["sat"] + self.outcomes["unsat"]
         return {
             "format": "pair-queue-progress-v1",
             "output_dir": str(self.output_dir),
@@ -118,6 +139,13 @@ class ProgressTracker:
             "pending_jobs": self.pending_jobs,
             "outcomes": dict(self.outcomes),
             "by_solver": {solver: dict(counts) for solver, counts in self.by_solver.items()},
+            "performance": summarize_performance(
+                self.completed_jobs,
+                solved_jobs,
+                sum(self.solved_seconds.values()),
+                sum(self.par2_seconds.values()),
+            ),
+            "by_solver_performance": by_solver_performance,
             "recent_errors": list(self.recent_errors),
         }
 
@@ -445,13 +473,22 @@ def _read_metadata(path: Path) -> dict[str, str]:
 def _load_existing_results(
     results_path: Path,
     jobs: Sequence[JobSpec],
-) -> tuple[set[int], Counter[str], dict[str, Counter[str]]]:
+    timeout: float,
+) -> tuple[
+    set[int],
+    Counter[str],
+    dict[str, Counter[str]],
+    dict[str, float],
+    dict[str, float],
+]:
     """Validate and tally a streaming results file against its immutable queue."""
     outcomes: Counter[str] = Counter()
     by_solver: dict[str, Counter[str]] = {}
+    solved_seconds: dict[str, float] = {}
+    par2_seconds: dict[str, float] = {}
     completed: set[int] = set()
     if not results_path.is_file():
-        return completed, outcomes, by_solver
+        return completed, outcomes, by_solver, solved_seconds, par2_seconds
     expected = {job.job_id: job for job in jobs}
     try:
         with results_path.open("r", encoding="utf-8", newline="") as handle:
@@ -489,9 +526,16 @@ def _load_existing_results(
                 completed.add(job_id)
                 outcomes[result] += 1
                 by_solver.setdefault(solver, Counter())[result] += 1
+                solved_seconds.setdefault(solver, 0.0)
+                par2_seconds.setdefault(solver, 0.0)
+                if result in {"sat", "unsat"}:
+                    solved_seconds[solver] += duration
+                    par2_seconds[solver] += duration
+                else:
+                    par2_seconds[solver] += 2 * timeout
     except csv.Error as exc:
         raise ValueError(f"invalid results TSV {results_path}: {exc}") from None
-    return completed, outcomes, by_solver
+    return completed, outcomes, by_solver, solved_seconds, par2_seconds
 
 
 def _resume_config(metadata: dict[str, str]) -> Config:
@@ -577,6 +621,8 @@ class _RunPlan:
     completed_before: int
     outcomes_before: Counter[str]
     by_solver_before: dict[str, Counter[str]]
+    solved_seconds_before: dict[str, float]
+    par2_seconds_before: dict[str, float]
     append_results: bool
 
 
@@ -629,6 +675,8 @@ def _prepare_fresh(args: argparse.Namespace) -> _RunPlan:
         completed_before=0,
         outcomes_before=Counter(),
         by_solver_before={},
+        solved_seconds_before={},
+        par2_seconds_before={},
         append_results=False,
     )
 
@@ -661,7 +709,13 @@ def _prepare_resume(args: argparse.Namespace) -> _RunPlan:
         raise ValueError(f"invalid timeout in metadata: {metadata.get('timeout')!r}") from None
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError(f"missing or invalid timeout in metadata: {timeout}")
-    completed_ids, outcomes_before, by_solver_before = _load_existing_results(output_dir / "results.tsv", jobs)
+    (
+        completed_ids,
+        outcomes_before,
+        by_solver_before,
+        solved_seconds_before,
+        par2_seconds_before,
+    ) = _load_existing_results(output_dir / "results.tsv", jobs, timeout)
     remaining = [job for job in jobs if job.job_id not in completed_ids]
     resumed_at = datetime.now(timezone.utc).isoformat()
     _append_resume_history(
@@ -690,6 +744,8 @@ def _prepare_resume(args: argparse.Namespace) -> _RunPlan:
         completed_before=len(completed_ids),
         outcomes_before=outcomes_before,
         by_solver_before=by_solver_before,
+        solved_seconds_before=solved_seconds_before,
+        par2_seconds_before=par2_seconds_before,
         append_results=(output_dir / "results.tsv").is_file(),
     )
 
@@ -813,12 +869,21 @@ def _main_locked(args: argparse.Namespace) -> int:
         return 2
 
     output_dir = plan.output_dir
-    tracker = ProgressTracker(output_dir, plan.solvers, plan.pair_count, args.progress_interval, args.recent_limit)
+    tracker = ProgressTracker(
+        output_dir,
+        plan.solvers,
+        plan.pair_count,
+        args.progress_interval,
+        args.recent_limit,
+        timeout=plan.timeout,
+    )
     tracker.completed_jobs = plan.completed_before
     tracker.outcomes = Counter(plan.outcomes_before)
     # Merge recovered tallies into the per-solver skeleton so every solver key exists,
     # even when the interrupted run had no recorded results yet.
     tracker.by_solver = {solver: Counter(plan.by_solver_before.get(solver, ())) for solver in plan.solvers}
+    tracker.solved_seconds = {solver: plan.solved_seconds_before.get(solver, 0.0) for solver in plan.solvers}
+    tracker.par2_seconds = {solver: plan.par2_seconds_before.get(solver, 0.0) for solver in plan.solvers}
 
     print(f"[batch] output={output_dir}")
     print(

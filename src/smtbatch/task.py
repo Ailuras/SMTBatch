@@ -36,6 +36,21 @@ CONSISTENCY_TYPES = {
 }
 
 
+def summarize_performance(
+    completed_jobs: int,
+    solved_jobs: int,
+    solved_seconds: float,
+    par2_seconds: float,
+) -> dict[str, object]:
+    """Build the dashboard's aggregate timing metrics from running totals."""
+    return {
+        "completed_jobs": completed_jobs,
+        "solved_jobs": solved_jobs,
+        "average_solved_seconds": round(solved_seconds / solved_jobs, 3) if solved_jobs else None,
+        "par2_seconds": round(par2_seconds / completed_jobs, 3) if completed_jobs else None,
+    }
+
+
 @dataclass(frozen=True)
 class TaskAudit:
     task_id: int

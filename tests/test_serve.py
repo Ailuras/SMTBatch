@@ -213,6 +213,48 @@ command = ["{binary}", "{input}"]
         finally:
             lock.release()
 
+    def test_runs_backfills_old_runner_metrics_incrementally(self) -> None:
+        run_dir = self._interrupted_run("old-runner")
+        results_path = run_dir / "results.tsv"
+        results_path.write_text(
+            "job_id\tsolver\tfile\tresult\ttime\tcode\toutput_path\n"
+            f"1\talpha\t{self.formula}\tsat\t2.0\t0\t\n",
+            encoding="utf-8",
+        )
+        (run_dir / "progress.json").write_text(
+            json.dumps(
+                {
+                    "status": "running",
+                    "updated_at": "2026-01-01T00:00:00+00:00",
+                    "total_jobs": 2,
+                    "completed_jobs": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+        lock = _RunLock(run_dir)
+        lock.acquire()
+        try:
+            first = next(item for item in self.manager.runs() if item["run_id"] == "old-runner")
+            self.assertEqual(first["performance"]["average_solved_seconds"], 2.0)
+            self.assertEqual(first["performance"]["par2_seconds"], 2.0)
+
+            with results_path.open("a", encoding="utf-8") as handle:
+                handle.write(f"2\tbeta\t{self.formula}\terror\t4.0\t1\t\n")
+            second = next(item for item in self.manager.runs() if item["run_id"] == "old-runner")
+            self.assertEqual(
+                second["performance"],
+                {
+                    "completed_jobs": 2,
+                    "solved_jobs": 1,
+                    "average_solved_seconds": 2.0,
+                    "par2_seconds": 31.0,
+                },
+            )
+            self.assertEqual(second["by_solver_performance"]["beta"]["par2_seconds"], 60.0)
+        finally:
+            lock.release()
+
     def test_resume_rejects_zero_or_missing_jobs(self) -> None:
         self._interrupted_run("interrupted-run")
         with self.assertRaisesRegex(ValueError, "positive integer"):

@@ -87,12 +87,14 @@ class ResumeLogicTests(unittest.TestCase):
 
     def test_load_existing_results_counts_partial_results(self) -> None:
         run_dir = self._make_run("partial", completed=2)
-        completed, outcomes, by_solver = _load_existing_results(
-            run_dir / "results.tsv", load_jobs(run_dir / "jobs.tsv")
+        completed, outcomes, by_solver, solved_seconds, par2_seconds = _load_existing_results(
+            run_dir / "results.tsv", load_jobs(run_dir / "jobs.tsv"), 10
         )
         self.assertEqual(completed, {1, 2})
         self.assertEqual(outcomes, Counter({"sat": 2}))
         self.assertEqual(dict(by_solver["alpha"]), {"sat": 2})
+        self.assertEqual(solved_seconds, {"alpha": 1.0})
+        self.assertEqual(par2_seconds, {"alpha": 1.0})
 
     def test_load_existing_results_rejects_truncated_or_mismatched_rows(self) -> None:
         run_dir = self._make_run("corrupt", completed=0)
@@ -106,7 +108,23 @@ class ResumeLogicTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(ValueError, "malformed|does not match"):
-                _load_existing_results(run_dir / "results.tsv", jobs)
+                _load_existing_results(run_dir / "results.tsv", jobs, 10)
+
+    def test_progress_tracker_reports_average_solved_time_and_par2(self) -> None:
+        tracker = ProgressTracker(self.root / "results" / "metrics", ("alpha",), 2, 1.0, 5, timeout=10)
+        tracker.finish(JobResult(JobSpec(1, "alpha", self.formulas[0]), 2.0, "sat", 0, ""), None)
+        tracker.finish(JobResult(JobSpec(2, "alpha", self.formulas[1]), 4.0, "error", 1, ""), None)
+        snapshot = tracker.snapshot()
+        self.assertEqual(
+            snapshot["performance"],
+            {
+                "completed_jobs": 2,
+                "solved_jobs": 1,
+                "average_solved_seconds": 2.0,
+                "par2_seconds": 11.0,
+            },
+        )
+        self.assertEqual(snapshot["by_solver_performance"], {"alpha": snapshot["performance"]})
 
     def test_prepare_resume_selects_only_missing_jobs(self) -> None:
         run_dir = self._make_run("partial", completed=2)
@@ -117,6 +135,8 @@ class ResumeLogicTests(unittest.TestCase):
         self.assertEqual(plan.pair_count, 4)
         self.assertEqual(plan.timeout, 10.0)
         self.assertEqual(plan.log, "all")
+        self.assertEqual(plan.solved_seconds_before, {"alpha": 1.0})
+        self.assertEqual(plan.par2_seconds_before, {"alpha": 1.0})
         self.assertTrue(plan.append_results)
         self.assertEqual(plan.solvers, ("alpha",))
 
@@ -176,10 +196,12 @@ class ResumeLogicTests(unittest.TestCase):
         run_dir = self._make_run("partial", completed=2)
         args = parse_args(["--resume", "--output", str(run_dir), "--jobs", "2", "--log", "all"])
         plan = _prepare_resume(args)
-        tracker = ProgressTracker(run_dir, plan.solvers, plan.pair_count, 1.0, 5)
+        tracker = ProgressTracker(run_dir, plan.solvers, plan.pair_count, 1.0, 5, timeout=plan.timeout)
         tracker.completed_jobs = plan.completed_before
         tracker.outcomes = Counter(plan.outcomes_before)
         tracker.by_solver = {solver: Counter(plan.by_solver_before.get(solver, ())) for solver in plan.solvers}
+        tracker.solved_seconds = dict(plan.solved_seconds_before)
+        tracker.par2_seconds = dict(plan.par2_seconds_before)
         run_queue(
             plan.remaining,
             plan.specs,
@@ -198,6 +220,7 @@ class ResumeLogicTests(unittest.TestCase):
         self.assertEqual(sorted(int(row["job_id"]) for row in rows), [1, 2, 3, 4])
         self.assertEqual(tracker.completed_jobs, 4)
         self.assertEqual(dict(tracker.by_solver["alpha"]), {"sat": 4})
+        self.assertEqual(tracker.snapshot()["performance"]["solved_jobs"], 4)
 
     def test_resume_repairs_missing_final_newline_before_append(self) -> None:
         run_dir = self._make_run("no-newline", completed=0, total=1)
