@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "smtbatch"
 version = "0.1.0"
-description = "Local SMT-LIB batch experiment console: parallel solver queues, live dashboard, Excel export."
+description = "Local SMT-LIB reduction experiment launcher, monitor, and evidence report."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

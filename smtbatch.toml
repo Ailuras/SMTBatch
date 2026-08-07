@@ -1,17 +1,18 @@
-# smtbatch solver configuration. Discovered automatically (nearest
-# smtbatch.toml walking upward from the current directory).
+# Example reduction-only project configuration. Consuming projects keep their
+# own smtbatch.toml, study manifests, benchmarks, and results.
 
 [defaults]
 inputs = "benchmarks"
 results = "results"
-port = 8000
+studies = "scripts/experiments"
+port = 8001
+target_branch = "main"
 
-[solvers.my-solver]
-label = "My solver"
-binary = "/opt/my-solver/bin/my-solver"
-command = ["gtimeout", "--kill-after=1", "{timeout}", "{binary}", "{input}"]
-
-[solvers.another-solver]
-binary = "/opt/another-solver/bin/another-solver"
-command = ["gtimeout", "--kill-after=1", "{timeout}", "{binary}", "{input}"]
-version_args = ["--version"]
+[reducers.example]
+label = "Example reducer"
+version = "local"
+strategy = "default"
+evidence_level = "none"
+acceptance = "serial-inferred"
+stats = "none"
+command = ["/opt/example-reducer", "{input}", "{output}", "{predicate}"]

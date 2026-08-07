@@ -1,35 +1,31 @@
-"""Unified command-line entry point for smtbatch.
+"""Reduction-only SMTBatch command line.
 
-Examples:
-    smtbatch run --solver my-solver --input benchmarks --output results/demo
+Commands:
     smtbatch serve
-    smtbatch export results/demo --output exports/demo.xlsx
-    smtbatch collect --consistency hard --prefix benchmarks --output selected
+    smtbatch reduce prepare STUDY --output RESULTS --reducers ID... [--timeout S] [--jobs N]
+    smtbatch reduce run RESULTS
+    smtbatch reduce status RESULTS
+    smtbatch reduce report RESULTS [--xlsx]
 """
 
 from __future__ import annotations
 
 import argparse
 
-COMMANDS = ("run", "serve", "export", "collect")
+
+COMMANDS = ("serve", "reduce")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="smtbatch", description=__doc__)
     parser.add_argument("command", choices=COMMANDS, help="operation to run")
-    parser.add_argument("arguments", nargs=argparse.REMAINDER, help="arguments passed through to the operation")
+    parser.add_argument("arguments", nargs=argparse.REMAINDER)
     args = parser.parse_args()
-    if args.command == "run":
-        from . import run
-        return run.main(args.arguments)
     if args.command == "serve":
         from . import serve
         return serve.main(args.arguments)
-    if args.command == "export":
-        from . import report
-        return report.main(args.arguments)
-    from . import collect
-    return collect.main(args.arguments)
+    from . import reduce
+    return reduce.main(args.arguments)
 
 
 if __name__ == "__main__":

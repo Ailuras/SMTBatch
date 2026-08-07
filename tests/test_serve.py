@@ -1,363 +1,171 @@
-from __future__ import annotations
-
-import argparse
-import csv
+import http.client
 import json
-import os
-import tempfile
-import unittest
+from http.server import ThreadingHTTPServer
 from pathlib import Path
+import subprocess
+import tempfile
+import threading
+import unittest
 from unittest import mock
 
-from smtbatch.run import _RunLock
-from smtbatch.serve import ExperimentManager
-from smtbatch.task import RESULT_FIELDS
+from smtbatch import reduce
+from smtbatch.reduction_serve import ReductionManager, handler_factory
+
+from .test_run import ReductionFixture
 
 
-class ExperimentManagerTests(unittest.TestCase):
+class ManagerTests(ReductionFixture):
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory()
-        root = Path(self.temp.name)
-        self.inputs = root / "inputs"
-        self.results = root / "results"
-        self.empty = root / "empty"
-        self.inputs.mkdir()
-        self.results.mkdir()
-        self.empty.mkdir()
-        self.bin_dir = root / "bin"
-        self.bin_dir.mkdir()
-        for name in ("alpha", "beta", "gamma"):
-            binary = self.bin_dir / name
-            binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-            binary.chmod(0o755)
-        self.config_path = root / "smtbatch.toml"
-        self.config_path.write_text(
-            """[defaults]
-inputs = "inputs"
-results = "results"
+        super().setUp()
+        self.manager = ReductionManager(self.root)
 
-[solvers.alpha]
-label = "Alpha engine"
-binary = "bin/alpha"
-command = ["{binary}", "{input}"]
+    def test_study_lists_concrete_reducers_and_editable_defaults(self) -> None:
+        record = self.manager.study("fixture")
+        self.assertTrue(record["valid"])
+        self.assertEqual([item["id"] for item in record["reducers"]], ["r1", "r2"])
+        self.assertEqual(record["limits"]["trial_wall_sec"], 30)
+        self.assertEqual(record["outer_jobs"], 2)
+        self.assertEqual(record["trial_count"], 4)
+        self.assertEqual(record["wave_count"], 4)
 
-[solvers.beta]
-binary = "bin/beta"
-command = ["{binary}", "{input}"]
-""",
-            encoding="utf-8",
-        )
-        self.formula = self.inputs / "sample.smt2"
-        self.formula.write_text("(check-sat)\n", encoding="utf-8")
-        self.run = self.results / "sample-run"
-        self.run.mkdir()
-        (self.run / "jobs.tsv").write_text(
-            f"job_id\tsolver\tfile\n1\talpha\t{self.formula}\n2\tbeta\t{self.formula}\n",
-            encoding="utf-8",
-        )
-        with (self.run / "results.tsv").open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=RESULT_FIELDS, delimiter="\t")
-            writer.writeheader()
-            writer.writerow({"job_id": 1, "solver": "alpha", "file": str(self.formula), "result": "sat", "time": "2.0", "code": "0", "output_path": ""})
-            writer.writerow({"job_id": 2, "solver": "beta", "file": str(self.formula), "result": "error", "time": "4.0", "code": "1", "output_path": ""})
-        (self.run / "progress.json").write_text(
-            json.dumps({"status": "complete", "updated_at": "2026-01-01T00:00:00+00:00", "total_jobs": 2, "completed_jobs": 2}),
-            encoding="utf-8",
-        )
-        (self.run / "metadata.txt").write_text("solvers=alpha,beta\n", encoding="utf-8")
-        self.manager = ExperimentManager(self.results, self.inputs, root)
+    def test_create_run_freezes_requested_subset_and_resources(self) -> None:
+        with mock.patch.object(self.manager, "_launch", return_value={"run_id": "launched"}):
+            result = self.manager.create_run({
+                "study_id": "fixture", "reducers": ["r2"],
+                "timeout_seconds": 90, "outer_jobs": 5,
+            })
+        self.assertEqual(result["run_id"], "launched")
+        run_dirs = [path for path in (self.root / "results").iterdir() if path.is_dir()]
+        self.assertEqual(len(run_dirs), 1)
+        plan = reduce.load_plan(run_dirs[0])
+        self.assertEqual([item["id"] for item in plan["reducers"]], ["r2"])
+        self.assertEqual(plan["limits"]["trial_wall_sec"], 90)
+        self.assertEqual(plan["execution"]["outer_jobs"], 5)
+
+    def test_create_run_validates_exact_request(self) -> None:
+        invalid = [
+            {"study_id": "fixture"},
+            {"study_id": "fixture", "reducers": [], "timeout_seconds": 1, "outer_jobs": 1},
+            {"study_id": "fixture", "reducers": ["r1"], "timeout_seconds": 0, "outer_jobs": 1},
+            {"study_id": "fixture", "reducers": ["r1"], "timeout_seconds": 1, "outer_jobs": 0},
+        ]
+        for body in invalid:
+            with self.subTest(body=body), self.assertRaises(ValueError):
+                self.manager.create_run(body)
+
+    def test_wrong_branch_keeps_history_visible_but_blocks_mutations(self) -> None:
+        subprocess.run(["git", "switch", "-c", "wrong"], cwd=self.root, check=True, stdout=subprocess.DEVNULL)
+        self.manager._refresh_config()
+        config = self.manager.configuration()
+        self.assertFalse(config["can_launch"])
+        self.assertIn("expected 'main'", config["branch_error"])
+        self.assertEqual(self.manager.studies()[0]["study_id"], "fixture")
+        with self.assertRaisesRegex(ValueError, "expected 'main'"):
+            self.manager.create_run({
+                "study_id": "fixture", "reducers": ["r1"],
+                "timeout_seconds": 30, "outer_jobs": 1,
+            })
+
+    def test_prepared_summary_and_cases_use_frozen_values(self) -> None:
+        output = self.root / "results" / "prepared"
+        reduce.prepare(self.study_path, output, reducers=["r1"], timeout_seconds=70, outer_jobs=3)
+        summary = self.manager.summary("prepared")
+        self.assertEqual(summary["status"], "prepared")
+        self.assertEqual(summary["total_trials"], 2)
+        self.assertEqual(summary["outer_jobs"], 3)
+        self.assertEqual(summary["limits"]["trial_wall_sec"], 70)
+        cases = self.manager._case_rows("prepared", {"page": ["1"], "page_size": ["25"]})
+        self.assertEqual(cases["total"], 1)
+        self.assertEqual(cases["cases"][0]["status"], "pending")
+
+    def test_path_traversal_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            self.manager._run_dir("../outside")
+
+    def test_case_pagination_reads_trajectories_only_for_returned_page(self) -> None:
+        rows = [{
+            "case_id": f"case-{index}", "family": "f", "theory": "t",
+            "predicate_mode": "exit", "planned": 1, "completed": 0,
+            "verified": 0, "statuses": {}, "by_reducer": {"r1": {
+                "planned": 1, "completed": 0, "verified": 0, "statuses": {},
+            }},
+        } for index in range(200)]
+        trajectory = {"trials": []}
+        with (
+            mock.patch.object(self.manager, "_load_run", return_value=(self.root, {"study_id": "fixture"})),
+            mock.patch.object(self.manager, "_progress", return_value={}),
+            mock.patch("smtbatch.reduction_serve.reduction.case_rows", return_value=rows),
+            mock.patch.object(self.manager, "_trajectory", return_value=trajectory) as parse,
+        ):
+            result = self.manager._case_rows("fixture", {"page": ["2"], "page_size": ["5"]})
+        self.assertEqual(result["total"], 200)
+        self.assertEqual(len(result["cases"]), 5)
+        self.assertEqual(parse.call_count, 5)
+
+
+class HttpTests(ReductionFixture):
+    def setUp(self) -> None:
+        super().setUp()
+        self.manager = ReductionManager(self.root)
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler_factory(self.manager))
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
 
     def tearDown(self) -> None:
-        self.temp.cleanup()
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)
+        super().tearDown()
 
-    def test_positive_float_rejects_non_finite_values(self) -> None:
-        for value in ("nan", "inf", "-inf"):
-            with self.assertRaises(ValueError):
-                self.manager._positive_float(value, "timeout")
+    def request(self, method: str, path: str, body: object | None = None):
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port)
+        payload = json.dumps(body) if body is not None else None
+        headers = {"Content-Type": "application/json"} if payload is not None else {}
+        connection.request(method, path, payload, headers)
+        response = connection.getresponse()
+        data = response.read()
+        connection.close()
+        return response.status, response.getheader("Content-Type"), data
 
-    def test_report_uses_canonical_consistency_classification(self) -> None:
-        page = self.manager.report_formulas("sample-run", "", "other", 1, 20)
-        self.assertEqual(page["total"], 1)
-        self.assertEqual(page["cases"][0]["state"], "other")
+    def test_main_page_is_launcher_monitor_only(self) -> None:
+        status, _, data = self.request("GET", "/")
+        html = data.decode("utf-8")
+        self.assertEqual(status, 200)
+        self.assertIn("SMTBatch Reduce", html)
+        self.assertIn("Trial timeout", html)
+        self.assertIn("Outer parallel jobs", html)
+        self.assertIn('id="reducers"', html)
+        self.assertIn("View results", html)
+        self.assertNotIn("Reduction / Observation", html)
+        self.assertNotIn("Cactus", html)
+        self.assertNotIn("PAR-2", html)
 
-    def test_formula_pagination_and_scatter_are_bounded(self) -> None:
-        page = self.manager.report_formulas("sample-run", "sample", "all", 1, 1)
-        self.assertEqual(page["total"], 1)
-        self.assertEqual(len(page["cases"]), 1)
-        scatter = self.manager.report_scatter("sample-run", "alpha", "beta", "all")
-        self.assertEqual(scatter["total_points"], 1)
-        self.assertFalse(scatter["sampled"])
+    def test_report_is_a_separate_route_with_trajectory_charts(self) -> None:
+        status, _, data = self.request("GET", "/runs/anything/report")
+        html = data.decode("utf-8")
+        self.assertEqual(status, 200)
+        self.assertIn("Top-level expressions", html)
+        self.assertIn("AST nodes", html)
+        self.assertIn("Serialized bytes", html)
+        self.assertIn("Predicate calls", html)
+        self.assertNotIn("Reduction / Observation", html)
 
-    def test_historical_duration_estimate_uses_matching_jobs(self) -> None:
-        history = self.manager._historical_durations()
-        self.assertEqual(history[(str(self.formula), "alpha")], 2.0)
-        self.assertEqual(history[(str(self.formula), "beta")], 4.0)
+    def test_studies_api_exposes_branch_gate_and_catalogue(self) -> None:
+        status, _, data = self.request("GET", "/api/studies")
+        payload = json.loads(data)
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["config"]["can_launch"])
+        self.assertEqual({item["id"] for item in payload["config"]["reducers"]}, {"r1", "r2"})
+        self.assertEqual(payload["studies"][0]["study_id"], "fixture")
 
-    def test_preview_reports_effective_input(self) -> None:
-        request = {"input": str(self.inputs), "solvers": ["alpha"], "timeout": 30, "jobs": 2, "limit": 0}
-        preview = self.manager.preview(request)
-        self.assertTrue(preview["input_valid"])
-        self.assertEqual(preview["input_error"], "")
-        self.assertEqual(preview["file_count"], 1)
-        self.assertEqual(preview["total_file_count"], 1)
-        self.assertEqual(preview["selected_file_count"], 1)
+    def test_runs_api_rejects_old_study_only_shape(self) -> None:
+        status, _, data = self.request("POST", "/api/runs", {"study_id": "fixture"})
+        self.assertEqual(status, 400)
+        self.assertIn("reducers", json.loads(data)["error"])
 
-    def test_preview_keeps_total_count_separate_from_formula_limit(self) -> None:
-        for index in range(3):
-            (self.inputs / f"extra-{index}.smt2").write_text("(check-sat)\n", encoding="utf-8")
-        request = {"input": str(self.inputs), "solvers": ["alpha"], "timeout": 30, "jobs": 2, "limit": 2}
-        preview = self.manager.preview(request)
-        self.assertEqual(preview["file_count"], 4)
-        self.assertEqual(preview["total_file_count"], 4)
-        self.assertEqual(preview["selected_file_count"], 2)
-        self.assertEqual(preview["historical_pairs"] + preview["fallback_pairs"], 2)
-
-    def test_preview_rejects_directory_without_smt2_files(self) -> None:
-        request = {"input": str(self.empty), "solvers": ["alpha"], "timeout": 30, "jobs": 2, "limit": 0}
-        preview = self.manager.preview(request)
-        self.assertFalse(preview["input_valid"])
-        self.assertIn("no .smt2 files", preview["input_error"])
-        with self.assertRaisesRegex(ValueError, r"no \.smt2 files"):
-            self.manager.launch({**request, "name": "empty-run"})
-
-    def test_config_api_uses_arbitrary_toml_solver_names_and_labels(self) -> None:
-        config = self.manager.config()
-        self.assertEqual(config["solvers"], ["alpha", "beta"])
-        self.assertEqual(
-            config["solver_options"],
-            [{"name": "alpha", "label": "Alpha engine"}, {"name": "beta", "label": "beta"}],
-        )
-        self.assertEqual(config["config_path"], str(self.config_path))
-        self.assertIsInstance(config["browse_available"], bool)
-
-    def test_config_api_reloads_solver_menu_after_toml_change(self) -> None:
-        self.config_path.write_text(
-            """[defaults]
-inputs = "inputs"
-results = "results"
-
-[solvers.alpha]
-binary = "bin/alpha"
-command = ["{binary}", "{input}"]
-
-[solvers.gamma]
-label = "Gamma engine"
-binary = "bin/gamma"
-command = ["{binary}", "{input}"]
-""",
-            encoding="utf-8",
-        )
-        config = self.manager.config()
-        self.assertEqual(config["solvers"], ["alpha", "gamma"])
-        self.assertEqual(config["solver_options"][1], {"name": "gamma", "label": "Gamma engine"})
-
-    def _interrupted_run(self, name: str) -> Path:
-        run_dir = self.results / name
-        run_dir.mkdir()
-        (run_dir / "jobs.tsv").write_text(
-            f"job_id\tsolver\tfile\n1\talpha\t{self.formula}\n2\tbeta\t{self.formula}\n",
-            encoding="utf-8",
-        )
-        (run_dir / "results.tsv").write_text(
-            "job_id\tsolver\tfile\tresult\ttime\tcode\toutput_path\n",
-            encoding="utf-8",
-        )
-        (run_dir / "progress.json").write_text(
-            json.dumps({"status": "interrupted", "updated_at": "2026-01-01T00:00:00+00:00", "total_jobs": 2, "completed_jobs": 1}),
-            encoding="utf-8",
-        )
-        (run_dir / "metadata.txt").write_text(
-            "solvers=alpha,beta\ntimeout=30\njobs=2\nlog=all\n",
-            encoding="utf-8",
-        )
-        return run_dir
-
-    def test_resume_rejects_complete_experiment(self) -> None:
-        with self.assertRaisesRegex(ValueError, "already complete"):
-            self.manager.resume("sample-run", {"jobs": 2})
-
-    def test_resume_accepts_stale_running_experiment_without_live_pid(self) -> None:
-        run_dir = self._interrupted_run("running-run")
-        (run_dir / "progress.json").write_text(
-            json.dumps({"status": "running", "updated_at": "2026-01-01T00:00:00+00:00"}),
-            encoding="utf-8",
-        )
-        with mock.patch("smtbatch.serve.subprocess.Popen") as popen:
-            popen.return_value.poll.return_value = None
-            response = self.manager.resume("running-run", {"jobs": 2})
-        self.assertEqual(response["status"], "resuming")
-
-    def test_runs_exposes_stale_running_experiment_as_interrupted(self) -> None:
-        run_dir = self._interrupted_run("stale-run")
-        (run_dir / "progress.json").write_text(
-            json.dumps({"status": "running", "updated_at": "2026-01-01T00:00:00+00:00"}),
-            encoding="utf-8",
-        )
-        run = next(item for item in self.manager.runs() if item["run_id"] == "stale-run")
-        self.assertEqual(run["status"], "interrupted")
-        self.assertEqual(run["stale_status"], "running")
-
-    def test_run_lock_keeps_running_state_live_without_pid_probe(self) -> None:
-        run_dir = self._interrupted_run("locked-run")
-        (run_dir / "progress.json").write_text(
-            json.dumps({"status": "running", "updated_at": "2026-01-01T00:00:00+00:00"}),
-            encoding="utf-8",
-        )
-        lock = _RunLock(run_dir)
-        lock.acquire()
-        try:
-            run = next(item for item in self.manager.runs() if item["run_id"] == "locked-run")
-            self.assertEqual(run["status"], "running")
-            with self.assertRaisesRegex(ValueError, "still running"):
-                self.manager.resume("locked-run", {"jobs": 2})
-        finally:
-            lock.release()
-
-    def test_runs_backfills_old_runner_metrics_incrementally(self) -> None:
-        run_dir = self._interrupted_run("old-runner")
-        results_path = run_dir / "results.tsv"
-        results_path.write_text(
-            "job_id\tsolver\tfile\tresult\ttime\tcode\toutput_path\n"
-            f"1\talpha\t{self.formula}\tsat\t2.0\t0\t\n",
-            encoding="utf-8",
-        )
-        (run_dir / "progress.json").write_text(
-            json.dumps(
-                {
-                    "status": "running",
-                    "updated_at": "2026-01-01T00:00:00+00:00",
-                    "total_jobs": 2,
-                    "completed_jobs": 1,
-                }
-            ),
-            encoding="utf-8",
-        )
-        lock = _RunLock(run_dir)
-        lock.acquire()
-        try:
-            first = next(item for item in self.manager.runs() if item["run_id"] == "old-runner")
-            self.assertEqual(first["performance"]["average_solved_seconds"], 2.0)
-            self.assertEqual(first["performance"]["par2_seconds"], 2.0)
-
-            with results_path.open("a", encoding="utf-8") as handle:
-                handle.write(f"2\tbeta\t{self.formula}\terror\t4.0\t1\t\n")
-            second = next(item for item in self.manager.runs() if item["run_id"] == "old-runner")
-            self.assertEqual(
-                second["performance"],
-                {
-                    "completed_jobs": 2,
-                    "solved_jobs": 1,
-                    "average_solved_seconds": 2.0,
-                    "par2_seconds": 31.0,
-                },
-            )
-            self.assertEqual(second["by_solver_performance"]["beta"]["par2_seconds"], 60.0)
-        finally:
-            lock.release()
-
-    def test_resume_rejects_zero_or_missing_jobs(self) -> None:
-        self._interrupted_run("interrupted-run")
-        with self.assertRaisesRegex(ValueError, "positive integer"):
-            self.manager.resume("interrupted-run", {"jobs": 0})
-        with self.assertRaisesRegex(ValueError, "non-negative integer"):
-            self.manager.resume("interrupted-run", {"jobs": -1})
-
-    def test_resume_launches_resume_command(self) -> None:
-        run_dir = self._interrupted_run("interrupted-run")
-        with mock.patch("smtbatch.serve.subprocess.Popen") as popen:
-            popen.return_value.poll.return_value = None
-            response = self.manager.resume("interrupted-run", {"jobs": 4})
-        self.assertEqual(response["status"], "resuming")
-        command = popen.call_args.args[0]
-        self.assertIn("--resume", command)
-        self.assertEqual(command[command.index("--jobs") + 1], "4")
-        self.assertIn(str(run_dir), command)
-        self.assertIn("--output", command)
-
-    def test_resume_rejects_duplicate_request_before_pid_file_exists(self) -> None:
-        self._interrupted_run("interrupted-run")
-        with mock.patch("smtbatch.serve.subprocess.Popen") as popen:
-            popen.return_value.poll.return_value = None
-            self.manager.resume("interrupted-run", {"jobs": 2})
-            with self.assertRaisesRegex(ValueError, "still running"):
-                self.manager.resume("interrupted-run", {"jobs": 2})
-        self.assertEqual(popen.call_count, 1)
-
-    def test_cancel_requires_active_process(self) -> None:
-        with self.assertRaisesRegex(ValueError, "no active run process"):
-            self.manager.cancel_run("sample-run")
-
-    def test_config_port_defaults_to_8000_and_reads_toml(self) -> None:
-        from smtbatch.config import load_config
-
-        self.assertEqual(load_config(self.config_path.parent).port, 8000)
-        self.config_path.write_text(
-            self.config_path.read_text(encoding="utf-8").replace(
-                '[defaults]\ninputs = "inputs"\nresults = "results"',
-                '[defaults]\ninputs = "inputs"\nresults = "results"\nport = 8011',
-            ),
-            encoding="utf-8",
-        )
-        self.assertEqual(load_config(self.config_path.parent).port, 8011)
-
-    def test_config_port_rejects_non_integer_toml_values(self) -> None:
-        from smtbatch.config import load_config
-
-        original = self.config_path.read_text(encoding="utf-8")
-        for value in ("true", "8000.5"):
-            self.config_path.write_text(original.replace('results = "results"', f'results = "results"\nport = {value}'), encoding="utf-8")
-            with self.assertRaisesRegex(RuntimeError, "port must be an integer"):
-                load_config(self.config_path.parent)
-
-    def test_resolve_port_prefers_flag_over_config(self) -> None:
-        from smtbatch.serve import _resolve_port
-
-        old_cwd = Path.cwd()
-        try:
-            os.chdir(self.config_path.parent)
-            self.assertEqual(_resolve_port(argparse.Namespace(port=None)), 8000)
-            self.assertEqual(_resolve_port(argparse.Namespace(port=9000)), 9000)
-        finally:
-            os.chdir(old_cwd)
-
-    def test_resolve_port_reports_invalid_config_instead_of_falling_back(self) -> None:
-        from smtbatch.serve import _resolve_port
-
-        self.config_path.write_text(
-            self.config_path.read_text(encoding="utf-8").replace('results = "results"', 'results = "results"\nport = 70000'),
-            encoding="utf-8",
-        )
-        old_cwd = Path.cwd()
-        try:
-            os.chdir(self.config_path.parent)
-            with self.assertRaisesRegex(RuntimeError, "between 1 and 65535"):
-                _resolve_port(argparse.Namespace(port=None))
-        finally:
-            os.chdir(old_cwd)
-
-    def test_launch_persists_last_run_and_config_reports_it(self) -> None:
-        request = {"input": str(self.inputs), "solvers": ["alpha", "beta"], "timeout": 30, "jobs": 3, "limit": 5, "name": "mem-run"}
-        with mock.patch("smtbatch.serve.subprocess.Popen") as popen:
-            popen.return_value.poll.return_value = None
-            self.manager.launch(request)
-        state = self.manager._read_last_run()
-        self.assertEqual(state["input"], str(self.inputs))
-        self.assertEqual(state["solvers"], ["alpha", "beta"])
-        self.assertEqual(state["timeout"], 30)
-        self.assertEqual(state["jobs"], 3)
-        self.assertEqual(state["limit"], 5)
-        self.assertEqual(self.manager.config()["last_run"]["jobs"], 3)
-
-    def test_launch_reports_last_run_persistence_failure_as_warning(self) -> None:
-        request = {"input": str(self.inputs), "solvers": ["alpha"], "timeout": 30, "jobs": 1, "limit": 0, "name": "warning-run"}
-        with (
-            mock.patch("smtbatch.serve.subprocess.Popen") as popen,
-            mock.patch.object(self.manager, "_save_last_run", side_effect=OSError("disk full")),
-        ):
-            popen.return_value.poll.return_value = None
-            response = self.manager.launch(request)
-        self.assertEqual(response["status"], "starting")
-        self.assertIn("disk full", response["warning"])
+    def test_unknown_route_is_not_found(self) -> None:
+        status, _, _ = self.request("GET", "/api/unknown")
+        self.assertEqual(status, 404)
 
 
 if __name__ == "__main__":

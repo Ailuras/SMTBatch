@@ -1,90 +1,62 @@
 # SMTBatch
 
-Local SMT-LIB batch experiment console. One tool, shared by every project:
-
-- `smtbatch run` — bounded parallel queue of solver × formula jobs with streaming state.
-- `smtbatch serve` — local dashboard (submit experiments, live run state, on-demand analysis, Excel download) that runs in the background by default.
-- `smtbatch export` — Excel workbook for completed runs (log paths only, never raw output).
-- `smtbatch collect` — copy cases matching a cross-solver consistency class.
+SMTBatch is an independent, reduction-only experiment launcher, monitor, and evidence report. Each consuming project owns its `smtbatch.toml`, tracked study manifests, benchmark predicates, inputs, and results.
 
 ## Install
 
 ```bash
 uv pip install git+ssh://git@github.com/Ailuras/SMTBatch.git
-# or, for development:
+# development checkout
 uv pip install -e /path/to/SMTBatch
 ```
 
-## Solver configuration
+SMTBatch discovers the closest `smtbatch.toml` while walking upward from the current directory. The service itself must be started from that project root.
 
-Each project keeps a `smtbatch.toml` in its root. The tool finds it
-automatically — the closest file walking upward from the current directory
-wins, so no environment variable is ever needed.
+## Project configuration
+
+Every `[reducers.<id>]` entry is one concrete, independently selectable reducer version/configuration. Different strategies, versions, and evidence levels use different IDs.
 
 ```toml
 [defaults]
-inputs = "benchmarks"    # default benchmark root, relative to the config file
-results = "results"      # default results root, relative to the config file
-port = 8000              # dashboard port (optional)
+inputs = "benchmarks"
+results = "results"
+studies = "scripts/experiments"
+port = 8001
+target_branch = "main" # defaults to main when omitted
 
-[solvers.my-solver]
-label = "My solver"             # optional label shown in the dashboard
-binary = "/opt/my-solver/bin/my-solver"
-command = ["gtimeout", "--kill-after=1", "{timeout}", "{binary}", "{input}"]
-
-[solvers.another-solver]
-binary = "/opt/another-solver/bin/another-solver"
-command = ["gtimeout", "--kill-after=1", "{timeout}", "{binary}", "{input}"]
+[reducers.ddmin-summary]
+label = "D3SMT ddmin · observer summary"
+version = "project"
+strategy = "ddmin"
+evidence_level = "summary"
+acceptance = "trace"
+stats = "required"
+command = ["python3", "-m", "src", "--strategy", "ddmin", "--observe", "summary", "--observation-dir", "{observation_dir}", "--observation-stats", "{observation_stats}", "-j", "1", "--timeout", "{predicate_timeout}", "--ignore-output", "{input}", "{output}", "{predicate}"]
 ```
 
-Each solver has a name, an executable, and an argv template controlling exactly
-where the timeout goes and which extra flags are passed. Placeholders:
-`{binary}`, `{input}` (required exactly once), `{timeout}` (seconds),
-`{timeout_ms}` (milliseconds). `version_args` defaults to `["--version"]`.
-Relative `binary` paths are resolved from the directory containing
-`smtbatch.toml`.
-The TOML table is the complete solver menu: the dashboard exposes every
-configured entry and refreshes the menu when the file changes. Solver labels
-are optional; when omitted, the table key is shown.
-See `smtbatch.toml`.
+A reduction-v2 study contains benchmark predicates, default resource limits, repeats, comparisons, and a list of allowed reducer IDs. Reducer commands are not duplicated in the study. When a run is created, SMTBatch freezes the selected reducer definitions, resolved command/file hashes, timeout, outer jobs, repository identity, and strict-wave job matrix into the run plan. Resume always uses that immutable plan.
 
-## Usage
+The checked-out project branch must match `[defaults] target_branch` to launch or resume work. A mismatched branch may still start the service and inspect historical runs.
 
-Run from anywhere inside a project; the config, benchmarks, and results roots
-all resolve from the project's `smtbatch.toml`:
+## Commands
 
 ```bash
-smtbatch run --solver my-solver --solver another-solver --input benchmarks --output results/baseline --timeout 30 --jobs 8
-smtbatch run --resume --output results/baseline --jobs 8
-
-smtbatch serve            # start the dashboard in the background (default)
-smtbatch serve restart    # stop, then start (use after upgrades)
-smtbatch serve status     # pid, URL, log path
+smtbatch serve
+smtbatch serve status
+smtbatch serve restart
 smtbatch serve stop
-smtbatch serve foreground # debug in the current terminal
+smtbatch serve foreground
 
-smtbatch export results/baseline --output exports/baseline.xlsx
+smtbatch reduce prepare scripts/experiments/smoke.json \
+  --output results/smoke \
+  --reducers ddsmt-stock ddmin-summary \
+  --timeout 3600 \
+  --jobs 4
+smtbatch reduce run results/smoke
+smtbatch reduce status results/smoke
+smtbatch reduce report results/smoke --xlsx
 ```
 
-The dashboard lives at <http://127.0.0.1:8000/>. Experiments submitted from the
-page run in independent background sessions; closing the browser does not stop
-them. Running experiments can be cancelled after their in-flight jobs drain,
-and interrupted, failed, or stale runs can be resumed from their durable queue.
-Options: `--host`, `--port`, `--inputs-root`, `--results`. An explicit `--port`
-overrides `[defaults] port`.
+The dashboard main page launches experiments and monitors active/history runs. Opening a result navigates to `/runs/<run-id>/report`, where reducer summaries, paired comparisons, evidence health, paginated cases, and three-dimensional predicate-call trajectories are shown.
 
-Resume treats `jobs.tsv` as immutable and accepts only complete result rows that
-match it exactly. It also verifies the recorded solver binary hash and, for new
-runs, the command template before appending results. A per-run OS lock prevents
-concurrent controllers from writing the same result stream.
-
-Select a run from the history to load its separate report page. The report
-loads its summary first; scatter data and server-paginated formula rows load
-only when requested, keeping large experiments responsive.
-
-Every run directory contains `jobs.tsv` (immutable queue), `results.tsv`
-(streaming results), `progress.json` (live progress), `metadata.txt`
-(immutable initial provenance), and `logs/` (one output file per job, kept for
-debugging). Resumed runs additionally contain append-only
-`resume_history.jsonl`, preserving each resume attempt and its worker count.
-The Excel export contains only log paths.
+Each run stores an immutable `plan.json` and `jobs.tsv`, append-only resume history, per-attempt evidence, sealed job markers, a rebuildable `results.tsv`, and report exports. Graceful stop drains in-flight trials without scheduling more. Immediate stop terminates active reducer process groups and preserves unsealed partial attempts for the next resume attempt.
