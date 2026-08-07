@@ -89,7 +89,10 @@ def _json_response(handler: BaseHTTPRequestHandler, value: object,
     handler.send_header("Cache-Control", "no-store")
     handler.send_header("Content-Length", str(len(payload)))
     handler.end_headers()
-    handler.wfile.write(payload)
+    try:
+        handler.wfile.write(payload)
+    except (BrokenPipeError, ConnectionResetError):
+        pass
 
 
 def _read_json_body(handler: BaseHTTPRequestHandler) -> object:
