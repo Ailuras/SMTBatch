@@ -1,7 +1,7 @@
 """Unified command-line entry point for smtbatch.
 
 Examples:
-    smtbatch run --solver z3 --input benchmarks --output results/demo
+    smtbatch run --solver my-solver --input benchmarks --output results/demo
     smtbatch serve
     smtbatch export results/demo --output exports/demo.xlsx
     smtbatch collect --consistency hard --prefix benchmarks --output selected

@@ -5,11 +5,12 @@
 inputs = "benchmarks"
 results = "results"
 
-[solvers.z3]
-binary = "/Users/ailura/z3/build/z3"
-command = ["gtimeout", "--kill-after=1", "{timeout}", "{binary}", "model=true", "{input}"]
+[solvers.my-solver]
+label = "My solver"
+binary = "/opt/my-solver/bin/my-solver"
+command = ["gtimeout", "--kill-after=1", "{timeout}", "{binary}", "{input}"]
 
-[solvers.cvc5]
-binary = "/Users/ailura/cvc5/build/bin/cvc5"
-command = ["gtimeout", "--kill-after=1", "{timeout}", "{binary}", "--lang", "smt2.6", "--strings-exp", "--produce-models", "{input}"]
+[solvers.another-solver]
+binary = "/opt/another-solver/bin/another-solver"
+command = ["gtimeout", "--kill-after=1", "{timeout}", "{binary}", "{input}"]
 version_args = ["--version"]

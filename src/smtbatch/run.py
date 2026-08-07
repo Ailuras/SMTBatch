@@ -5,8 +5,8 @@ one independently scheduled job. Results are streamed to ``results.tsv`` as
 jobs complete; ``jobs.tsv`` is the immutable queue manifest. ``progress.json``
 is refreshed while the queue runs for the dashboard UI.
 
-Solver commands come from the TOML config named by SMTBATCH_CONFIG; see
-smtbatch.config for the schema.
+Solver names and commands come from the nearest project ``smtbatch.toml``;
+see smtbatch.config for the schema.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 from .config import Config, SolverSpec, load_config
-from .task import JOB_FIELDS, RESULT_FIELDS, JobSpec, write_jobs
+from .task import RESULT_FIELDS, JobSpec, write_jobs
 
 
 RESULT_ORDER = ("sat", "unsat", "unknown", "timeout", "error")
@@ -126,7 +126,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--solver",
         action="append",
         required=True,
-        help="solver name from the SMTBATCH_CONFIG file; repeat to schedule every solver-file pair",
+        help="solver name from the nearest smtbatch.toml; repeat to schedule every solver-file pair",
     )
     parser.add_argument(
         "--input",

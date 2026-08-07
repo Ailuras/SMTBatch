@@ -10,9 +10,10 @@ Config schema:
     inputs = "benchmarks"     # default benchmark root, relative to the config file
     results = "results"       # default results root, relative to the config file
 
-    [solvers.z3]
-    binary = "/opt/z3/bin/z3"
-    command = ["gtimeout", "--kill-after=1", "{timeout}", "{binary}", "model=true", "{input}"]
+    [solvers.my-solver]
+    label = "My solver"             # optional label shown in the dashboard
+    binary = "/opt/my-solver/bin/my-solver"
+    command = ["gtimeout", "--kill-after=1", "{timeout}", "{binary}", "{input}"]
     version_args = ["--version"]          # optional, default ["--version"]
 
 Placeholders allowed inside ``command`` tokens:
@@ -49,6 +50,7 @@ class SolverSpec:
     binary: Path
     command: tuple[str, ...]
     version_args: tuple[str, ...]
+    label: str = ""
 
     def render(self, input_path: Path, timeout: float) -> list[str]:
         """Substitute placeholders for one concrete job invocation."""
@@ -69,6 +71,11 @@ class Config:
     inputs_root: Path
     results_root: Path
 
+    @property
+    def solver_options(self) -> tuple[dict[str, str], ...]:
+        """Stable, UI-safe solver metadata derived from the TOML entries."""
+        return tuple({"name": spec.name, "label": spec.label or spec.name} for spec in self.solvers.values())
+
 
 def find_config_path(start: Path | None = None) -> Path:
     """Return the closest smtbatch.toml at or above ``start`` (default: cwd)."""
@@ -80,8 +87,9 @@ def find_config_path(start: Path | None = None) -> Path:
     raise RuntimeError(f"no {CONFIG_NAME} found in {current} or its parent directories")
 
 
-def load_config() -> Config:
-    path = find_config_path()
+def load_config(start: Path | None = None) -> Config:
+    """Load the nearest project configuration above ``start`` (or cwd)."""
+    path = find_config_path(start)
     try:
         with path.open("rb") as handle:
             data = tomllib.load(handle)
@@ -111,9 +119,17 @@ def _resolve_root(value: object, config_path: Path) -> Path:
 
 
 def _parse_solver(name: str, spec: object, path: Path) -> SolverSpec:
+    if not name or name != name.strip():
+        raise RuntimeError(f"solver names must be non-empty and trimmed in {path}")
     if not isinstance(spec, dict):
         raise RuntimeError(f"[solvers.{name}] must be a table in {path}")
+    label = spec.get("label", name)
+    if not isinstance(label, str) or not label.strip():
+        raise RuntimeError(f"[solvers.{name}] label must be a non-empty string")
     binary = Path(str(spec.get("binary", ""))).expanduser()
+    if not binary.is_absolute():
+        binary = path.parent / binary
+    binary = binary.resolve()
     if not binary.is_file() or not os.access(binary, os.X_OK):
         raise RuntimeError(f"[solvers.{name}] binary missing or not executable: {binary}")
     command = spec.get("command")
@@ -128,4 +144,4 @@ def _parse_solver(name: str, spec: object, path: Path) -> SolverSpec:
     version_args = spec.get("version_args", ["--version"])
     if not isinstance(version_args, list) or not all(isinstance(token, str) for token in version_args):
         raise RuntimeError(f"[solvers.{name}] version_args must be a list of strings")
-    return SolverSpec(name, binary.resolve(), tuple(command), tuple(version_args))
+    return SolverSpec(name, binary, tuple(command), tuple(version_args), label.strip())

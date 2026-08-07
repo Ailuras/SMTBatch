@@ -2,8 +2,8 @@
 
 Open http://127.0.0.1:8000 after starting this command. The dashboard is
 shipped as package data; all run state is discovered from progress.json files
-under the results root. Solver commands come from the TOML config named by
-SMTBATCH_CONFIG.
+under the results root. Solver names and commands come from the nearest
+project ``smtbatch.toml``.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
-from .config import Config, load_config
+from .config import Config, find_config_path, load_config
 from .task import RESULT_FIELDS, classify_consistency, load_jobs, result_label
 
 
@@ -112,33 +112,52 @@ class ExperimentManager:
         self.host_cwd = host_cwd
         self.processes: dict[str, subprocess.Popen[str]] = {}
         self._config: Config | None = None
+        self._config_signature: tuple[str, int, int] | None = None
         self._config_error: str = ""
         self._progress_cache: dict[str, tuple[tuple[float, float], dict[str, object]]] = {}
         self._run_cache: dict[str, tuple[tuple[float, float, int, float], dict[str, object]]] = {}
         self._history_cache: tuple[float, dict[tuple[str, str], float]] | None = None
 
     def _solver_config(self) -> Config:
-        if self._config is None:
-            try:
-                self._config = load_config()
-                self._config_error = ""
-            except RuntimeError as exc:
-                self._config_error = str(exc)
-                raise ValueError(self._config_error) from None
-        return self._config
+        """Return the current project config, reloading it when TOML changes."""
+        try:
+            config_path = find_config_path(self.host_cwd)
+            stat = config_path.stat()
+            signature = (str(config_path), stat.st_mtime_ns, stat.st_size)
+        except (OSError, RuntimeError):
+            signature = None
+
+        if self._config is not None and signature == self._config_signature:
+            return self._config
+        try:
+            config = load_config(self.host_cwd)
+        except (OSError, RuntimeError) as exc:
+            self._config = None
+            self._config_signature = signature
+            self._config_error = str(exc)
+            raise ValueError(self._config_error) from None
+        self._config = config
+        self._config_signature = signature
+        self._config_error = ""
+        return config
 
     def config(self) -> dict[str, object]:
         try:
             config = self._solver_config()
-            solvers = sorted(config.solvers)
+            solvers = list(config.solvers)
+            solver_options = list(config.solver_options)
             error = ""
         except ValueError as exc:
             solvers = []
+            solver_options = []
             error = str(exc)
         return {
+            "config_path": str(self._config.path) if self._config is not None else "",
+            "config_revision": ":".join(str(value) for value in self._config_signature or ()),
             "results_root": str(self.results_root),
             "inputs_root": str(self.inputs_root),
             "solvers": solvers,
+            "solver_options": solver_options,
             "config_error": error,
             "defaults": {"timeout": 30, "jobs": max(1, (os.cpu_count() or 2) // 2)},
         }
@@ -217,7 +236,7 @@ class ExperimentManager:
             raise ValueError("solvers must be a list")
         solvers = list(dict.fromkeys(value for value in values if value in config.solvers))
         if not solvers:
-            known = ", ".join(sorted(config.solvers))
+            known = ", ".join(config.solvers)
             raise ValueError(f"choose at least one configured solver ({known})")
         timeout = self._positive_float(request.get("timeout", 30), "timeout")
         jobs = self._nonnegative_int(request.get("jobs", 1), "jobs")
@@ -243,6 +262,8 @@ class ExperimentManager:
         return {
             "input": str(input_dir),
             "file_count": len(files),
+            "input_valid": bool(files),
+            "input_error": "" if files else f"no .smt2 files found in {input_dir}",
             "solvers": solvers,
             "estimated_seconds": estimated_seconds,
             "worst_case_seconds": batches * watchdog_seconds,
@@ -264,6 +285,8 @@ class ExperimentManager:
             raise ValueError(f"experiment already exists: {run_id}")
 
         input_dir, solvers, timeout, jobs, limit = self._run_options(request)
+        if not self._files(input_dir, limit):
+            raise ValueError(f"no .smt2 files found in {input_dir}")
 
         self.results_root.mkdir(parents=True, exist_ok=True)
         command = [

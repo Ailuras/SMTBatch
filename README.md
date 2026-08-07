@@ -26,20 +26,25 @@ wins, so no environment variable is ever needed.
 inputs = "benchmarks"    # default benchmark root, relative to the config file
 results = "results"      # default results root, relative to the config file
 
-[solvers.z3]
-binary = "/opt/z3/bin/z3"
-command = ["gtimeout", "--kill-after=1", "{timeout}", "{binary}", "model=true", "{input}"]
+[solvers.my-solver]
+label = "My solver"             # optional label shown in the dashboard
+binary = "/opt/my-solver/bin/my-solver"
+command = ["gtimeout", "--kill-after=1", "{timeout}", "{binary}", "{input}"]
 
-[solvers.cvc5]
-binary = "/opt/cvc5/bin/cvc5"
-command = ["gtimeout", "--kill-after=1", "{timeout}", "{binary}", "--lang", "smt2.6", "--strings-exp", "--produce-models", "{input}"]
-version_args = ["--version"]
+[solvers.another-solver]
+binary = "/opt/another-solver/bin/another-solver"
+command = ["gtimeout", "--kill-after=1", "{timeout}", "{binary}", "{input}"]
 ```
 
 Each solver has a name, an executable, and an argv template controlling exactly
 where the timeout goes and which extra flags are passed. Placeholders:
 `{binary}`, `{input}` (required exactly once), `{timeout}` (seconds),
 `{timeout_ms}` (milliseconds). `version_args` defaults to `["--version"]`.
+Relative `binary` paths are resolved from the directory containing
+`smtbatch.toml`.
+The TOML table is the complete solver menu: the dashboard exposes every
+configured entry and refreshes the menu when the file changes. Solver labels
+are optional; when omitted, the table key is shown.
 See `smtbatch.toml`.
 
 ## Usage
@@ -48,7 +53,7 @@ Run from anywhere inside a project; the config, benchmarks, and results roots
 all resolve from the project's `smtbatch.toml`:
 
 ```bash
-smtbatch run --solver z3 --solver cvc5 --input benchmarks --output results/baseline --timeout 30 --jobs 8
+smtbatch run --solver my-solver --solver another-solver --input benchmarks --output results/baseline --timeout 30 --jobs 8
 
 smtbatch serve            # start the dashboard in the background (default)
 smtbatch serve restart    # stop, then start (use after upgrades)
