@@ -22,7 +22,7 @@ inputs = "benchmarks"
 results = "results"
 studies = "scripts/experiments"
 port = 8001
-target_branch = "main" # defaults to main when omitted
+target_branch = "feat/reduction" # SMTBatch checkout branch; defaults to main
 
 [reducers.ddmin-summary]
 label = "D3SMT ddmin · observer summary"
@@ -36,7 +36,7 @@ command = ["python3", "-m", "src", "--strategy", "ddmin", "--observe", "summary"
 
 A reduction-v2 study contains benchmark predicates, default resource limits, repeats, comparisons, and a list of allowed reducer IDs. Reducer commands are not duplicated in the study. When a run is created, SMTBatch freezes the selected reducer definitions, resolved command/file hashes, timeout, outer jobs, repository identity, and strict-wave job matrix into the run plan. Resume always uses that immutable plan.
 
-The checked-out project branch must match `[defaults] target_branch` to launch or resume work. A mismatched branch may still start the service and inspect historical runs.
+The SMTBatch checkout at `<project-root>/SMTBatch` must match `[defaults] target_branch` to launch or resume work. The consuming project branch is independent. A mismatched SMTBatch branch may still start the service and inspect historical runs.
 
 ## Commands
 

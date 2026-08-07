@@ -23,6 +23,7 @@ _REDUCER_PLACEHOLDERS = {
     "observation_dir", "observation_stats", "predicate_timeout", "trial_timeout",
     "memory_mb", "repeat", "seed", "predicate",
 }
+_CATEGORY_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 @dataclass(frozen=True)
@@ -53,12 +54,56 @@ class ReducerSpec:
 
 
 @dataclass(frozen=True)
+class BenchmarkCategorySpec:
+    """A project-owned, human-readable grouping of benchmark database rows."""
+
+    name: str
+    label: str
+    description: str
+    min_bytes: int | None
+    max_bytes: int | None
+    any_features: tuple[str, ...]
+    required_features: tuple[str, ...]
+    forbidden_features: tuple[str, ...]
+    fallback: bool
+
+    def matches(self, size_bytes: int, features: set[str]) -> bool:
+        if self.fallback:
+            return True
+        return (
+            (self.min_bytes is None or size_bytes >= self.min_bytes)
+            and (self.max_bytes is None or size_bytes <= self.max_bytes)
+            and (not self.any_features or bool(set(self.any_features) & features))
+            and set(self.required_features).issubset(features)
+            and not (set(self.forbidden_features) & features)
+        )
+
+    @property
+    def option(self) -> dict[str, object]:
+        return {
+            "id": self.name,
+            "label": self.label,
+            "description": self.description,
+            "min_bytes": self.min_bytes,
+            "max_bytes": self.max_bytes,
+            "any_features": list(self.any_features),
+            "required_features": list(self.required_features),
+            "forbidden_features": list(self.forbidden_features),
+        }
+
+
+@dataclass(frozen=True)
 class Config:
     path: Path
     reducers: dict[str, ReducerSpec]
     inputs_root: Path
     results_root: Path
     studies_root: Path
+    smtbatch_root: Path
+    benchmark_database: Path
+    benchmark_inputs_root: Path
+    benchmark_template: Path | None
+    benchmark_categories: dict[str, BenchmarkCategorySpec]
     port: int = 8001
     target_branch: str = "main"
 
@@ -86,7 +131,7 @@ def load_config(start: Path | None = None) -> Config:
     except tomllib.TOMLDecodeError as exc:
         raise RuntimeError(f"invalid TOML in {path}: {exc}") from None
 
-    extras = sorted(set(data) - {"defaults", "reducers"})
+    extras = sorted(set(data) - {"defaults", "reducers", "benchmark_catalog", "benchmark_categories"})
     if extras:
         raise RuntimeError(f"unknown top-level config tables in {path}: {', '.join(extras)}")
     defaults = data.get("defaults", {})
@@ -106,6 +151,32 @@ def load_config(start: Path | None = None) -> Config:
         for name, value in reducers_raw.items()
     }
 
+    catalog_raw = data.get("benchmark_catalog", {})
+    if not isinstance(catalog_raw, dict):
+        raise RuntimeError(f"[benchmark_catalog] must be a table in {path}")
+    catalog_extras = sorted(set(catalog_raw) - {"database", "inputs", "template"})
+    if catalog_extras:
+        raise RuntimeError(
+            f"unknown [benchmark_catalog] fields in {path}: {', '.join(catalog_extras)}"
+        )
+    database_path = _resolve_path(
+        catalog_raw.get("database", "benchmarks/database.json"), path
+    )
+    inputs_path = _resolve_path(
+        catalog_raw.get("inputs", "benchmarks/inputs"), path
+    )
+    template_value = catalog_raw.get("template", "scripts/experiments/smoke.json")
+    template_path = _resolve_path(template_value, path) if template_value is not None else None
+    categories_raw = data.get("benchmark_categories", {})
+    if not isinstance(categories_raw, dict):
+        raise RuntimeError(f"[benchmark_categories] must be a table in {path}")
+    categories = {
+        name: _parse_category(name, value, path)
+        for name, value in categories_raw.items()
+    }
+    if sum(spec.fallback for spec in categories.values()) > 1:
+        raise RuntimeError(f"[benchmark_categories] may contain at most one fallback category in {path}")
+
     target_branch = defaults.get("target_branch", "main")
     if (
         not isinstance(target_branch, str)
@@ -120,6 +191,11 @@ def load_config(start: Path | None = None) -> Config:
         inputs_root=_resolve_root(defaults.get("inputs", "benchmarks"), path),
         results_root=_resolve_root(defaults.get("results", "results"), path),
         studies_root=_resolve_root(defaults.get("studies", "scripts/experiments"), path),
+        smtbatch_root=(path.parent / "SMTBatch").resolve(),
+        benchmark_database=database_path,
+        benchmark_inputs_root=inputs_path,
+        benchmark_template=template_path,
+        benchmark_categories=categories,
         port=_parse_port(defaults.get("port", 8001), path),
         target_branch=target_branch,
     )
@@ -135,19 +211,19 @@ def current_git_branch(root: Path) -> str:
         raise RuntimeError(f"unable to inspect Git branch in {root}: {exc}") from exc
     branch = result.stdout.strip()
     if result.returncode != 0 or not branch:
-        raise RuntimeError(f"project root is not on a named Git branch: {root}")
+        raise RuntimeError(f"repository is not on a named Git branch: {root}")
     return branch
 
 
 def branch_status(config: Config) -> tuple[str, bool, str]:
     try:
-        branch = current_git_branch(config.path.parent.resolve())
+        branch = current_git_branch(config.smtbatch_root)
     except RuntimeError as exc:
         return "", False, str(exc)
     if branch != config.target_branch:
         return branch, False, (
-            f"wrong project branch: expected {config.target_branch!r}, found {branch!r} "
-            f"in {config.path.parent.resolve()}"
+            f"wrong SMTBatch branch: expected {config.target_branch!r}, found {branch!r} "
+            f"in {config.smtbatch_root}"
         )
     return branch, True, ""
 
@@ -172,6 +248,79 @@ def _resolve_root(value: object, config_path: Path) -> Path:
     if not root.is_absolute():
         root = config_path.parent / root
     return root.resolve()
+
+
+def _resolve_path(value: object, config_path: Path) -> Path:
+    if not isinstance(value, str) or not value.strip():
+        raise RuntimeError(f"project paths must be non-empty strings in {config_path}")
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = config_path.parent / path
+    return path.resolve()
+
+
+def _string_tuple(value: object, label: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list) or not all(isinstance(item, str) and item.strip() for item in value):
+        raise RuntimeError(f"{label} must be a list of non-empty strings")
+    return tuple(item.strip() for item in value)
+
+
+def _parse_category(name: str, value: object, path: Path) -> BenchmarkCategorySpec:
+    if not isinstance(name, str) or not _CATEGORY_ID.fullmatch(name):
+        raise RuntimeError(f"benchmark category names must match {_CATEGORY_ID.pattern} in {path}")
+    if not isinstance(value, dict):
+        raise RuntimeError(f"[benchmark_categories.{name}] must be a table in {path}")
+    allowed = {
+        "label", "description", "min_bytes", "max_bytes", "any_features",
+        "required_features", "forbidden_features", "fallback",
+    }
+    extras = sorted(set(value) - allowed)
+    if extras:
+        raise RuntimeError(
+            f"[benchmark_categories.{name}] has unknown fields: {', '.join(extras)}"
+        )
+    label = value.get("label", name)
+    description = value.get("description", "")
+    if not isinstance(label, str) or not label.strip():
+        raise RuntimeError(f"[benchmark_categories.{name}] label must be a non-empty string")
+    if not isinstance(description, str):
+        raise RuntimeError(f"[benchmark_categories.{name}] description must be a string")
+    min_bytes = value.get("min_bytes")
+    max_bytes = value.get("max_bytes")
+    for field, item in (("min_bytes", min_bytes), ("max_bytes", max_bytes)):
+        if item is not None and (isinstance(item, bool) or not isinstance(item, int) or item < 0):
+            raise RuntimeError(f"[benchmark_categories.{name}] {field} must be a non-negative integer")
+    if min_bytes is not None and max_bytes is not None and min_bytes > max_bytes:
+        raise RuntimeError(f"[benchmark_categories.{name}] min_bytes must not exceed max_bytes")
+    any_features = _string_tuple(
+        value.get("any_features"), f"[benchmark_categories.{name}] any_features"
+    )
+    required_features = _string_tuple(
+        value.get("required_features"), f"[benchmark_categories.{name}] required_features"
+    )
+    forbidden_features = _string_tuple(
+        value.get("forbidden_features"), f"[benchmark_categories.{name}] forbidden_features"
+    )
+    fallback = value.get("fallback", False)
+    if not isinstance(fallback, bool):
+        raise RuntimeError(f"[benchmark_categories.{name}] fallback must be boolean")
+    if not fallback and min_bytes is None and max_bytes is None and not (any_features or required_features or forbidden_features):
+        raise RuntimeError(
+            f"[benchmark_categories.{name}] needs a matcher or fallback=true"
+        )
+    return BenchmarkCategorySpec(
+        name=name,
+        label=label.strip(),
+        description=description.strip(),
+        min_bytes=min_bytes,
+        max_bytes=max_bytes,
+        any_features=any_features,
+        required_features=required_features,
+        forbidden_features=forbidden_features,
+        fallback=fallback,
+    )
 
 
 def _parse_reducer(name: str, value: object, path: Path) -> ReducerSpec:

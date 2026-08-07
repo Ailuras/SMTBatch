@@ -39,7 +39,7 @@ ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 STUDY_FIELDS = {
     "schema_version", "kind", "study_id", "root", "execution",
     "predicate_wrapper", "benchmarks", "reducers", "repeats",
-    "limits", "comparisons",
+    "limits", "comparisons", "catalog",
 }
 BENCHMARK_FIELDS = {
     "id", "input", "family", "theory", "predicate_mode", "solver",
@@ -362,6 +362,19 @@ def _repository_identity(root: Path) -> dict[str, object]:
     }
 
 
+def repository_branch(identity: Mapping[str, object], repository: Path) -> str:
+    """Return the frozen branch for one repository in a provenance record."""
+    target = str(repository.resolve())
+    records = identity.get("repositories")
+    if isinstance(records, list):
+        for record in records:
+            if isinstance(record, dict) and record.get("root") == target:
+                return str(record.get("branch", ""))
+    if identity.get("root") == target:
+        return str(identity.get("branch", ""))
+    return ""
+
+
 def _normalize_match(value: object, label: str) -> dict[str, object]:
     raw = _mapping(value or {}, label)
     _only_fields(raw, MATCH_FIELDS, label)
@@ -532,6 +545,10 @@ def load_study(path: Path) -> dict[str, object]:
         if pair not in comparisons:
             comparisons.append(pair)
 
+    catalog = raw.get("catalog", {})
+    if not isinstance(catalog, dict):
+        raise ReductionError("catalog must be an object")
+
     return {
         "schema_version": SCHEMA_VERSION,
         "kind": "reduction",
@@ -544,6 +561,7 @@ def load_study(path: Path) -> dict[str, object]:
         "repeats": repeats,
         "limits": _normalize_limits(raw.get("limits", {})),
         "comparisons": comparisons,
+        "catalog": dict(catalog),
         "source": {"path": str(study_path), "sha256": _sha256_path(study_path)},
         "repository": _repository_identity(root),
         "environment": {
@@ -591,7 +609,8 @@ def _plan_reducer(spec: ReducerSpec, root: Path) -> dict[str, object]:
 def build_plan(
     study: Mapping[str, object], *, config: Config | None = None,
     reducers: Sequence[str] | None = None, timeout_seconds: float | None = None,
-    outer_jobs: int | None = None,
+    outer_jobs: int | None = None, benchmark_ids: Sequence[str] | None = None,
+    repeats: int | None = None, selection: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     root = Path(str(study["root"]))
     try:
@@ -627,11 +646,30 @@ def build_plan(
         if pair[0] in selected_ids and pair[1] in selected_ids
     ]
     reducers = resolved_reducers
-    benchmarks = list(study["benchmarks"])
+    all_benchmarks = list(study["benchmarks"])
+    by_benchmark = {str(item["id"]): item for item in all_benchmarks}
+    if benchmark_ids is None:
+        selected_benchmark_ids = list(by_benchmark)
+    else:
+        selected_benchmark_ids = list(benchmark_ids)
+        if not selected_benchmark_ids:
+            raise ReductionError("at least one benchmark must be selected")
+        if len(set(selected_benchmark_ids)) != len(selected_benchmark_ids):
+            raise ReductionError("selected benchmarks must not contain duplicates")
+        unknown_benchmarks = [item for item in selected_benchmark_ids if item not in by_benchmark]
+        if unknown_benchmarks:
+            raise ReductionError(
+                f"unknown benchmark: {', '.join(unknown_benchmarks)}"
+            )
+    benchmarks = [by_benchmark[item] for item in selected_benchmark_ids]
+    repeat_count = (
+        _positive_int(repeats, "repeats") if repeats is not None else int(study["repeats"])
+    )
+    selection_record = dict(selection or {})
     jobs = []
     order = 0
     reducer_count = len(reducers)
-    for repeat in range(1, int(study["repeats"]) + 1):
+    for repeat in range(1, repeat_count + 1):
         offsets = {
             benchmark["id"]: _stable_offset(
                 str(study["study_id"]), str(benchmark["id"]), repeat, reducer_count
@@ -662,17 +700,19 @@ def build_plan(
         "root": study["root"],
         "execution": execution,
         "predicate_wrapper": study["predicate_wrapper"],
-        "benchmarks": study["benchmarks"],
+        "benchmarks": benchmarks,
         "reducers": reducers,
-        "repeats": study["repeats"],
+        "repeats": repeat_count,
         "limits": limits,
         "comparisons": comparisons,
+        "catalog": study.get("catalog", {}),
+        "selection": selection_record,
         "source": study["source"],
         "repository": study["repository"],
         "environment": study["environment"],
         "jobs": jobs,
         "job_count": len(jobs),
-        "wave_count": int(study["repeats"]) * reducer_count,
+        "wave_count": repeat_count * reducer_count,
     }
     plan["plan_sha256"] = _hash_json(plan)
     return plan
@@ -691,6 +731,8 @@ def _write_jobs(path: Path, jobs: Sequence[Mapping[str, object]]) -> None:
 def prepare(
     study_path: Path, output: Path, *, reducers: Sequence[str] | None = None,
     timeout_seconds: float | None = None, outer_jobs: int | None = None,
+    benchmark_ids: Sequence[str] | None = None, repeats: int | None = None,
+    selection: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     study = load_study(study_path)
     try:
@@ -701,13 +743,14 @@ def prepare(
     plan = build_plan(
         study, config=project_config, reducers=reducers,
         timeout_seconds=timeout_seconds, outer_jobs=outer_jobs,
+        benchmark_ids=benchmark_ids, repeats=repeats, selection=selection,
     )
     output = output.expanduser().resolve()
     if output.exists() and any(output.iterdir()):
         existing = output / "plan.json"
         if existing.is_file():
             loaded = load_plan(output)
-            comparable = ("source", "execution", "reducers", "limits", "jobs")
+            comparable = ("source", "execution", "reducers", "limits", "repeats", "selection", "jobs")
             if all(loaded.get(key) == plan.get(key) for key in comparable):
                 return loaded
         raise ReductionError(f"refusing to prepare a non-empty output directory: {output}")
@@ -1880,6 +1923,7 @@ def status(output: Path) -> dict[str, object]:
         "study_id": plan["study_id"], "format": FORMAT,
         "benchmarks": len(plan["benchmarks"]), "reducers": len(plan["reducers"]),
         "repeats": plan["repeats"], "outer_jobs": plan["execution"]["outer_jobs"],
+        "selection": plan.get("selection", {}), "limits": plan["limits"],
         "total_jobs": len(plan["jobs"]), "completed_jobs": len(results),
         "pending_jobs": len(plan["jobs"]) - len(results),
         "statuses": dict(Counter(str(item["status"]) for item in results)),
@@ -2110,6 +2154,8 @@ def build_report(output: Path) -> tuple[dict[str, object], list[dict[str, object
         "verified_jobs": sum(bool(item.get("verified")) for item in results),
         "evidence_ok_jobs": sum(bool(item.get("evidence_ok")) for item in results),
         "benchmarks": len(plan["benchmarks"]), "repeats": plan["repeats"],
+        "outer_jobs": plan["execution"]["outer_jobs"], "limits": plan["limits"],
+        "selection": plan.get("selection", {}),
         "reducers": by_reducer, "comparisons": comparisons,
     }
     return summary, raw_rows, curve_rows

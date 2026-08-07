@@ -42,25 +42,59 @@ class ManagerTests(ReductionFixture):
         self.assertEqual(plan["limits"]["trial_wall_sec"], 90)
         self.assertEqual(plan["execution"]["outer_jobs"], 5)
 
+    def test_catalog_run_samples_categories_and_freezes_four_parameters(self) -> None:
+        with mock.patch.object(self.manager, "_launch", return_value={"run_id": "catalog-launched"}):
+            result = self.manager.create_run({
+                "categories": ["compact"], "reducers": ["r2"],
+                "timeout_seconds": 90, "outer_jobs": 5,
+                "max_files": 1, "repeats": 3,
+            })
+        self.assertEqual(result["run_id"], "catalog-launched")
+        run_dirs = [path for path in (self.root / "results").iterdir() if path.is_dir()]
+        self.assertEqual(len(run_dirs), 1)
+        plan = reduce.load_plan(run_dirs[0])
+        self.assertEqual(plan["selection"]["categories"], ["compact"])
+        self.assertEqual(plan["selection"]["sampled_count"], 1)
+        self.assertEqual(plan["repeats"], 3)
+        self.assertEqual(plan["limits"]["trial_wall_sec"], 90)
+        self.assertEqual(plan["execution"]["outer_jobs"], 5)
+        self.assertEqual(len(plan["benchmarks"]), 1)
+        self.assertEqual(len(plan["jobs"]), 3)
+
     def test_create_run_validates_exact_request(self) -> None:
         invalid = [
             {"study_id": "fixture"},
             {"study_id": "fixture", "reducers": [], "timeout_seconds": 1, "outer_jobs": 1},
             {"study_id": "fixture", "reducers": ["r1"], "timeout_seconds": 0, "outer_jobs": 1},
             {"study_id": "fixture", "reducers": ["r1"], "timeout_seconds": 1, "outer_jobs": 0},
+            {"categories": [], "reducers": ["r1"], "timeout_seconds": 1, "outer_jobs": 1, "max_files": 1, "repeats": 1},
+            {"categories": ["missing"], "reducers": ["r1"], "timeout_seconds": 1, "outer_jobs": 1, "max_files": 1, "repeats": 1},
+            {"categories": ["compact"], "reducers": ["r1"], "timeout_seconds": 1, "outer_jobs": 1, "max_files": 0, "repeats": 1},
         ]
         for body in invalid:
             with self.subTest(body=body), self.assertRaises(ValueError):
                 self.manager.create_run(body)
 
-    def test_wrong_branch_keeps_history_visible_but_blocks_mutations(self) -> None:
+    def test_project_branch_does_not_control_smtbatch_gate(self) -> None:
         subprocess.run(["git", "switch", "-c", "wrong"], cwd=self.root, check=True, stdout=subprocess.DEVNULL)
         self.manager._refresh_config()
         config = self.manager.configuration()
-        self.assertFalse(config["can_launch"])
-        self.assertIn("expected 'main'", config["branch_error"])
+        self.assertTrue(config["can_launch"])
+        self.assertEqual(config["smtbatch_branch"], "feat/reduction")
         self.assertEqual(self.manager.studies()[0]["study_id"], "fixture")
-        with self.assertRaisesRegex(ValueError, "expected 'main'"):
+
+    def test_wrong_smtbatch_branch_keeps_history_visible_but_blocks_mutations(self) -> None:
+        subprocess.run(
+            ["git", "switch", "-c", "wrong"],
+            cwd=self.smtbatch_root, check=True, stdout=subprocess.DEVNULL,
+        )
+        self.manager._refresh_config()
+        config = self.manager.configuration()
+        self.assertFalse(config["can_launch"])
+        self.assertIn("expected 'feat/reduction'", config["branch_error"])
+        self.assertIn("SMTBatch", config["branch_error"])
+        self.assertEqual(self.manager.studies()[0]["study_id"], "fixture")
+        with self.assertRaisesRegex(ValueError, "expected 'feat/reduction'"):
             self.manager.create_run({
                 "study_id": "fixture", "reducers": ["r1"],
                 "timeout_seconds": 30, "outer_jobs": 1,
@@ -74,6 +108,7 @@ class ManagerTests(ReductionFixture):
         self.assertEqual(summary["total_trials"], 2)
         self.assertEqual(summary["outer_jobs"], 3)
         self.assertEqual(summary["limits"]["trial_wall_sec"], 70)
+        self.assertEqual(summary["prepared_smtbatch_branch"], "feat/reduction")
         cases = self.manager._case_rows("prepared", {"page": ["1"], "page_size": ["25"]})
         self.assertEqual(cases["total"], 1)
         self.assertEqual(cases["cases"][0]["status"], "pending")
@@ -132,11 +167,17 @@ class HttpTests(ReductionFixture):
         html = data.decode("utf-8")
         self.assertEqual(status, 200)
         self.assertIn("SMTBatch Reduce", html)
-        self.assertIn("Trial timeout", html)
-        self.assertIn("Outer parallel jobs", html)
+        self.assertIn("Total trial timeout", html)
+        self.assertIn("Parallel jobs", html)
+        self.assertIn("Maximum benchmark files", html)
+        self.assertIn("Repeats", html)
+        self.assertIn("SMTBatch branch", html)
+        self.assertIn('id="categories"', html)
         self.assertIn('id="reducers"', html)
+        self.assertIn("Confirm reduction experiment", html)
         self.assertIn("View results", html)
         self.assertNotIn("Reduction / Observation", html)
+        self.assertNotIn("Study conditions", html)
         self.assertNotIn("Cactus", html)
         self.assertNotIn("PAR-2", html)
 
@@ -155,8 +196,12 @@ class HttpTests(ReductionFixture):
         payload = json.loads(data)
         self.assertEqual(status, 200)
         self.assertTrue(payload["config"]["can_launch"])
+        self.assertEqual(payload["config"]["smtbatch_branch"], "feat/reduction")
         self.assertEqual({item["id"] for item in payload["config"]["reducers"]}, {"r1", "r2"})
         self.assertEqual(payload["studies"][0]["study_id"], "fixture")
+        self.assertTrue(payload["catalog"]["valid"])
+        self.assertEqual(payload["catalog"]["total_benchmarks"], 1)
+        self.assertEqual(payload["catalog"]["categories"][0]["id"], "compact")
 
     def test_runs_api_rejects_old_study_only_shape(self) -> None:
         status, _, data = self.request("POST", "/api/runs", {"study_id": "fixture"})

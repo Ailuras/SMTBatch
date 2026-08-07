@@ -15,13 +15,34 @@ class ReductionFixture(unittest.TestCase):
         (self.root / "studies").mkdir()
         (self.root / "benchmarks").mkdir()
         (self.root / "benchmarks" / "case.smt2").write_text("(check-sat)\n", encoding="utf-8")
-        (self.root / ".gitignore").write_text("results/\n", encoding="utf-8")
+        (self.root / "benchmarks" / "database.json").write_text(
+            json.dumps({"case.smt2": {"match": "exitcode", "binary": "fixture"}}),
+            encoding="utf-8",
+        )
+        (self.root / ".gitignore").write_text("results/\nSMTBatch/\n", encoding="utf-8")
+        self.smtbatch_root = self.root / "SMTBatch"
+        self.smtbatch_root.mkdir()
+        (self.smtbatch_root / "branch-marker").write_text(
+            "reduction\n", encoding="utf-8"
+        )
         self.config_path = self.root / "smtbatch.toml"
         self.config_path.write_text(
             """[defaults]
 results = "results"
 studies = "studies"
 port = 8001
+target_branch = "feat/reduction"
+
+[benchmark_catalog]
+database = "benchmarks/database.json"
+inputs = "benchmarks"
+template = "studies/study.json"
+
+[benchmark_categories.compact]
+label = "Compact fixture"
+description = "Fixture input size"
+min_bytes = 0
+max_bytes = 100
 
 [reducers.r1]
 label = "Reducer one"
@@ -81,6 +102,21 @@ command = ["/bin/true", "--r2", "{input}", "{output}", "{predicate}"]
             }, indent=2),
             encoding="utf-8",
         )
+        subprocess.run(
+            ["git", "init", "-b", "feat/reduction"],
+            cwd=self.smtbatch_root, check=True, stdout=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            ["git", "add", "branch-marker"],
+            cwd=self.smtbatch_root, check=True,
+        )
+        subprocess.run(
+            [
+                "git", "-c", "user.name=Test", "-c", "user.email=test@example.com",
+                "commit", "-m", "fixture SMTBatch",
+            ],
+            cwd=self.smtbatch_root, check=True, stdout=subprocess.DEVNULL,
+        )
         subprocess.run(["git", "init", "-b", "main"], cwd=self.root, check=True, stdout=subprocess.DEVNULL)
         subprocess.run(["git", "add", "."], cwd=self.root, check=True)
         subprocess.run(
@@ -95,12 +131,13 @@ command = ["/bin/true", "--r2", "{input}", "{output}", "{predicate}"]
 class ConfigTests(ReductionFixture):
     def test_config_is_reduction_only_and_versions_are_independent(self) -> None:
         config = load_config(self.root)
-        self.assertEqual(config.target_branch, "main")
+        self.assertEqual(config.target_branch, "feat/reduction")
+        self.assertEqual(config.smtbatch_root, self.smtbatch_root.resolve())
         self.assertEqual(set(config.reducers), {"r1", "r2"})
         self.assertEqual(config.reducers["r1"].version, "v1")
         self.assertEqual(config.reducers["r2"].evidence_level, "summary")
         self.assertNotEqual(config.reducers["r1"], config.reducers["r2"])
-        self.assertEqual(validate_target_branch(config), "main")
+        self.assertEqual(validate_target_branch(config), "feat/reduction")
 
     def test_solver_tables_and_mode_are_rejected(self) -> None:
         self.config_path.write_text("[defaults]\nmode='reduction'\n[solvers.x]\nbinary='/bin/true'\n", encoding="utf-8")
@@ -153,6 +190,10 @@ class PlanTests(ReductionFixture):
         self.assertTrue(loaded["reducers"][0]["identity"]["executable_sha256"])
         self.assertTrue((output / "plan.complete.json").is_file())
         self.assertEqual(len((output / "jobs.tsv").read_text().splitlines()), 3)
+        self.assertEqual(
+            reduce.repository_branch(plan["repository"], self.smtbatch_root),
+            "feat/reduction",
+        )
 
     def test_prepare_rejects_different_options_for_existing_run(self) -> None:
         output = self.root / "results" / "prepared"

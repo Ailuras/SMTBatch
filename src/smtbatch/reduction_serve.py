@@ -5,10 +5,13 @@ from __future__ import annotations
 import argparse
 from collections import OrderedDict, Counter
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
+import random
 import re
+import secrets
 import signal
 import subprocess
 import sys
@@ -30,6 +33,16 @@ LOOPBACK_HOSTS = {"127.0.0.1", "localhost"}
 MAX_PAGE_SIZE = 100
 DEFAULT_PAGE_SIZE = 25
 MAX_TRAJECTORY_POINTS = 20000
+BENCHMARK_FEATURE_PATTERNS = {
+    "arrays": re.compile(rb"\barray|\bselect|\bstore", re.IGNORECASE),
+    "bitvectors": re.compile(rb"bitvec|\bbv[a-z]|\(_\s*extract|\(_\s*zero_extend", re.IGNORECASE),
+    "strings": re.compile(rb"str\.|string|seq\.|\bre\.", re.IGNORECASE),
+    "quantifiers": re.compile(rb"\bforall\b|\bexists\b", re.IGNORECASE),
+    "datatypes": re.compile(rb"declare-datatypes|declare-datatype|\bmatch\b|constructor", re.IGNORECASE),
+    "floatingpoint": re.compile(rb"floatingpoint|fp\.", re.IGNORECASE),
+    "reals": re.compile(rb"\breal\b|to_real|\bdiv\b", re.IGNORECASE),
+    "optimization": re.compile(rb"maximize|minimize|assert-soft|check-sat-assuming", re.IGNORECASE),
+}
 
 
 def dashboard_path() -> Path:
@@ -84,12 +97,12 @@ def _json_response(handler: BaseHTTPRequestHandler, value: object,
     payload = json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
-    handler.send_response(status)
-    handler.send_header("Content-Type", "application/json; charset=utf-8")
-    handler.send_header("Cache-Control", "no-store")
-    handler.send_header("Content-Length", str(len(payload)))
-    handler.end_headers()
     try:
+        handler.send_response(status)
+        handler.send_header("Content-Type", "application/json; charset=utf-8")
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Content-Length", str(len(payload)))
+        handler.end_headers()
         handler.wfile.write(payload)
     except (BrokenPipeError, ConnectionResetError):
         pass
@@ -131,6 +144,17 @@ def _stat_signature(path: Path) -> tuple[int, int] | None:
     return stat.st_ino, stat.st_size ^ stat.st_mtime_ns
 
 
+def _benchmark_features(path: Path) -> set[str]:
+    try:
+        text = path.read_bytes()
+    except OSError:
+        return set()
+    return {
+        name for name, pattern in BENCHMARK_FEATURE_PATTERNS.items()
+        if pattern.search(text)
+    }
+
+
 class ReductionManager:
     """Discover studies, launch frozen runs, and provide bounded live views."""
 
@@ -140,7 +164,7 @@ class ReductionManager:
         self.results_root = self.project_root / "results"
         self.studies_root = self.project_root / "scripts" / "experiments"
         self.config: Config
-        self.current_branch = ""
+        self.current_smtbatch_branch = ""
         self.branch_valid = False
         self.branch_error = ""
         self._config_signature: tuple[str, int, int] | None = None
@@ -148,6 +172,7 @@ class ReductionManager:
         self.processes: dict[str, subprocess.Popen[str]] = {}
         self._process_lock = threading.RLock()
         self._study_cache: tuple[tuple[tuple[str, tuple[int, int] | None], ...], dict[str, dict[str, object]]] | None = None
+        self._catalog_cache: tuple[tuple[object, ...], dict[str, object]] | None = None
         self._trajectory_cache: OrderedDict[tuple[str, str], tuple[object, dict[str, object]]] = OrderedDict()
         self._trajectory_lock = threading.Lock()
 
@@ -161,19 +186,20 @@ class ReductionManager:
         config = load_config(self.project_root)
         current_branch, branch_valid, branch_error = branch_status(config)
         if signature == self._config_signature:
-            self.current_branch = current_branch
+            self.current_smtbatch_branch = current_branch
             self.branch_valid = branch_valid
             self.branch_error = branch_error
             return
         self._config_signature = signature
         self.config = config
-        self.current_branch = current_branch
+        self.current_smtbatch_branch = current_branch
         self.branch_valid = branch_valid
         self.branch_error = branch_error
         self.config_path = config.path
         self.results_root = config.results_root.resolve()
         self.studies_root = config.studies_root.resolve()
         self._study_cache = None
+        self._catalog_cache = None
         if hasattr(self, "_trajectory_lock"):
             with self._trajectory_lock:
                 self._trajectory_cache.clear()
@@ -182,12 +208,227 @@ class ReductionManager:
         self._refresh_config()
         return {
             "target_branch": self.config.target_branch,
-            "current_branch": self.current_branch,
+            "smtbatch_root": str(self.config.smtbatch_root),
+            "smtbatch_branch": self.current_smtbatch_branch,
+            # Keep current_branch as a compatibility alias for existing clients.
+            "current_branch": self.current_smtbatch_branch,
             "branch_valid": self.branch_valid,
             "can_launch": self.branch_valid,
             "branch_error": self.branch_error,
             "reducers": list(self.config.reducer_options),
+            "benchmark_database": str(self.config.benchmark_database),
+            "benchmark_inputs": str(self.config.benchmark_inputs_root),
             "port": self.config.port,
+        }
+
+    def _benchmark_catalog(self) -> dict[str, object]:
+        """Build the project benchmark catalogue from the frozen database.
+
+        The generated manifest is kept under results as an internal source
+        snapshot.  A run copies the normalized catalogue into its immutable
+        study/plan artifacts, so the generated file is only a convenient
+        bridge between the project database and the generic reduction engine.
+        """
+        self._refresh_config()
+        database_path = self.config.benchmark_database
+        template_path = self.config.benchmark_template
+        input_signature = ()
+        if self.config.benchmark_inputs_root.is_dir() and not self.config.benchmark_inputs_root.is_symlink():
+            input_signature = tuple(
+                (path.name, _stat_signature(path))
+                for path in sorted(self.config.benchmark_inputs_root.iterdir())
+                if path.is_file() and not path.is_symlink()
+            )
+        signature = (
+            str(database_path), _stat_signature(database_path),
+            input_signature,
+            str(template_path) if template_path else "", _stat_signature(template_path) if template_path else None,
+            str(self.config.path), _stat_signature(self.config.path),
+            tuple(
+                (name, spec.label, spec.description, spec.min_bytes, spec.max_bytes,
+                 spec.any_features, spec.required_features, spec.forbidden_features,
+                 spec.fallback)
+                for name, spec in self.config.benchmark_categories.items()
+            ),
+        )
+        if self._catalog_cache is not None and self._catalog_cache[0] == signature:
+            return self._catalog_cache[1]
+
+        base: dict[str, object] = {
+            "id": "benchmark-catalog",
+            "valid": False,
+            "error": "",
+            "database": {"path": str(database_path)},
+            "categories": [],
+            "total_benchmarks": 0,
+        }
+        if not self.config.benchmark_categories:
+            base["error"] = "no benchmark categories are configured"
+            self._catalog_cache = (signature, base)
+            return base
+        if not database_path.is_file() or database_path.is_symlink():
+            base["error"] = f"benchmark database is missing: {database_path}"
+            self._catalog_cache = (signature, base)
+            return base
+        if not self.config.benchmark_inputs_root.is_dir() or self.config.benchmark_inputs_root.is_symlink():
+            base["error"] = f"benchmark inputs directory is missing: {self.config.benchmark_inputs_root}"
+            self._catalog_cache = (signature, base)
+            return base
+        if template_path is None or not template_path.is_file() or template_path.is_symlink():
+            base["error"] = f"benchmark template is missing: {template_path}"
+            self._catalog_cache = (signature, base)
+            return base
+        try:
+            database = json.loads(database_path.read_text(encoding="utf-8"))
+            template = json.loads(template_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            base["error"] = f"unable to read benchmark catalogue: {exc}"
+            self._catalog_cache = (signature, base)
+            return base
+        if not isinstance(database, dict) or not all(isinstance(key, str) for key in database):
+            base["error"] = "benchmark database must be an object with string case IDs"
+            self._catalog_cache = (signature, base)
+            return base
+        if not isinstance(template, dict):
+            base["error"] = "benchmark template must be a JSON object"
+            self._catalog_cache = (signature, base)
+            return base
+
+        category_cases: dict[str, list[str]] = {
+            name: [] for name in self.config.benchmark_categories
+        }
+        benchmarks: list[dict[str, object]] = []
+        errors: list[str] = []
+        for filename in sorted(database):
+            entry = database[filename]
+            if not isinstance(entry, dict):
+                errors.append(f"{filename}: database row is not an object")
+                continue
+            if Path(filename).name != filename or not ID_RE.fullmatch(filename):
+                errors.append(f"{filename}: invalid benchmark filename")
+                continue
+            input_path = (self.config.benchmark_inputs_root / filename).resolve()
+            if not _within(input_path, self.config.benchmark_inputs_root) or not input_path.is_file() or input_path.is_symlink():
+                errors.append(f"{filename}: benchmark input is missing: {input_path}")
+                continue
+            features = _benchmark_features(input_path)
+            matches = [
+                spec for spec in self.config.benchmark_categories.values()
+                if spec.matches(input_path.stat().st_size, features)
+            ]
+            if len(matches) != 1:
+                errors.append(
+                    f"{filename}: expected one category, matched "
+                    f"{', '.join(spec.name for spec in matches) or 'none'}"
+                )
+                continue
+            category = matches[0]
+            mode = entry.get("match")
+            if mode not in {"stderr", "stdout", "incorrect", "incorrect-unknown", "exitcode"}:
+                errors.append(f"{filename}: unsupported database match mode {mode!r}")
+                continue
+            if mode in {"stderr", "stdout"}:
+                predicate_match = {"match_stdout": "matched"}
+            elif mode in {"incorrect", "incorrect-unknown"}:
+                predicate_match = {"match_stdout": "different"}
+            else:
+                predicate_match = {}
+            benchmark = {
+                "id": filename,
+                "input": str(input_path),
+                "family": category.name,
+                "theory": str(entry.get("theory", "unknown")),
+                "predicate_mode": f"artifact-{mode}",
+                "solver": dict(entry),
+                "predicate": {
+                    "command": ["scripts/solvers/ddsmt-artifact.sh", filename],
+                    "match": predicate_match,
+                },
+            }
+            category_cases[category.name].append(filename)
+            benchmarks.append(benchmark)
+
+        if errors:
+            base["error"] = "benchmark catalogue validation failed: " + "; ".join(errors[:8])
+            base["validation_errors"] = errors
+            self._catalog_cache = (signature, base)
+            return base
+
+        database_sha256 = reduction._sha256_path(database_path)
+        template_sha256 = reduction._sha256_path(template_path)
+        category_payload = []
+        for name, spec in self.config.benchmark_categories.items():
+            category_payload.append({
+                **spec.option,
+                "count": len(category_cases[name]),
+            })
+        category_config = [
+            {"id": name, **spec.option}
+            for name, spec in self.config.benchmark_categories.items()
+        ]
+        category_config_sha256 = hashlib.sha256(
+            json.dumps(category_config, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        catalog_payload = {
+            "database": {"path": str(database_path), "sha256": database_sha256},
+            "inputs": {"root": str(self.config.benchmark_inputs_root)},
+            "template": {"path": str(template_path), "sha256": template_sha256},
+            "categories": category_payload,
+            "category_config_sha256": category_config_sha256,
+        }
+        template["schema_version"] = reduction.SCHEMA_VERSION
+        template["kind"] = "reduction"
+        template["study_id"] = "benchmark-catalog"
+        template["root"] = str(self.project_root)
+        template["benchmarks"] = benchmarks
+        template["catalog"] = catalog_payload
+        self.results_root.mkdir(parents=True, exist_ok=True)
+        manifest_path = self.results_root / ".benchmark-catalog.json"
+        manifest_bytes = (
+            json.dumps(template, sort_keys=True, ensure_ascii=True, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+        try:
+            if not manifest_path.is_file() or manifest_path.read_bytes() != manifest_bytes:
+                manifest_path.write_bytes(manifest_bytes)
+            study = reduction.load_study(manifest_path)
+        except (OSError, reduction.ReductionError) as exc:
+            base["error"] = f"generated benchmark catalogue is invalid: {exc}"
+            self._catalog_cache = (signature, base)
+            return base
+        record = {
+            "id": "benchmark-catalog",
+            "valid": True,
+            "study_id": study["study_id"],
+            "database": catalog_payload["database"],
+            "template": catalog_payload["template"],
+            "category_config_sha256": category_config_sha256,
+            "categories": category_payload,
+            "total_benchmarks": len(benchmarks),
+            "default_timeout_seconds": study["limits"]["trial_wall_sec"],
+            "default_outer_jobs": study["execution"]["outer_jobs"],
+            "default_repeats": study["repeats"],
+            "predicate_timeout_seconds": study["limits"]["predicate_timeout_sec"],
+            "memory_mb": study["limits"]["memory_mb"],
+            "schedule": study["execution"]["schedule"],
+            "reducers": [
+                self.config.reducers[str(item)].option
+                for item in study["reducers"] if str(item) in self.config.reducers
+            ],
+            "manifest_path": str(manifest_path),
+        }
+        self._catalog_cache = (signature, {
+            **record,
+            "study": study,
+            "category_cases": category_cases,
+        })
+        return self._catalog_cache[1]
+
+    def benchmark_catalog(self) -> dict[str, object]:
+        value = self._benchmark_catalog()
+        return {
+            key: value[key]
+            for key in value
+            if key not in {"study", "category_cases"}
         }
 
     def _study_files(self) -> list[Path]:
@@ -217,7 +458,7 @@ class ReductionManager:
             "valid": False,
             "provenance_errors": [],
             "target_branch": self.config.target_branch,
-            "current_branch": self.current_branch,
+            "smtbatch_branch": self.current_smtbatch_branch,
         }
         if not base["tracked"]:
             base["provenance_errors"] = ["manifest is not tracked by the project Git repository"]
@@ -364,16 +605,56 @@ class ReductionManager:
         }
 
     def create_run(self, body: object) -> dict[str, object]:
-        expected = {"study_id", "reducers", "timeout_seconds", "outer_jobs"}
-        if not isinstance(body, dict) or set(body) != expected:
-            raise ValueError("request must contain study_id, reducers, timeout_seconds, and outer_jobs")
         self._refresh_config()
         if not self.branch_valid:
             raise ValueError(self.branch_error)
-        study_id = _safe_id(body.get("study_id"), "study_id")
-        study = self.study(study_id)
-        if not study.get("valid"):
-            raise ValueError(str(study.get("error", "invalid study")))
+        # Keep accepting the old internal shape for already prepared scripts;
+        # the dashboard and documented API use the catalogue shape below.
+        legacy = {"study_id", "reducers", "timeout_seconds", "outer_jobs"}
+        if isinstance(body, dict) and set(body) == legacy:
+            study_id = _safe_id(body.get("study_id"), "study_id")
+            study = self.study(study_id)
+            if not study.get("valid"):
+                raise ValueError(str(study.get("error", "invalid study")))
+            selected = body.get("reducers")
+            if not isinstance(selected, list) or not selected or not all(isinstance(item, str) for item in selected):
+                raise ValueError("reducers must be a non-empty list of reducer IDs")
+            if len(set(selected)) != len(selected):
+                raise ValueError("reducers must not contain duplicates")
+            timeout_seconds = body.get("timeout_seconds")
+            outer_jobs = body.get("outer_jobs")
+            if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)) or timeout_seconds <= 0:
+                raise ValueError("timeout_seconds must be a positive number")
+            if isinstance(outer_jobs, bool) or not isinstance(outer_jobs, int) or outer_jobs <= 0:
+                raise ValueError("outer_jobs must be a positive integer")
+            self.results_root.mkdir(parents=True, exist_ok=True)
+            run_id = f"{study_id}-{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-{uuid.uuid4().hex[:8]}"
+            run_dir = self._run_dir(run_id)
+            if run_dir.exists():
+                raise ValueError("run id collision; retry")
+            reduction.prepare(
+                Path(str(study["path"])), run_dir,
+                reducers=selected, timeout_seconds=float(timeout_seconds), outer_jobs=outer_jobs,
+            )
+            return self._launch(run_id, run_dir)
+
+        expected = {"categories", "reducers", "timeout_seconds", "outer_jobs", "max_files", "repeats"}
+        if not isinstance(body, dict) or set(body) != expected:
+            raise ValueError(
+                "request must contain categories, reducers, timeout_seconds, outer_jobs, max_files, and repeats"
+            )
+        catalog = self._benchmark_catalog()
+        if not catalog.get("valid"):
+            raise ValueError(str(catalog.get("error", "invalid benchmark catalogue")))
+        categories = body.get("categories")
+        if not isinstance(categories, list) or not categories or not all(isinstance(item, str) for item in categories):
+            raise ValueError("categories must be a non-empty list of category IDs")
+        if len(set(categories)) != len(categories):
+            raise ValueError("categories must not contain duplicates")
+        category_cases = catalog["category_cases"]
+        unknown_categories = [item for item in categories if item not in category_cases]
+        if unknown_categories:
+            raise ValueError(f"unknown benchmark category: {', '.join(unknown_categories)}")
         selected = body.get("reducers")
         if not isinstance(selected, list) or not selected or not all(isinstance(item, str) for item in selected):
             raise ValueError("reducers must be a non-empty list of reducer IDs")
@@ -381,18 +662,44 @@ class ReductionManager:
             raise ValueError("reducers must not contain duplicates")
         timeout_seconds = body.get("timeout_seconds")
         outer_jobs = body.get("outer_jobs")
+        max_files = body.get("max_files")
+        repeats = body.get("repeats")
         if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)) or timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be a positive number")
         if isinstance(outer_jobs, bool) or not isinstance(outer_jobs, int) or outer_jobs <= 0:
             raise ValueError("outer_jobs must be a positive integer")
+        if isinstance(max_files, bool) or not isinstance(max_files, int) or max_files <= 0:
+            raise ValueError("max_files must be a positive integer")
+        if isinstance(repeats, bool) or not isinstance(repeats, int) or repeats <= 0:
+            raise ValueError("repeats must be a positive integer")
+        candidate_ids = sorted({
+            case_id for category in categories for case_id in category_cases[category]
+        })
+        if not candidate_ids:
+            raise ValueError("selected benchmark categories contain no cases")
+        seed = secrets.randbits(64)
+        sampler = random.Random(seed)
+        sampled_count = min(max_files, len(candidate_ids))
+        selected_benchmark_ids = sorted(sampler.sample(candidate_ids, sampled_count))
+        selection = {
+            "categories": list(categories),
+            "candidate_count": len(candidate_ids),
+            "max_files": max_files,
+            "sampled_count": sampled_count,
+            "random_seed": seed,
+            "selected_benchmark_ids": selected_benchmark_ids,
+            "database_sha256": catalog["database"]["sha256"],
+            "category_config_sha256": catalog["category_config_sha256"],
+        }
         self.results_root.mkdir(parents=True, exist_ok=True)
-        run_id = f"{study_id}-{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-{uuid.uuid4().hex[:8]}"
+        run_id = f"benchmark-catalog-{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-{uuid.uuid4().hex[:8]}"
         run_dir = self._run_dir(run_id)
         if run_dir.exists():
             raise ValueError("run id collision; retry")
         reduction.prepare(
-            Path(str(study["path"])), run_dir,
+            Path(str(catalog["manifest_path"])), run_dir,
             reducers=selected, timeout_seconds=float(timeout_seconds), outer_jobs=outer_jobs,
+            benchmark_ids=selected_benchmark_ids, repeats=repeats, selection=selection,
         )
         return self._launch(run_id, run_dir)
 
@@ -661,13 +968,15 @@ class ReductionManager:
             "schedule": plan["execution"]["schedule"],
             "wave_count": max((int(job["wave"]) for job in plan["jobs"]), default=0),
             "repeats": plan["repeats"],
+            "selection": plan.get("selection", {}),
+            "catalog": plan.get("catalog", {}),
             "limits": plan["limits"],
             "target_branch": self.config.target_branch,
-            "current_branch": self.current_branch,
-            "prepared_branch": (
-                plan.get("repository", {}).get("branch")
-                if isinstance(plan.get("repository"), dict) else None
-            ),
+            "smtbatch_branch": self.current_smtbatch_branch,
+            "current_branch": self.current_smtbatch_branch,
+            "prepared_smtbatch_branch": reduction.repository_branch(
+                plan.get("repository", {}), self.config.smtbatch_root
+            ) if isinstance(plan.get("repository"), dict) else None,
             "source_sha256": plan["source"]["sha256"],
             "plan_sha256": plan.get("plan_sha256"),
             "repository": plan.get("repository"),
@@ -743,7 +1052,11 @@ def handler_factory(manager: ReductionManager):
                 if path == "/api/studies":
                     _json_response(
                         self,
-                        {"config": manager.configuration(), "studies": manager.studies()},
+                        {
+                            "config": manager.configuration(),
+                            "catalog": manager.benchmark_catalog(),
+                            "studies": manager.studies(),
+                        },
                     )
                     return
                 match = re.fullmatch(r"/api/studies/([^/]+)", path)
