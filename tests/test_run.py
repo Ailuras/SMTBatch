@@ -29,7 +29,6 @@ class ReductionFixture(unittest.TestCase):
         self.config_path.write_text(
             """[defaults]
 results = "results"
-studies = "studies"
 port = 8001
 target_branch = "feat/reduction"
 
@@ -46,20 +45,10 @@ max_bytes = 100
 
 [reducers.r1]
 label = "Reducer one"
-version = "v1"
-strategy = "ddmin"
-evidence_level = "none"
-acceptance = "serial-inferred"
-stats = "none"
 command = ["/bin/true", "--r1", "{input}", "{output}", "{predicate}"]
 
 [reducers.r2]
 label = "Reducer two"
-version = "v2"
-strategy = "hierarchical"
-evidence_level = "summary"
-acceptance = "trace"
-stats = "required"
 command = ["/bin/true", "--r2", "{input}", "{output}", "{predicate}"]
 """,
             encoding="utf-8",
@@ -129,19 +118,21 @@ command = ["/bin/true", "--r2", "{input}", "{output}", "{predicate}"]
 
 
 class ConfigTests(ReductionFixture):
-    def test_config_is_reduction_only_and_versions_are_independent(self) -> None:
+    def test_config_exposes_black_box_reducer_commands(self) -> None:
         config = load_config(self.root)
         self.assertEqual(config.target_branch, "feat/reduction")
         self.assertEqual(config.smtbatch_root, self.smtbatch_root.resolve())
         self.assertEqual(set(config.reducers), {"r1", "r2"})
-        self.assertEqual(config.reducers["r1"].version, "v1")
-        self.assertEqual(config.reducers["r2"].evidence_level, "summary")
-        self.assertNotEqual(config.reducers["r1"], config.reducers["r2"])
+        self.assertEqual(config.reducers["r1"].label, "Reducer one")
+        self.assertEqual(config.reducers["r2"].command[0], "/bin/true")
         self.assertEqual(validate_target_branch(config), "feat/reduction")
 
-    def test_solver_tables_and_mode_are_rejected(self) -> None:
+    def test_legacy_solver_and_project_fields_are_rejected(self) -> None:
         self.config_path.write_text("[defaults]\nmode='reduction'\n[solvers.x]\nbinary='/bin/true'\n", encoding="utf-8")
         with self.assertRaisesRegex(RuntimeError, "unknown top-level config tables"):
+            load_config(self.root)
+        self.config_path.write_text("[defaults]\ninputs='benchmarks'\nstudies='studies'\n", encoding="utf-8")
+        with self.assertRaisesRegex(RuntimeError, r"unknown \[defaults\] fields"):
             load_config(self.root)
 
     def test_cli_exposes_only_serve_and_reduce(self) -> None:

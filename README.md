@@ -14,25 +14,28 @@ SMTBatch discovers the closest `smtbatch.toml` while walking upward from the cur
 
 ## Project configuration
 
-Every `[reducers.<id>]` entry is one concrete, independently selectable reducer version/configuration. Different strategies, versions, and evidence levels use different IDs.
+Every `[reducers.<id>]` entry is one black-box reducer command. SMTBatch only supplies generic input/output/predicate arguments and records generic reduction measurements; it does not interpret the reducer's strategy or version.
 
 ```toml
 [defaults]
-inputs = "benchmarks"
 results = "results"
-studies = "scripts/experiments"
 port = 8001
 target_branch = "feat/reduction" # SMTBatch checkout branch; defaults to main
 
-[reducers.ddmin-summary]
-label = "D3SMT ddmin · observer summary"
-version = "project"
-strategy = "ddmin"
-evidence_level = "summary"
-acceptance = "trace"
-stats = "required"
-command = ["python3", "-m", "src", "--strategy", "ddmin", "--observe", "summary", "--observation-dir", "{observation_dir}", "--observation-stats", "{observation_stats}", "-j", "1", "--timeout", "{predicate_timeout}", "--ignore-output", "{input}", "{output}", "{predicate}"]
+[reducers.ddsmt]
+label = "ddSMT"
+command = ["/home/hanrui/ddsmt/bin/ddsmt", "-j", "1", "--timeout", "{predicate_timeout}", "--ignore-output", "{input}", "{output}", "{predicate}"]
+
+[reducers.d3smt]
+label = "D3SMT"
+command = ["/usr/bin/python3", "-m", "src", "-j", "1", "--timeout", "{predicate_timeout}", "--ignore-output", "{input}", "{output}", "{predicate}"]
 ```
+
+The default evidence path is external: SMTBatch wraps every predicate call, records the
+candidate size vector, file hashes, solver outcome, elapsed time, and reducer stdout/stderr.
+The report therefore gives a generic size-decline curve for every reducer. D3SMT's captured
+logs may be inspected for white-box diagnosis, but no baseline must implement a D3SMT-specific
+observer.
 
 A reduction-v2 study contains benchmark predicates, default resource limits, repeats, comparisons, and a list of allowed reducer IDs. Reducer commands are not duplicated in the study. When a run is created, SMTBatch freezes the selected reducer definitions, resolved command/file hashes, timeout, outer jobs, repository identity, and strict-wave job matrix into the run plan. Resume always uses that immutable plan.
 
@@ -47,9 +50,9 @@ smtbatch serve restart
 smtbatch serve stop
 smtbatch serve foreground
 
-smtbatch reduce prepare scripts/experiments/smoke.json \
+smtbatch reduce prepare results/.benchmark-catalog.json \
   --output results/smoke \
-  --reducers ddsmt-stock ddmin-summary \
+  --reducers ddsmt d3smt \
   --timeout 3600 \
   --jobs 4
 smtbatch reduce run results/smoke

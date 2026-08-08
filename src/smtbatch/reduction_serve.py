@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections import OrderedDict, Counter
+from datetime import datetime, timezone
 import fcntl
 import hashlib
 import json
@@ -25,7 +26,14 @@ from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from . import reduce as reduction
-from .config import Config, branch_status, find_config_path, load_config, validate_target_branch
+from .config import (
+    BenchmarkCategorySpec,
+    Config,
+    branch_status,
+    find_config_path,
+    load_config,
+    validate_target_branch,
+)
 
 
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -124,18 +132,6 @@ def _read_json_body(handler: BaseHTTPRequestHandler) -> object:
         raise ValueError(f"invalid JSON body: {exc}") from None
 
 
-def _tracked(path: Path, root: Path) -> bool:
-    try:
-        relative = path.resolve().relative_to(root.resolve()).as_posix()
-        result = subprocess.run(
-            ["git", "-C", str(root), "ls-files", "--error-unmatch", "--", relative],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
-        )
-    except OSError:
-        return False
-    return result.returncode == 0
-
-
 def _stat_signature(path: Path) -> tuple[int, int] | None:
     try:
         stat = path.stat()
@@ -156,13 +152,12 @@ def _benchmark_features(path: Path) -> set[str]:
 
 
 class ReductionManager:
-    """Discover studies, launch frozen runs, and provide bounded live views."""
+    """Build benchmark catalogs, launch frozen runs, and provide live views."""
 
     def __init__(self, project_root: Path) -> None:
         self.project_root = project_root.expanduser().resolve()
         self.config_path = self.project_root / "smtbatch.toml"
         self.results_root = self.project_root / "results"
-        self.studies_root = self.project_root / "scripts" / "experiments"
         self.config: Config
         self.current_smtbatch_branch = ""
         self.branch_valid = False
@@ -171,7 +166,6 @@ class ReductionManager:
         self._refresh_config()
         self.processes: dict[str, subprocess.Popen[str]] = {}
         self._process_lock = threading.RLock()
-        self._study_cache: tuple[tuple[tuple[str, tuple[int, int] | None], ...], dict[str, dict[str, object]]] | None = None
         self._catalog_cache: tuple[tuple[object, ...], dict[str, object]] | None = None
         self._trajectory_cache: OrderedDict[tuple[str, str], tuple[object, dict[str, object]]] = OrderedDict()
         self._trajectory_lock = threading.Lock()
@@ -184,25 +178,73 @@ class ReductionManager:
         except (OSError, RuntimeError) as exc:
             raise ValueError(str(exc)) from None
         config = load_config(self.project_root)
-        current_branch, branch_valid, branch_error = branch_status(config)
+        smtbatch_branch, branch_valid, branch_error = branch_status(config)
         if signature == self._config_signature:
-            self.current_smtbatch_branch = current_branch
+            self.current_smtbatch_branch = smtbatch_branch
             self.branch_valid = branch_valid
             self.branch_error = branch_error
             return
         self._config_signature = signature
         self.config = config
-        self.current_smtbatch_branch = current_branch
+        self.current_smtbatch_branch = smtbatch_branch
         self.branch_valid = branch_valid
         self.branch_error = branch_error
         self.config_path = config.path
         self.results_root = config.results_root.resolve()
-        self.studies_root = config.studies_root.resolve()
-        self._study_cache = None
         self._catalog_cache = None
         if hasattr(self, "_trajectory_lock"):
             with self._trajectory_lock:
                 self._trajectory_cache.clear()
+
+    def _last_run_path(self) -> Path:
+        return self.results_root / ".last-run.json"
+
+    def _read_last_run(self) -> dict[str, object]:
+        path = self._last_run_path()
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _save_last_run(self, request: dict[str, object]) -> None:
+        """Persist the latest reduction form values for the next dashboard session."""
+        state: dict[str, object] = {
+            "categories": list(dict.fromkeys(
+                value for value in request.get("categories", []) if isinstance(value, str)
+            )),
+            "reducers": list(dict.fromkeys(
+                value for value in request.get("reducers", []) if isinstance(value, str)
+            )),
+            "timeout_seconds": request.get("timeout_seconds"),
+            "outer_jobs": request.get("outer_jobs"),
+            "max_files": request.get("max_files", 0),
+            "repeats": request.get("repeats"),
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self.results_root.mkdir(parents=True, exist_ok=True)
+        path = self._last_run_path()
+        temporary = path.with_name(
+            f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
+        try:
+            temporary.write_text(
+                json.dumps(state, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _launch_with_last_run(
+        self, run_id: str, run_dir: Path, request: dict[str, object]
+    ) -> dict[str, object]:
+        response = dict(self._launch(run_id, run_dir))
+        try:
+            self._save_last_run(request)
+        except OSError as exc:
+            response["warning"] = f"run started, but the last-run form could not be saved: {exc}"
+        return response
 
     def configuration(self) -> dict[str, object]:
         self._refresh_config()
@@ -210,8 +252,6 @@ class ReductionManager:
             "target_branch": self.config.target_branch,
             "smtbatch_root": str(self.config.smtbatch_root),
             "smtbatch_branch": self.current_smtbatch_branch,
-            # Keep current_branch as a compatibility alias for existing clients.
-            "current_branch": self.current_smtbatch_branch,
             "branch_valid": self.branch_valid,
             "can_launch": self.branch_valid,
             "branch_error": self.branch_error,
@@ -219,6 +259,7 @@ class ReductionManager:
             "benchmark_database": str(self.config.benchmark_database),
             "benchmark_inputs": str(self.config.benchmark_inputs_root),
             "port": self.config.port,
+            "last_run": self._read_last_run(),
         }
 
     def _benchmark_catalog(self) -> dict[str, object]:
@@ -230,6 +271,19 @@ class ReductionManager:
         bridge between the project database and the generic reduction engine.
         """
         self._refresh_config()
+        category_specs = self.config.benchmark_categories or {
+            "all": BenchmarkCategorySpec(
+                name="all",
+                label="All benchmarks",
+                description="Every benchmark in the project catalogue.",
+                min_bytes=None,
+                max_bytes=None,
+                any_features=(),
+                required_features=(),
+                forbidden_features=(),
+                fallback=True,
+            )
+        }
         database_path = self.config.benchmark_database
         template_path = self.config.benchmark_template
         input_signature = ()
@@ -248,7 +302,7 @@ class ReductionManager:
                 (name, spec.label, spec.description, spec.min_bytes, spec.max_bytes,
                  spec.any_features, spec.required_features, spec.forbidden_features,
                  spec.fallback)
-                for name, spec in self.config.benchmark_categories.items()
+                for name, spec in category_specs.items()
             ),
         )
         if self._catalog_cache is not None and self._catalog_cache[0] == signature:
@@ -262,10 +316,6 @@ class ReductionManager:
             "categories": [],
             "total_benchmarks": 0,
         }
-        if not self.config.benchmark_categories:
-            base["error"] = "no benchmark categories are configured"
-            self._catalog_cache = (signature, base)
-            return base
         if not database_path.is_file() or database_path.is_symlink():
             base["error"] = f"benchmark database is missing: {database_path}"
             self._catalog_cache = (signature, base)
@@ -274,13 +324,16 @@ class ReductionManager:
             base["error"] = f"benchmark inputs directory is missing: {self.config.benchmark_inputs_root}"
             self._catalog_cache = (signature, base)
             return base
-        if template_path is None or not template_path.is_file() or template_path.is_symlink():
+        if template_path is not None and (not template_path.is_file() or template_path.is_symlink()):
             base["error"] = f"benchmark template is missing: {template_path}"
             self._catalog_cache = (signature, base)
             return base
         try:
             database = json.loads(database_path.read_text(encoding="utf-8"))
-            template = json.loads(template_path.read_text(encoding="utf-8"))
+            template = (
+                json.loads(template_path.read_text(encoding="utf-8"))
+                if template_path is not None else {}
+            )
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             base["error"] = f"unable to read benchmark catalogue: {exc}"
             self._catalog_cache = (signature, base)
@@ -295,7 +348,7 @@ class ReductionManager:
             return base
 
         category_cases: dict[str, list[str]] = {
-            name: [] for name in self.config.benchmark_categories
+            name: [] for name in category_specs
         }
         benchmarks: list[dict[str, object]] = []
         errors: list[str] = []
@@ -313,7 +366,7 @@ class ReductionManager:
                 continue
             features = _benchmark_features(input_path)
             matches = [
-                spec for spec in self.config.benchmark_categories.values()
+                spec for spec in category_specs.values()
                 if spec.matches(input_path.stat().st_size, features)
             ]
             if len(matches) != 1:
@@ -341,7 +394,11 @@ class ReductionManager:
                 "predicate_mode": f"artifact-{mode}",
                 "solver": dict(entry),
                 "predicate": {
-                    "command": ["scripts/solvers/ddsmt-artifact.sh", filename],
+                    "command": [
+                        sys.executable,
+                        str(self.project_root / "benchmarks" / "ddsmt_artifact.py"),
+                        filename,
+                    ],
                     "match": predicate_match,
                 },
             }
@@ -355,16 +412,16 @@ class ReductionManager:
             return base
 
         database_sha256 = reduction._sha256_path(database_path)
-        template_sha256 = reduction._sha256_path(template_path)
+        template_sha256 = reduction._sha256_path(template_path) if template_path is not None else None
         category_payload = []
-        for name, spec in self.config.benchmark_categories.items():
+        for name, spec in category_specs.items():
             category_payload.append({
                 **spec.option,
                 "count": len(category_cases[name]),
             })
         category_config = [
             {"id": name, **spec.option}
-            for name, spec in self.config.benchmark_categories.items()
+            for name, spec in category_specs.items()
         ]
         category_config_sha256 = hashlib.sha256(
             json.dumps(category_config, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -372,20 +429,74 @@ class ReductionManager:
         catalog_payload = {
             "database": {"path": str(database_path), "sha256": database_sha256},
             "inputs": {"root": str(self.config.benchmark_inputs_root)},
-            "template": {"path": str(template_path), "sha256": template_sha256},
+            "template": (
+                {"path": str(template_path), "sha256": template_sha256}
+                if template_path is not None else None
+            ),
             "categories": category_payload,
             "category_config_sha256": category_config_sha256,
         }
-        template["schema_version"] = reduction.SCHEMA_VERSION
-        template["kind"] = "reduction"
-        template["study_id"] = "benchmark-catalog"
-        template["root"] = str(self.project_root)
-        template["benchmarks"] = benchmarks
-        template["catalog"] = catalog_payload
+        template_limits = template.get("limits", {})
+        if not isinstance(template_limits, dict):
+            base["error"] = "benchmark template limits must be an object"
+            self._catalog_cache = (signature, base)
+            return base
+        execution_template = template.get("execution", {})
+        if not isinstance(execution_template, dict):
+            execution_template = {}
+        verification_repeats = template.get("verification_repeats", 1)
+        limits = {
+            "trial_wall_sec": template_limits.get("trial_wall_sec", 120),
+            "predicate_timeout_sec": template_limits.get("predicate_timeout_sec", 25),
+            "memory_mb": template_limits.get("memory_mb", 8192),
+            "preflight_repeats": template_limits.get("preflight_repeats", 1),
+            "verification_repeats": template_limits.get(
+                "verification_repeats", verification_repeats
+            ),
+            "termination_grace_sec": template_limits.get("termination_grace_sec", 5),
+            "analysis_horizon_sec": template_limits.get(
+                "analysis_horizon_sec", template_limits.get("trial_wall_sec", 120)
+            ),
+        }
+        wrapper_script = Path(__file__).with_name("predicate.py").resolve()
+        predicate_wrapper = {
+            "command": [
+                sys.executable,
+                str(wrapper_script),
+                "--log", "{journal}",
+                "--phase", "{phase}",
+                "--solver-timeout", "{predicate_timeout}",
+                "{match_args}", "--", "{command}",
+            ],
+            "env": {},
+        }
+        configured_reducers = list(self.config.reducers)
+        comparisons = (
+            [["ddsmt", "d3smt"]]
+            if {"ddsmt", "d3smt"}.issubset(configured_reducers)
+            else []
+        )
+        normalized_template = {
+            "schema_version": reduction.SCHEMA_VERSION,
+            "kind": "reduction",
+            "study_id": "benchmark-catalog",
+            "root": str(self.project_root),
+            "execution": {
+                "outer_jobs": execution_template.get("outer_jobs", 1),
+                "schedule": "strict-wave",
+            },
+            "predicate_wrapper": predicate_wrapper,
+            "benchmarks": benchmarks,
+            "reducers": configured_reducers,
+            "repeats": template.get("repeats", 1),
+            "limits": limits,
+            "comparisons": comparisons,
+            "catalog": catalog_payload,
+        }
         self.results_root.mkdir(parents=True, exist_ok=True)
         manifest_path = self.results_root / ".benchmark-catalog.json"
         manifest_bytes = (
-            json.dumps(template, sort_keys=True, ensure_ascii=True, separators=(",", ":")) + "\n"
+            json.dumps(normalized_template, sort_keys=True, ensure_ascii=True, separators=(",", ":")) + "\n"
         ).encode("utf-8")
         try:
             if not manifest_path.is_file() or manifest_path.read_bytes() != manifest_bytes:
@@ -408,6 +519,9 @@ class ReductionManager:
             "default_outer_jobs": study["execution"]["outer_jobs"],
             "default_repeats": study["repeats"],
             "predicate_timeout_seconds": study["limits"]["predicate_timeout_sec"],
+            "preflight_repeats": study["limits"]["preflight_repeats"],
+            "verification_repeats": study["limits"]["verification_repeats"],
+            "termination_grace_seconds": study["limits"]["termination_grace_sec"],
             "memory_mb": study["limits"]["memory_mb"],
             "schedule": study["execution"]["schedule"],
             "reducers": [
@@ -430,98 +544,6 @@ class ReductionManager:
             for key in value
             if key not in {"study", "category_cases"}
         }
-
-    def _study_files(self) -> list[Path]:
-        self._refresh_config()
-        if not self.studies_root.is_dir() or self.studies_root.is_symlink():
-            return []
-        studies = []
-        for path in sorted(self.studies_root.rglob("*.json")):
-            if not path.is_file() or path.is_symlink():
-                continue
-            try:
-                raw = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeError, json.JSONDecodeError):
-                continue
-            if isinstance(raw, dict) and (
-                raw.get("schema_version") == reduction.SCHEMA_VERSION
-                or raw.get("kind") == "reduction"
-            ):
-                studies.append(path)
-        return studies
-
-    def _study_record(self, path: Path) -> dict[str, object]:
-        base = {
-            "path": str(path),
-            "relative_path": path.relative_to(self.studies_root).as_posix(),
-            "tracked": _tracked(path, self.project_root),
-            "valid": False,
-            "provenance_errors": [],
-            "target_branch": self.config.target_branch,
-            "smtbatch_branch": self.current_smtbatch_branch,
-        }
-        if not base["tracked"]:
-            base["provenance_errors"] = ["manifest is not tracked by the project Git repository"]
-            base["error"] = "manifest is not tracked"
-            return base
-        try:
-            study = reduction.load_study(path)
-            plan = reduction.build_plan(study, config=self.config)
-        except (OSError, reduction.ReductionError, ValueError) as exc:
-            base["error"] = str(exc)
-            return base
-        reducer_options = [self.config.reducers[str(item)].option for item in study["reducers"]]
-        base.update({
-            "valid": True,
-            "study_id": study["study_id"],
-            "root": study["root"],
-            "source": study["source"],
-            "repository": study["repository"],
-            "environment": study["environment"],
-            "execution": study["execution"],
-            "limits": study["limits"],
-            "repeats": study["repeats"],
-            "benchmarks": [
-                {
-                    "id": item["id"], "family": item["family"],
-                    "theory": item["theory"],
-                    "predicate_mode": item["predicate_mode"],
-                    "input": item["input"], "input_sha256": item["input_sha256"],
-                    "solver": item["solver"],
-                }
-                for item in study["benchmarks"]
-            ],
-            "reducers": reducer_options,
-            "comparisons": study["comparisons"],
-            "trial_count": len(plan["jobs"]),
-            "wave_count": max((int(job["wave"]) for job in plan["jobs"]), default=0),
-            "outer_jobs": study["execution"]["outer_jobs"],
-            "configured_reducers": list(self.config.reducer_options),
-        })
-        return base
-
-    def studies(self) -> list[dict[str, object]]:
-        files = self._study_files()
-        signature = tuple((str(path), _stat_signature(path)) for path in files)
-        if self._study_cache is None or self._study_cache[0] != signature:
-            records = {}
-            for path in files:
-                record = self._study_record(path)
-                identifier = record.get("study_id")
-                key = str(identifier) if isinstance(identifier, str) else str(path)
-                if key in records:
-                    record["valid"] = False
-                    record["error"] = "duplicate study_id"
-                records[key] = record
-            self._study_cache = (signature, records)
-        return [dict(value) for value in self._study_cache[1].values()]
-
-    def study(self, study_id: str) -> dict[str, object]:
-        _safe_id(study_id, "study_id")
-        for record in self.studies():
-            if record.get("study_id") == study_id:
-                return record
-        raise ValueError(f"unknown study: {study_id}")
 
     def _run_dir(self, run_id: str) -> Path:
         self._refresh_config()
@@ -608,36 +630,6 @@ class ReductionManager:
         self._refresh_config()
         if not self.branch_valid:
             raise ValueError(self.branch_error)
-        # Keep accepting the old internal shape for already prepared scripts;
-        # the dashboard and documented API use the catalogue shape below.
-        legacy = {"study_id", "reducers", "timeout_seconds", "outer_jobs"}
-        if isinstance(body, dict) and set(body) == legacy:
-            study_id = _safe_id(body.get("study_id"), "study_id")
-            study = self.study(study_id)
-            if not study.get("valid"):
-                raise ValueError(str(study.get("error", "invalid study")))
-            selected = body.get("reducers")
-            if not isinstance(selected, list) or not selected or not all(isinstance(item, str) for item in selected):
-                raise ValueError("reducers must be a non-empty list of reducer IDs")
-            if len(set(selected)) != len(selected):
-                raise ValueError("reducers must not contain duplicates")
-            timeout_seconds = body.get("timeout_seconds")
-            outer_jobs = body.get("outer_jobs")
-            if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)) or timeout_seconds <= 0:
-                raise ValueError("timeout_seconds must be a positive number")
-            if isinstance(outer_jobs, bool) or not isinstance(outer_jobs, int) or outer_jobs <= 0:
-                raise ValueError("outer_jobs must be a positive integer")
-            self.results_root.mkdir(parents=True, exist_ok=True)
-            run_id = f"{study_id}-{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-{uuid.uuid4().hex[:8]}"
-            run_dir = self._run_dir(run_id)
-            if run_dir.exists():
-                raise ValueError("run id collision; retry")
-            reduction.prepare(
-                Path(str(study["path"])), run_dir,
-                reducers=selected, timeout_seconds=float(timeout_seconds), outer_jobs=outer_jobs,
-            )
-            return self._launch(run_id, run_dir)
-
         expected = {"categories", "reducers", "timeout_seconds", "outer_jobs", "max_files", "repeats"}
         if not isinstance(body, dict) or set(body) != expected:
             raise ValueError(
@@ -668,8 +660,8 @@ class ReductionManager:
             raise ValueError("timeout_seconds must be a positive number")
         if isinstance(outer_jobs, bool) or not isinstance(outer_jobs, int) or outer_jobs <= 0:
             raise ValueError("outer_jobs must be a positive integer")
-        if isinstance(max_files, bool) or not isinstance(max_files, int) or max_files <= 0:
-            raise ValueError("max_files must be a positive integer")
+        if isinstance(max_files, bool) or not isinstance(max_files, int) or max_files < 0:
+            raise ValueError("max_files must be a non-negative integer (0 means all)")
         if isinstance(repeats, bool) or not isinstance(repeats, int) or repeats <= 0:
             raise ValueError("repeats must be a positive integer")
         candidate_ids = sorted({
@@ -679,7 +671,7 @@ class ReductionManager:
             raise ValueError("selected benchmark categories contain no cases")
         seed = secrets.randbits(64)
         sampler = random.Random(seed)
-        sampled_count = min(max_files, len(candidate_ids))
+        sampled_count = len(candidate_ids) if max_files == 0 else min(max_files, len(candidate_ids))
         selected_benchmark_ids = sorted(sampler.sample(candidate_ids, sampled_count))
         selection = {
             "categories": list(categories),
@@ -701,7 +693,7 @@ class ReductionManager:
             reducers=selected, timeout_seconds=float(timeout_seconds), outer_jobs=outer_jobs,
             benchmark_ids=selected_benchmark_ids, repeats=repeats, selection=selection,
         )
-        return self._launch(run_id, run_dir)
+        return self._launch_with_last_run(run_id, run_dir, body)
 
     def _load_run(self, run_id: str) -> tuple[Path, dict[str, object]]:
         run_dir = self._run_dir(run_id)
@@ -766,11 +758,17 @@ class ReductionManager:
                     signature.append((str(path), value))
                 if len(signature) >= 256:
                     break
-            for path in sorted(jobs_dir.glob("*/attempts/*/trace/trace.*.jsonl")):
+            for path in sorted(jobs_dir.glob("*/attempts/*/reducer.stdout")):
                 value = _stat_signature(path)
                 if value is not None:
                     signature.append((str(path), value))
-                if len(signature) >= 512:
+                if len(signature) >= 768:
+                    break
+            for path in sorted(jobs_dir.glob("*/attempts/*/reducer.stderr")):
+                value = _stat_signature(path)
+                if value is not None:
+                    signature.append((str(path), value))
+                if len(signature) >= 1024:
                     break
         marker = tuple(signature)
         with self._trajectory_lock:
@@ -959,7 +957,8 @@ class ReductionManager:
                     "provisional": trial_value.get("provisional", True),
                 })
         return {
-            "run_id": run_id, "study_id": plan["study_id"], "status": state,
+            "run_id": run_id, "study_id": plan["study_id"], "created_at": plan.get("created_at"),
+            "status": state,
             "stale_status": stale_status, "live": live,
             "total_trials": len(plan["jobs"]), "completed_trials": len(results),
             "active_trials": len(active),
@@ -973,7 +972,6 @@ class ReductionManager:
             "limits": plan["limits"],
             "target_branch": self.config.target_branch,
             "smtbatch_branch": self.current_smtbatch_branch,
-            "current_branch": self.current_smtbatch_branch,
             "prepared_smtbatch_branch": reduction.repository_branch(
                 plan.get("repository", {}), self.config.smtbatch_root
             ) if isinstance(plan.get("repository"), dict) else None,
@@ -1049,19 +1047,14 @@ def handler_factory(manager: ReductionManager):
                     self.end_headers()
                     self.wfile.write(payload)
                     return
-                if path == "/api/studies":
+                if path == "/api/catalog":
                     _json_response(
                         self,
                         {
                             "config": manager.configuration(),
                             "catalog": manager.benchmark_catalog(),
-                            "studies": manager.studies(),
                         },
                     )
-                    return
-                match = re.fullmatch(r"/api/studies/([^/]+)", path)
-                if match:
-                    _json_response(self, manager.study(unquote(match.group(1))))
                     return
                 if path == "/api/runs":
                     _json_response(self, {"runs": manager.runs()})

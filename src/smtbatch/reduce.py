@@ -36,6 +36,7 @@ from .config import Config, ReducerSpec, load_config, validate_target_branch
 SCHEMA_VERSION = 2
 FORMAT = "reduction-v2"
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+MAX_LOG_BYTES = 64 * 1024
 STUDY_FIELDS = {
     "schema_version", "kind", "study_id", "root", "execution",
     "predicate_wrapper", "benchmarks", "reducers", "repeats",
@@ -56,9 +57,7 @@ LIMIT_FIELDS = {
 }
 TOOL_LIST_PLACEHOLDERS = {"{predicate}"}
 TOOL_SCALAR_PLACEHOLDERS = {
-    "input", "output", "workdir", "trace_dir", "stats",
-    "predicate_timeout", "trial_timeout", "memory_mb", "repeat", "seed",
-    "observe", "observation_dir", "observation_stats",
+    "input", "output", "workdir", "predicate_timeout",
 }
 WRAPPER_LIST_PLACEHOLDERS = {"{command}", "{match_args}"}
 WRAPPER_SCALAR_PLACEHOLDERS = {
@@ -593,15 +592,8 @@ def _plan_reducer(spec: ReducerSpec, root: Path) -> dict[str, object]:
     return {
         "id": spec.name,
         "label": spec.label,
-        "strategy": spec.strategy,
-        "version": spec.version,
         "command": command,
         "env": dict(spec.env),
-        "evidence": {
-            "internal_trace": spec.evidence_level,
-            "acceptance": spec.acceptance,
-            "stats": spec.stats,
-        },
         "identity": _command_identity(command, root),
     }
 
@@ -868,23 +860,13 @@ def verify_runtime_identity(plan: Mapping[str, object]) -> None:
             raise ReductionError(f"configured reducer removed since prepare: {reducer_id}")
         recorded = {
             "label": reducer.get("label"),
-            "strategy": reducer.get("strategy"),
-            "version": reducer.get("version"),
             "command": reducer.get("command"),
             "env": reducer.get("env"),
-            "evidence": reducer.get("evidence"),
         }
         current = {
             "label": configured.label,
-            "strategy": configured.strategy,
-            "version": configured.version,
             "command": list(configured.command),
             "env": configured.env,
-            "evidence": {
-                "internal_trace": configured.evidence_level,
-                "acceptance": configured.acceptance,
-                "stats": configured.stats,
-            },
         }
         if current != recorded:
             raise ReductionError(f"configured reducer changed since prepare: {reducer_id}")
@@ -1062,19 +1044,7 @@ def _render_tool_command(
         "input": str(benchmark["input"]),
         "output": str(attempt_dir / "output.smt2"),
         "workdir": str(attempt_dir),
-        "trace_dir": str(attempt_dir / "trace"),
-        "stats": str(attempt_dir / "reducer-stats.json"),
-        "observe": (
-            "off" if reducer["evidence"]["internal_trace"] == "none"
-            else str(reducer["evidence"]["internal_trace"])
-        ),
-        "observation_dir": str(attempt_dir / "trace"),
-        "observation_stats": str(attempt_dir / "reducer-stats.json"),
         "predicate_timeout": f"{float(limits['predicate_timeout_sec']):g}",
-        "trial_timeout": f"{float(limits['trial_wall_sec']):g}",
-        "memory_mb": str(limits["memory_mb"]),
-        "repeat": str(job["repeat"]),
-        "seed": str(job["repeat"]),
     }
     command: list[str] = []
     for token in reducer["command"]:
@@ -1203,24 +1173,6 @@ def _journal_events(path: Path, *, allow_partial: bool) -> dict[str, object]:
     }
 
 
-def _trace_events(trace_dir: Path, *, allow_partial: bool) -> dict[str, object]:
-    rows = []
-    errors = []
-    truncated = False
-    if trace_dir.is_dir():
-        for path in sorted(trace_dir.glob("trace.*.jsonl")):
-            shard, shard_truncated, error = _read_jsonl(path, allow_partial=allow_partial)
-            rows.extend(shard)
-            truncated = truncated or shard_truncated
-            if error:
-                errors.append(f"{path.name}: {error}")
-    rows.sort(key=lambda row: (
-        int(row.get("monotonic_ns", row.get("elapsed_ns", 0)) or 0),
-        int(row.get("pid", 0) or 0), int(row.get("local_seq", row.get("seq", 0)) or 0),
-    ))
-    return {"rows": rows, "truncated_tail": truncated, "error": "; ".join(errors)}
-
-
 def _quality(value: object) -> tuple[int, int, int] | None:
     if not isinstance(value, dict):
         return None
@@ -1243,10 +1195,6 @@ def _candidate_hash(start: Mapping[str, object]) -> str:
     return str(candidate.get("canonical_sha256") or candidate.get("sha256") or "")
 
 
-def _event_role(row: Mapping[str, object]) -> str:
-    return str(row.get("role") or "")
-
-
 def trajectory_for_attempt(
     attempt_dir: Path, benchmark: Mapping[str, object], reducer: Mapping[str, object],
     *, allow_partial: bool,
@@ -1255,34 +1203,14 @@ def trajectory_for_attempt(
     starts = list(journal["starts"])
     finishes = journal["finishes"]
     reducer_starts = [row for row in starts if row.get("phase") == "reducer"]
-    golden = next((row for row in reducer_starts if _event_role(row) == "golden"), None)
-    if golden is None and reducer_starts:
-        golden = reducer_starts[0]
+    golden = reducer_starts[0] if reducer_starts else None
     initial = _candidate_quality(golden) if golden else None
     if initial is None:
         initial = (0, 0, int(benchmark.get("input_bytes", 0)))
     golden_finish = finishes.get(golden["call_id"]) if golden else None
-    candidates = [
-        row for row in reducer_starts
-        if row is not golden and _event_role(row) != "golden"
-    ]
-    trace = _trace_events(attempt_dir / "trace", allow_partial=allow_partial)
-    accepted_by_call: dict[str, dict[str, object]] = {}
-    accepted_by_hash: dict[str, dict[str, object]] = {}
+    candidates = reducer_starts[1:]
     phase_boundaries = []
-    for row in trace["rows"]:
-        event = str(row.get("event", "")).replace("-", "_")
-        if event == "candidate_accepted":
-            call_id = row.get("predicate_call_id")
-            if isinstance(call_id, str):
-                accepted_by_call[call_id] = row
-            candidate_hash = row.get("candidate_sha256") or row.get("candidate_key")
-            if isinstance(candidate_hash, str):
-                accepted_by_hash[candidate_hash] = row
-        if event in {"strategy_start", "strategy_end", "phase_start", "phase_end"}:
-            phase_boundaries.append(row)
-
-    exact = reducer["evidence"]["acceptance"] == "trace"
+    exact = False
     best = initial
     points = [{
         "call_index": 0, "elapsed_sec": 0.0,
@@ -1303,10 +1231,7 @@ def trajectory_for_attempt(
         )
         if preserving:
             preserving_count += 1
-        accepted_event = accepted_by_call.get(str(start["call_id"])) or accepted_by_hash.get(
-            _candidate_hash(start)
-        )
-        accepted = accepted_event is not None if exact else preserving
+        accepted = preserving
         candidate_quality = _candidate_quality(start)
         candidate = start.get("candidate")
         if candidate_quality is None:
@@ -1330,10 +1255,10 @@ def trajectory_for_attempt(
             "accepted": accepted, "preserving": preserving,
             "candidate_sha256": _candidate_hash(start),
             "predicate_call_id": start["call_id"],
-            "phase": (accepted_event or {}).get("strategy") or start.get("strategy"),
-            "pass": (accepted_event or {}).get("pass") or start.get("pass"),
-            "mutator": (accepted_event or {}).get("mutator") or start.get("mutator"),
-            "size_delta": (accepted_event or {}).get("size_delta"),
+            "phase": None,
+            "pass": None,
+            "mutator": None,
+            "size_delta": None,
         })
     if golden is None:
         warnings.append("reducer golden predicate call is missing")
@@ -1343,9 +1268,7 @@ def trajectory_for_attempt(
         warnings.append(str(journal["error"]))
     if journal["incomplete"] and not allow_partial:
         warnings.append(f"{len(journal['incomplete'])} predicate calls lack finish events")
-    if trace["error"]:
-        warnings.append(str(trace["error"]))
-    if (journal["truncated_tail"] or trace["truncated_tail"]) and not allow_partial:
+    if journal["truncated_tail"] and not allow_partial:
         warnings.append("evidence has a truncated tail")
     last_accept = max((point["call_index"] for point in points if point["accepted"]), default=0)
     return {
@@ -1477,15 +1400,15 @@ def request_stop(output: Path, mode: str) -> dict[str, object]:
     return request
 
 
-def _consume_old_control(output: Path) -> None:
+def _clear_control_for_resume(output: Path) -> None:
     path = _control_path(output)
     if path.is_file():
         try:
-            old = _read_json(path, "old run control")
+            previous = _read_json(path, "run control")
         except ReductionError as exc:
-            old = {"error": str(exc)}
+            previous = {"error": str(exc)}
         _append_jsonl(output / "control_history.jsonl", {
-            "event": "control_cleared_for_resume", "at": _utc_now(), "value": old,
+            "event": "control_cleared_for_resume", "at": _utc_now(), "value": previous,
         })
         path.unlink()
 
@@ -1498,47 +1421,11 @@ def _evidence_health(
         attempt_dir, benchmark, reducer, allow_partial=allow_partial
     )
     warnings = list(trajectory["warnings"])
-    trace = _trace_events(attempt_dir / "trace", allow_partial=allow_partial)
-    expected_trace = reducer["evidence"]["internal_trace"]
-    if expected_trace != "none" and not trace["rows"]:
-        warnings.append(f"required {expected_trace} internal trace is missing")
-    stats_mode = reducer["evidence"]["stats"]
-    stats_path = attempt_dir / "reducer-stats.json"
-    if stats_mode == "required" and not stats_path.is_file():
-        warnings.append("required reducer stats are missing")
-    if stats_path.is_file():
-        try:
-            stats = _mapping(_read_json(stats_path, "reducer stats"), "reducer stats")
-            expected_calls = stats.get("candidate_predicate_calls")
-            expected_accepts = stats.get("accepted_moves")
-            if isinstance(expected_calls, int) and expected_calls != trajectory["candidate_calls"]:
-                warnings.append("reducer stats disagree with predicate journal calls")
-            if isinstance(expected_accepts, int) and expected_accepts != trajectory["accepted_moves"]:
-                warnings.append("reducer stats disagree with accepted incumbent events")
-        except ReductionError as exc:
-            warnings.append(str(exc))
-
-    journal = _journal_events(attempt_dir / "predicate.jsonl", allow_partial=allow_partial)
-    journal_candidates = [
-        str(row["call_id"]) for row in journal["starts"]
-        if row.get("phase") == "reducer" and _event_role(row) == "candidate"
-    ]
-    traced = [
-        str(row.get("predicate_call_id")) for row in trace["rows"]
-        if str(row.get("event", "")).replace("-", "_") == "predicate_start"
-        and row.get("role") == "candidate" and isinstance(row.get("predicate_call_id"), str)
-    ]
-    alignment = None
-    if traced or (expected_trace != "none" and journal_candidates):
-        alignment = traced == journal_candidates
-        if not alignment:
-            warnings.append("internal predicate events do not align with external journal")
     return {
         "ok": not warnings,
         "warnings": list(dict.fromkeys(warnings)),
         "predicate_calls": trajectory["candidate_calls"],
         "accepted_moves": trajectory["accepted_moves"],
-        "journal_trace_alignment": alignment,
         "trajectory": trajectory,
     }
 
@@ -1614,7 +1501,6 @@ def _execute_job(output: Path, plan: Mapping[str, object], job: Mapping[str, obj
             _seal_job(job_dir, attempt_dir, result)
             return result
 
-        (attempt_dir / "trace").mkdir()
         # A reducer is allowed to reach a fixed point without writing its
         # output path.  Materialize the incumbent before launch so that
         # "no reduction" is represented by a verified original candidate,
@@ -1683,7 +1569,6 @@ def _execute_job(output: Path, plan: Mapping[str, object], job: Mapping[str, obj
             "schema_version": SCHEMA_VERSION, "format": FORMAT,
             "status": status_value, "verified": verified,
             "evidence_ok": health["ok"], "evidence_warnings": health["warnings"],
-            "journal_trace_alignment": health["journal_trace_alignment"],
             "input_quality": initial_quality, "output_quality": output_quality,
             "input_bytes": benchmark["input_bytes"], "input_sha256": benchmark["input_sha256"],
             "output_bytes": output_bytes,
@@ -1802,7 +1687,7 @@ def _run_locked(output: Path, plan: Mapping[str, object]) -> list[dict[str, obje
     plan = dict(plan)
     plan["run_id"] = output.name
     verify_runtime_identity(plan)
-    _consume_old_control(output)
+    _clear_control_for_resume(output)
     workers = int(plan["execution"]["outer_jobs"])
     _append_resume(
         output, "run_started", outer_jobs=workers,
@@ -1939,6 +1824,28 @@ def _latest_attempt(job_dir: Path) -> Path | None:
     return values[-1] if values else None
 
 
+def _attempt_log(attempt_dir: Path, name: str) -> dict[str, object]:
+    path = attempt_dir / name
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        return {"text": "", "truncated": False, "error": str(exc)}
+    truncated = len(data) > MAX_LOG_BYTES
+    if truncated:
+        marker = b"\n\n... log truncated by SMTBatch ...\n\n"
+        half = max(0, (MAX_LOG_BYTES - len(marker)) // 2)
+        data = (
+            data[:half]
+            + marker
+            + data[-half:]
+        )
+    return {
+        "text": data.decode("utf-8", errors="replace"),
+        "truncated": truncated,
+        "error": None,
+    }
+
+
 def trajectory_for_case(output: Path, case_id: str) -> dict[str, object]:
     output = output.expanduser().resolve()
     plan = load_plan(output)
@@ -1968,12 +1875,21 @@ def trajectory_for_case(output: Path, case_id: str) -> dict[str, object]:
             trajectory = trajectory_for_attempt(
                 attempt_dir, benchmark, reducer, allow_partial=not sealed
             )
+        logs = {
+            "stdout": _attempt_log(attempt_dir, "reducer.stdout")
+            if attempt_dir and attempt_dir.is_dir()
+            else {"text": "", "truncated": False, "error": None},
+            "stderr": _attempt_log(attempt_dir, "reducer.stderr")
+            if attempt_dir and attempt_dir.is_dir()
+            else {"text": "", "truncated": False, "error": None},
+        }
         trials.append({
             "job_id": job["job_id"], "reducer_id": reducer["id"],
             "reducer_label": reducer["label"], "repeat": job["repeat"],
             "wave": job["wave"], "status": result.get("status", "running" if attempt_dir else "pending"),
             "verified": result.get("verified"), "evidence_ok": result.get("evidence_ok"),
             "attempt": result.get("attempt", int(attempt_dir.name) if attempt_dir and attempt_dir.name.isdigit() else None),
+            "logs": logs,
             "trajectory": trajectory,
         })
     return {
@@ -2261,7 +2177,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     prepare_parser.add_argument(
         "--timeout", type=float, default=None,
-        help="trial wall timeout in seconds (default: study value)",
+        help="per-case reducer wall timeout in seconds (default: study value)",
     )
     prepare_parser.add_argument(
         "--jobs", type=int, default=None,

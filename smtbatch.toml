@@ -2,17 +2,10 @@
 # own smtbatch.toml, study manifests, benchmarks, and results.
 
 [defaults]
-inputs = "benchmarks"
 results = "results"
-studies = "scripts/experiments"
 port = 8001
 target_branch = "main"
 
 [reducers.example]
 label = "Example reducer"
-version = "local"
-strategy = "default"
-evidence_level = "none"
-acceptance = "serial-inferred"
-stats = "none"
 command = ["/opt/example-reducer", "{input}", "{output}", "{predicate}"]

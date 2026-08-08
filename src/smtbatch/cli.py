@@ -22,8 +22,8 @@ def main() -> int:
     parser.add_argument("arguments", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.command == "serve":
-        from . import serve
-        return serve.main(args.arguments)
+        from . import reduction_serve
+        return reduction_serve.main(args.arguments)
     from . import reduce
     return reduce.main(args.arguments)
 

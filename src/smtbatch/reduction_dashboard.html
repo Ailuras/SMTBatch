@@ -2,57 +2,348 @@
 <html lang="en">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>SMTBatch Reduce</title>
+  <title>SMTBatch Reduction Console</title>
   <style>
-    :root{--ink:#172636;--muted:#667687;--line:#dce4ea;--paper:#fff;--wash:#f3f6f8;--blue:#21699b;--blue2:#e8f2f8;--green:#247353;--red:#a23b35;--amber:#9a6516;--shadow:0 12px 32px rgba(29,48,67,.08)}
-    *{box-sizing:border-box}body{margin:0;background:var(--wash);color:var(--ink);font:14px/1.45 Inter,ui-sans-serif,system-ui,sans-serif}.top{background:#162a3b;color:#fff;padding:26px max(24px,calc((100vw - 1280px)/2));display:flex;gap:28px;align-items:end}.eyebrow{color:#90b9d3;text-transform:uppercase;letter-spacing:.14em;font-size:11px;font-weight:800}.top h1{font-size:30px;margin:2px 0}.top p{margin:0;color:#bfd0dc}.summary{margin-left:auto;display:flex;gap:28px}.summary span{display:block;color:#91a9ba;font-size:11px;text-transform:uppercase}.summary b{font-size:22px}.wrap{max-width:1280px;margin:22px auto;padding:0 22px 50px}.panel{background:var(--paper);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);padding:20px;margin-bottom:18px}.panel h2{margin:0 0 4px;font-size:18px}.muted{color:var(--muted)}.gate{display:flex;gap:14px;align-items:center;padding:12px 15px;border-radius:10px;background:var(--blue2);margin-bottom:18px}.gate.bad{background:#fae9e7;color:var(--red)}.dot{width:9px;height:9px;border-radius:50%;background:var(--green);flex:none}.bad .dot{background:var(--red)}.launch{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(300px,.85fr);gap:22px}.field{display:block;margin-top:15px;font-size:12px;font-weight:700;color:#536779}.field>input{width:100%;margin-top:6px;border:1px solid #cbd7df;border-radius:8px;background:#fff;padding:10px;color:var(--ink);font:inherit}.field-note{display:block;font-weight:400;color:var(--muted);margin-top:4px}.two{display:grid;grid-template-columns:1fr 1fr;gap:12px}.choices{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:8px;margin-top:8px}.choice{display:flex;gap:9px;border:1px solid var(--line);border-radius:9px;padding:10px;cursor:pointer}.choice:has(input:checked){border-color:#73a6c7;background:#f1f8fc}.choice input{width:17px;height:17px;flex:none;margin:2px 0 0;accent-color:var(--blue)}.choice b,.choice small{display:block}.choice small{color:var(--muted);margin-top:2px}.choice em{font-style:normal;color:var(--blue);font-size:11px}.reducers{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:8px;margin-top:8px}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px}button,.button{border:0;border-radius:8px;padding:10px 14px;background:var(--blue);color:#fff;font-weight:700;cursor:pointer;text-decoration:none}button.secondary,.button.secondary{background:#edf2f5;color:#29475d}button.warn{background:#a66b15}button.danger{background:var(--red)}button:disabled{opacity:.45;cursor:not-allowed}.message{margin-top:12px;color:var(--red)}.budget{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:14px}.budget .item{background:#f7f9fa;border-radius:8px;padding:9px}.budget span{display:block;color:var(--muted);font-size:11px;text-transform:uppercase}.budget b{display:block;margin-top:2px}.runs{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:12px;margin-top:14px}.card{border:1px solid var(--line);border-radius:11px;padding:15px;background:#fff;cursor:pointer;transition:.15s}.card:hover{border-color:#87abc2;transform:translateY(-1px)}.card h3{font-size:14px;margin:0 0 3px;overflow-wrap:anywhere}.metric{display:flex;justify-content:space-between;border-top:1px solid #edf1f3;padding:7px 0}.metric:first-of-type{margin-top:10px}.badge{display:inline-block;border-radius:99px;padding:2px 7px;background:#edf1f4;color:#4f6272;font-size:10px;text-transform:uppercase}.badge.live{background:#e4f1f8;color:#17618f}.badge.ok{background:#e5f3ec;color:var(--green)}.badge.bad{background:#fae9e7;color:var(--red)}.progress{height:6px;border-radius:6px;background:#e7edf1;overflow:hidden;margin:10px 0}.progress i{display:block;height:100%;background:#4d8db6}.card .actions{margin-top:10px}.card .actions button,.card .actions a{font-size:12px;padding:7px 9px}.empty{padding:25px;text-align:center;color:var(--muted)}dialog{border:0;border-radius:14px;box-shadow:0 20px 60px rgba(12,31,46,.28);padding:0;width:min(560px,calc(100vw - 30px));color:var(--ink)}dialog::backdrop{background:rgba(13,31,45,.48)}.dialog-inner{padding:22px}.dialog-inner h2{margin:0 0 5px}.confirm-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:15px 0}.confirm-grid .item{background:#f5f8fa;border-radius:8px;padding:9px}.confirm-grid span{display:block;font-size:11px;color:var(--muted);text-transform:uppercase}.confirm-grid b{display:block;margin-top:2px}.dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}@media(max-width:850px){.launch{grid-template-columns:1fr}.summary{display:none}.two,.budget,.confirm-grid{grid-template-columns:1fr}}
+    :root { --page:#07111b; --panel:#0f1d2b; --panel2:#142636; --soft:#0c1926; --line:#263b4e; --text:#e9f1f7; --muted:#8fa5b8; --accent:#47d7a1; --blue:#80bcff; --red:#ff827a; --yellow:#f0c96c; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--page); color:var(--text); font:14px/1.45 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    button,input { font:inherit; }
+    button { cursor:pointer; }
+    button:disabled { cursor:not-allowed; opacity:.55; }
+    .reduction-topbar{max-width:none;min-height:142px;padding:28px max(28px,calc((100vw - 1440px)/2));display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:32px;align-items:center}
+    .reduction-topbar .brand-kicker{color:var(--accent);font-size:11px;font-weight:800;letter-spacing:.16em}
+    .reduction-topbar h1{margin:6px 0 4px;font-size:32px;letter-spacing:-.03em}
+    .reduction-topbar .brand-subtitle{margin:0;color:var(--muted);max-width:600px}
+    .topbar-status{display:flex;gap:10px;align-items:center;color:var(--text);min-width:190px}
+    .topbar-status small{display:block;color:var(--muted);margin-top:3px}
+    .status-dot{width:10px;height:10px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 4px rgba(71,215,161,.12);flex:none}
+    .status-dot.bad{background:var(--red);box-shadow:0 0 0 4px rgba(255,130,122,.12)}
+    .topbar-metrics{display:flex;gap:25px}
+    .topbar-metrics span{display:block;color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.12em}
+    .topbar-metrics strong{display:block;margin-top:4px;font-size:23px;color:var(--text)}
+    .reduction-shell{max-width:1440px;margin:0 auto;padding:28px max(28px,calc((100vw - 1440px)/2)) 70px}
+    .reduction-panel{background:linear-gradient(145deg,rgba(15,29,43,.98),rgba(11,23,35,.98));border:1px solid var(--line);border-radius:16px;box-shadow:0 18px 55px rgba(0,0,0,.18);padding:25px;margin-bottom:22px}
+    .section-heading{display:flex;gap:20px;justify-content:space-between;align-items:flex-start;margin-bottom:21px}
+    .section-heading h2{margin:4px 0 5px;font-size:21px;letter-spacing:-.02em}
+    .section-heading p{margin:0;color:var(--muted)}
+    .eyebrow{color:var(--accent);font-size:10px;font-weight:800;letter-spacing:.15em;text-transform:uppercase}
+    .ghost-button,.secondary-button,.primary-button,.danger-button{border:1px solid var(--line);border-radius:8px;padding:9px 14px;font-weight:700;transition:border-color .15s,filter .15s,background .15s}
+    .ghost-button,.secondary-button{background:var(--soft);color:var(--text)}
+    .ghost-button:hover,.secondary-button:hover{border-color:var(--blue);background:var(--panel2)}
+    .primary-button{border-color:rgba(71,215,161,.6);background:var(--accent);color:#061a17}
+    .primary-button:hover:not(:disabled){filter:brightness(1.08)}
+    .danger-button{background:rgba(255,130,122,.15);color:var(--red);border-color:rgba(255,130,122,.35)}
+    .danger-button:hover{border-color:var(--red);background:rgba(255,130,122,.23)}
+    .inline-message{min-height:22px;margin:-8px 0 12px;color:var(--muted)}
+    .inline-message.error{color:var(--red)}
+    .launch-layout{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(340px,.75fr);gap:24px}
+    .benchmark-selector,.launch-sidebar{min-width:0}
+    .block-heading{display:flex;justify-content:space-between;align-items:end;gap:12px;margin-bottom:11px}
+    .block-heading h3{margin:0;font-size:14px}
+    .block-heading p{margin:3px 0 0;color:var(--muted);font-size:12px}
+    .selection-count{color:var(--accent);font-size:12px;font-weight:700;white-space:nowrap}
+    .selector-toolbar{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:11px}
+    .selector-toolbar small{color:var(--muted)}
+    .toolbar-actions{display:flex;gap:7px}
+    .toolbar-actions button{padding:6px 9px;border:1px solid var(--line);border-radius:7px;background:transparent;color:var(--blue);font-size:11px}
+    .benchmark-groups{display:grid;grid-template-columns:repeat(auto-fit,minmax(205px,1fr));gap:10px}
+    .benchmark-option,.reducer-option{position:relative;display:block;cursor:pointer}
+    .benchmark-option input,.reducer-option input{position:absolute;opacity:0;pointer-events:none}
+    .benchmark-card{display:block;height:100%;padding:15px;border:1px solid var(--line);border-radius:12px;background:rgba(20,38,54,.62);transition:border-color .15s,background .15s,transform .15s}
+    .benchmark-card:hover,.reducer-card:hover{border-color:#4d718c;transform:translateY(-1px)}
+    .benchmark-option input:checked + .benchmark-card{border-color:var(--accent);background:rgba(35,76,75,.44);box-shadow:inset 3px 0 0 var(--accent)}
+    .benchmark-card-head{display:flex;justify-content:space-between;gap:8px;align-items:center}
+    .benchmark-card strong{font-size:15px;color:var(--text)}
+    .benchmark-card .case-count{color:var(--accent);font-size:12px;font-weight:700}
+    .benchmark-card p{margin:8px 0 0;color:var(--muted);font-size:12px}
+    .benchmark-card .checkmark{display:block;margin-top:12px;color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.1em}
+    .benchmark-option input:checked + .benchmark-card .checkmark{color:var(--accent)}
+    .reducer-options{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+    .reducer-card{display:block;height:100%;padding:13px;border:1px solid var(--line);border-radius:11px;background:rgba(20,38,54,.62);transition:border-color .15s,background .15s,transform .15s}
+    .reducer-option input:checked + .reducer-card{border-color:var(--blue);background:rgba(33,66,95,.55);box-shadow:inset 3px 0 0 var(--blue)}
+    .reducer-card strong{display:block;color:var(--text);font-size:14px}
+    .reducer-card small{display:block;color:var(--muted);margin-top:5px}
+    .black-box-tag{display:inline-block;margin-top:10px;padding:3px 6px;border-radius:4px;background:rgba(128,188,255,.12);color:var(--blue);font-size:9px;font-weight:800;letter-spacing:.1em}
+    .field-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:19px}
+    .field label{display:block;color:var(--muted);font-size:11px;font-weight:700}
+    .field input{width:100%;margin-top:7px;padding:10px 11px;border:1px solid var(--line);border-radius:8px;background:var(--soft);color:var(--text);font:inherit}
+    .field input:focus{outline:2px solid rgba(71,215,161,.28);border-color:var(--accent)}
+    .field-note{display:block;margin-top:5px;color:var(--muted);font-size:10px;font-weight:400}
+    .plan-card{margin-top:19px;padding:15px;border:1px solid var(--line);border-radius:12px;background:rgba(7,17,27,.58)}
+    .plan-card h3{margin:0 0 11px;font-size:13px}
+    .plan-metrics{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+    .plan-metric{padding:9px;border-radius:8px;background:rgba(20,38,54,.75)}
+    .plan-metric span{display:block;color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.07em}
+    .plan-metric strong{display:block;margin-top:3px;color:var(--text);font-size:13px}
+    .launch-actions{display:flex;align-items:center;gap:10px;margin-top:19px}
+    .launch-actions button{min-height:40px}
+    .history-panel{padding-top:22px}
+    .history-heading{align-items:center}
+    .history-heading .section-heading{margin-bottom:0}
+    .runs{display:grid;grid-template-columns:repeat(auto-fit,minmax(390px,1fr));gap:12px}
+    .run-card{border:1px solid var(--line);border-radius:12px;background:rgba(20,38,54,.55);padding:16px;transition:border-color .15s,transform .15s}
+    .run-card:hover{border-color:#4d718c;transform:translateY(-1px)}
+    .run-card-header{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
+    .run-card h3{margin:0;color:var(--text);font-size:14px;overflow-wrap:anywhere}
+    .run-card .run-date{margin-top:4px;color:var(--muted);font-size:11px}
+    .run-status{display:inline-block;padding:4px 8px;border-radius:99px;background:rgba(143,165,184,.12);color:var(--muted);font-size:10px;font-weight:800;text-transform:uppercase;white-space:nowrap}
+    .run-status.live{background:rgba(71,215,161,.12);color:var(--accent)}
+    .run-status.ok{background:rgba(71,215,161,.12);color:var(--accent)}
+    .run-status.bad{background:rgba(255,130,122,.12);color:var(--red)}
+    .run-selection{margin:14px 0 10px;color:var(--muted);font-size:12px}
+    .run-progress{height:6px;background:#07111b;border-radius:99px;overflow:hidden}
+    .run-progress i{display:block;height:100%;background:linear-gradient(90deg,var(--blue),var(--accent));border-radius:99px}
+    .run-stats{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:13px}
+    .run-stat{padding:9px;border-top:1px solid var(--line)}
+    .run-stat span{display:block;color:var(--muted);font-size:10px}
+    .run-stat strong{display:block;margin-top:3px;color:var(--text);font-size:12px}
+    .run-actions{display:flex;flex-wrap:wrap;gap:7px;margin-top:14px}
+    .run-actions a,.run-actions button{padding:7px 9px;font-size:11px}
+    .run-actions a{text-decoration:none}
+    .empty{padding:35px;text-align:center;color:var(--muted);border:1px dashed var(--line);border-radius:11px}
+    .reduction-dialog{width:min(620px,calc(100vw - 30px));padding:0;border:1px solid var(--line);border-radius:14px;background:var(--panel);color:var(--text);box-shadow:0 24px 80px rgba(0,0,0,.45)}
+    .reduction-dialog::backdrop{background:rgba(1,8,14,.72)}
+    .dialog-content{padding:24px}
+    .dialog-content h2{margin:5px 0;color:var(--text)}
+    .dialog-content p{color:var(--muted)}
+    .confirm-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:17px 0}
+    .confirm-item{padding:10px;border-radius:8px;background:var(--soft)}
+    .confirm-item span{display:block;color:var(--muted);font-size:10px;text-transform:uppercase}
+    .confirm-item strong{display:block;margin-top:3px;color:var(--text);font-size:12px}
+    .dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
+    @media(max-width:1050px){.reduction-topbar{grid-template-columns:1fr auto}.topbar-status{grid-column:1/-1;grid-row:2}.launch-layout{grid-template-columns:1fr}}
+    @media(max-width:650px){.reduction-topbar{display:block;padding:23px 18px}.topbar-status{margin-top:18px}.topbar-metrics{margin-top:18px;gap:18px}.reduction-shell{padding:18px 14px 45px}.reduction-panel{padding:18px}.section-heading{display:block}.section-heading button{margin-top:14px}.field-grid,.plan-metrics,.confirm-grid{grid-template-columns:1fr}.runs{grid-template-columns:1fr}}
+
   </style>
 </head>
+
 <body>
-<header class="top"><div><div class="eyebrow">Reduction experiment control</div><h1>SMTBatch Reduce</h1><p>Select formula-complexity groups, freeze a random sample, and monitor reducer trials.</p></div><div class="summary"><div><span>Groups</span><b id="groupCount">0</b></div><div><span>Benchmarks</span><b id="benchmarkCount">0</b></div><div><span>Runs</span><b id="runCount">0</b></div><div><span>Active</span><b id="activeCount">0</b></div></div></header>
-<main class="wrap">
-  <div id="gate"></div>
-  <section class="panel">
-    <h2>Run an experiment</h2><div class="muted">Choose benchmark groups and concrete reducer configurations. The random sample, timeout, jobs, and repeats are frozen when the run starts.</div>
-    <div class="launch">
-      <div>
-        <div class="field">Benchmark groups <span class="muted">(multi-select; groups are based on SMT-LIB input size)</span><div id="categories" class="choices"></div></div>
-        <div class="field">Reducers <span class="muted">(each version/configuration is independent)</span><div id="reducers" class="reducers"></div></div>
-        <div class="two">
-          <label class="field">Total trial timeout (seconds)<input id="timeout" type="number" min="0.001" step="1"><span class="field-note">Per benchmark × reducer × repeat, including final verification.</span></label>
-          <label class="field">Parallel jobs<input id="jobs" type="number" min="1" step="1"><span class="field-note">Outer jobs within the frozen strict-wave schedule.</span></label>
-          <label class="field">Maximum benchmark files<input id="maxFiles" type="number" min="1" step="1"><span class="field-note">A random subset is sampled from the selected groups.</span></label>
-          <label class="field">Repeats<input id="repeats" type="number" min="1" step="1"><span class="field-note">The same sampled cases are repeated for paired comparison.</span></label>
-        </div>
-        <div id="budget" class="budget"></div>
-        <div class="actions"><button id="start">Start experiment</button><button id="refresh" class="secondary">Refresh</button></div><div id="message" class="message"></div>
-      </div>
-      <div><h2>Read-only execution facts</h2><div id="catalogMeta" class="budget"></div><p class="muted">A catalog is the internal immutable benchmark template. You select groups here; it is not a user-facing study choice.</p></div>
+  <header class="topbar reduction-topbar">
+    <div class="brand-block">
+      <div class="brand-kicker">SMTBATCH / LOCAL CONTROL</div>
+      <h1>Reduction Console</h1>
+      <p class="brand-subtitle">Compare reducers as black boxes and track generic size-reduction trajectories across a selectable benchmark set.</p>
     </div>
-  </section>
-  <section class="panel"><h2>Runs</h2><div class="muted">Open any running or completed result for detailed evidence and trajectories.</div><div id="runs" class="runs"></div></section>
-</main>
-<dialog id="confirmDialog"><div class="dialog-inner"><h2>Confirm reduction experiment</h2><div class="muted">These are the conditions that will be frozen into the run plan. The individual files will be sampled randomly at launch.</div><div id="confirmBody" class="confirm-grid"></div><div class="dialog-actions"><button id="confirmCancel" class="secondary" type="button">Cancel</button><button id="confirmGo" type="button">Start with these conditions</button></div></div></dialog>
-<script>
-const $=id=>document.getElementById(id), state={config:null,catalog:null,runs:[]};
-const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const fmt=v=>v==null?'—':(typeof v==='number'&&!Number.isInteger(v)?v.toFixed(2):Number(v).toLocaleString());
-async function api(url,opt){const r=await fetch(url,opt),d=await r.json();if(!r.ok)throw new Error(d.error||r.statusText);return d}
-function badge(s){const c=['complete','verified'].includes(s)?'ok':(['running','starting','resuming','stopping','aborting'].includes(s)?'live':(['failed','invalid'].includes(s)?'bad':''));return `<span class="badge ${c}">${esc(s||'unknown')}</span>`}
-function checked(id){return [...document.querySelectorAll(`#${id} input:checked`)].map(x=>x.value)}
-function group(id){return (state.catalog?.categories||[]).find(x=>x.id===id)}
-function poolSize(){return checked('categories').reduce((n,id)=>n+Number(group(id)?.count||0),0)}
-function selectedReducers(){return checked('reducers')}
-function item(label,value){return `<div class="item"><span>${esc(label)}</span><b>${esc(value??'—')}</b></div>`}
-function updateBudget(){const c=state.catalog;if(!c)return;const pool=poolSize(),max=Math.max(0,Number($('maxFiles').value)||0),sample=Math.min(pool,max),r=selectedReducers().length,rep=Math.max(0,Number($('repeats').value)||0);$('budget').innerHTML=item('Candidate pool',pool)+item('Sampled at launch',sample)+item('Total trials',sample*r*rep)+item('Strict waves',r*rep)+item('Selected reducers',r)+item('Predicate timeout',`${fmt(c.predicate_timeout_seconds)}s`)}
-function renderCatalog(){const c=state.catalog;if(!c||!c.valid){$('categories').innerHTML='';$('reducers').innerHTML='';$('catalogMeta').innerHTML=item('Catalog error',c?.error||'unavailable');return}$('categories').innerHTML=c.categories.map(x=>`<label class="choice"><input type="checkbox" value="${esc(x.id)}" checked><span><b>${esc(x.label)} <em>${fmt(x.count)} cases</em></b><small>${esc(x.description)}</small></span></label>`).join('');$('reducers').innerHTML=c.reducers.map(r=>`<label class="choice"><input type="checkbox" value="${esc(r.id)}" checked><span><b>${esc(r.label)}</b><small>${esc(r.id)} · ${esc(r.strategy||'default')} · evidence ${esc(r.evidence_level)}</small></span></label>`).join('');$('timeout').value=c.default_timeout_seconds;$('jobs').value=c.default_outer_jobs;$('maxFiles').value=c.total_benchmarks;$('repeats').value=c.default_repeats;document.querySelectorAll('#categories input,#reducers input').forEach(x=>x.onchange=updateBudget);$('catalogMeta').innerHTML=item('Tracked inputs',fmt(c.total_benchmarks))+item('Category layout',c.categories.map(x=>`${x.label}: ${x.count}`).join(' · '))+item('Schedule',c.schedule)+item('Memory / trial',`${fmt(c.memory_mb)} MiB`);updateBudget()}
-function renderGate(){const c=state.config||{},cat=state.catalog,ok=Boolean(c.can_launch&&cat?.valid),cls=ok?'':' bad';const reason=!c.can_launch?c.branch_error:(cat?.error||'benchmark catalogue unavailable');$('gate').innerHTML=`<div class="gate${cls}"><i class="dot"></i><div><b>SMTBatch branch: ${esc(c.smtbatch_branch||c.current_branch||'detached')} / target ${esc(c.target_branch||'main')}</b><div>${ok?'New runs and fixed-condition resumes are enabled.':esc(reason)}</div></div></div>`;$('start').disabled=!ok}
-function runSelection(r){const s=r.selection||{};return `${(s.categories||[]).map(id=>group(id)?.label||id).join(', ')||'—'} · ${fmt(s.sampled_count)} sampled`}
-function renderRuns(){const runs=[...state.runs].reverse();$('runs').innerHTML=runs.map(r=>{const pct=r.total_trials?Math.round(r.completed_trials/r.total_trials*100):0;const url=`/runs/${encodeURIComponent(r.run_id)}/report`;return `<article class="card" onclick="location.href='${url}'"><h3>${esc(r.run_id)} ${badge(r.status)}</h3><div class="muted">${esc(runSelection(r))}</div><div class="progress"><i style="width:${pct}%"></i></div><div class="metric"><span>Sealed trials</span><b>${fmt(r.completed_trials)} / ${fmt(r.total_trials)}</b></div><div class="metric"><span>Active / pending</span><b>${fmt(r.active_trials)} / ${fmt(r.pending_trials)}</b></div><div class="metric"><span>Timeout / jobs</span><b>${fmt(r.limits?.trial_wall_sec)}s / ${fmt(r.outer_jobs)}</b></div><div class="metric"><span>Repeats / max files</span><b>${fmt(r.repeats)} / ${fmt(r.selection?.max_files)}</b></div><div class="metric"><span>Calls / accepted</span><b>${fmt(r.realtime_calls)} / ${fmt(r.realtime_accepted)}</b></div><div class="actions"><a class="button secondary" href="${url}">View results</a>${r.live?`<button class="warn" onclick="event.stopPropagation();stopRun('${esc(r.run_id)}','graceful')">Stop scheduling</button><button class="danger" onclick="event.stopPropagation();stopRun('${esc(r.run_id)}','immediate')">Abort</button>`:((['interrupted','failed'].includes(r.status)&&state.config.can_launch)?`<button onclick="event.stopPropagation();resumeRun('${esc(r.run_id)}')">Resume</button>`:'')}</div></article>`}).join('')||'<div class="empty">No reduction runs yet.</div>';const valid=state.catalog?.valid?state.catalog.categories:[];$('groupCount').textContent=fmt(valid.length);$('benchmarkCount').textContent=fmt(state.catalog?.total_benchmarks||0);$('runCount').textContent=state.runs.length;$('activeCount').textContent=state.runs.filter(x=>x.live).length}
-function confirmation(payload){const c=state.catalog,selected=payload.categories.map(id=>group(id)?.label||id).join(', ');$('confirmBody').innerHTML=item('Benchmark groups',selected)+item('Candidate pool',poolSize())+item('Random sample',Math.min(poolSize(),payload.max_files))+item('Reducers',payload.reducers.map(id=>(c.reducers.find(x=>x.id===id)||{}).label||id).join(', '))+item('Total trial timeout',`${fmt(payload.timeout_seconds)}s`)+item('Parallel jobs',payload.outer_jobs)+item('Repeats',payload.repeats)+item('Planned trials',Math.min(poolSize(),payload.max_files)*payload.reducers.length*payload.repeats)+item('Strict waves',payload.reducers.length*payload.repeats);const d=$('confirmDialog');if(!d.showModal)return Promise.resolve(window.confirm('Start this reduction experiment with the displayed conditions?'));return new Promise(resolve=>{const finish=value=>{d.close();resolve(value)};$('confirmCancel').onclick=()=>finish(false);$('confirmGo').onclick=()=>finish(true);d.showModal()})}
-async function refresh(){try{const s=await api('/api/studies');state.config=s.config;state.catalog=s.catalog;renderGate();renderCatalog();state.runs=(await api('/api/runs')).runs;renderRuns();$('message').textContent=''}catch(e){$('message').textContent=e.message}}
-async function stopRun(id,mode){if(mode==='immediate'&&!confirm('Abort in-flight reducer process groups and preserve partial attempts?'))return;try{await api(`/api/runs/${encodeURIComponent(id)}/stop`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})});await refresh()}catch(e){$('message').textContent=e.message}}
-async function resumeRun(id){try{await api(`/api/runs/${encodeURIComponent(id)}/resume`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});await refresh()}catch(e){$('message').textContent=e.message}}
-document.addEventListener('input',e=>{if(['timeout','jobs','maxFiles','repeats'].includes(e.target.id))updateBudget()});$('refresh').onclick=refresh;$('start').onclick=async()=>{try{if(!state.catalog?.valid)throw new Error('Benchmark catalogue is unavailable');const payload={categories:checked('categories'),reducers:selectedReducers(),timeout_seconds:Number($('timeout').value),outer_jobs:Number($('jobs').value),max_files:Number($('maxFiles').value),repeats:Number($('repeats').value)};if(!payload.categories.length)throw new Error('Select at least one benchmark group');if(!payload.reducers.length)throw new Error('Select at least one reducer');if(!Number.isFinite(payload.timeout_seconds)||payload.timeout_seconds<=0)throw new Error('Total trial timeout must be positive');if(!Number.isInteger(payload.outer_jobs)||payload.outer_jobs<=0)throw new Error('Parallel jobs must be a positive integer');if(!Number.isInteger(payload.max_files)||payload.max_files<=0)throw new Error('Maximum benchmark files must be a positive integer');if(!Number.isInteger(payload.repeats)||payload.repeats<=0)throw new Error('Repeats must be a positive integer');if(!await confirmation(payload))return;const run=await api('/api/runs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});location.href=`/runs/${encodeURIComponent(run.run_id)}/report`}catch(e){$('message').textContent=e.message}};window.stopRun=stopRun;window.resumeRun=resumeRun;refresh();setInterval(async()=>{try{state.runs=(await api('/api/runs')).runs;renderRuns()}catch(_){}},2500);
-</script>
-</body></html>
+    <div class="topbar-status">
+      <i id="controllerDot" class="status-dot"></i>
+      <div><strong id="controllerText">Connecting…</strong><small id="controllerDetail">Loading project catalog</small></div>
+    </div>
+    <div class="topbar-metrics">
+      <div><span>Benchmarks</span><strong id="benchmarkCount">0</strong></div>
+      <div><span>Groups</span><strong id="groupCount">0</strong></div>
+      <div><span>Runs</span><strong id="runCount">0</strong></div>
+      <div><span>Active</span><strong id="activeCount">0</strong></div>
+    </div>
+  </header>
+  <main class="reduction-shell">
+    <section class="panel reduction-panel launch-panel">
+      <div class="section-heading">
+        <div>
+          <div class="eyebrow">RUN CONFIGURATION</div>
+          <h2>Build a reduction run</h2>
+          <p>Select the scale groups to sample, then choose the reducer black boxes and generic run parameters.</p>
+        </div>
+        <button id="refresh" class="ghost-button" type="button">Refresh catalog</button>
+      </div>
+      <div id="message" class="inline-message" role="status"></div>
+      <div class="launch-layout">
+        <section class="benchmark-selector">
+          <div class="block-heading">
+            <div><h3>Benchmark groups</h3><p>Manual size categories; all cases are assigned to exactly one group.</p></div>
+            <span id="selectionSummary" class="selection-count">0 selected</span>
+          </div>
+          <div class="selector-toolbar">
+            <small>Use groups to run a focused sample instead of the complete catalog.</small>
+            <div class="toolbar-actions"><button id="selectAll" type="button">All groups</button><button id="clearGroups" type="button">Clear</button></div>
+          </div>
+          <div id="categories" class="benchmark-groups"></div>
+        </section>
+        <aside class="launch-sidebar">
+          <section>
+            <div class="block-heading">
+              <div><h3>Reducers</h3><p>Only generic command identity is exposed here.</p></div>
+              <span id="reducerSummary" class="selection-count">0 selected</span>
+            </div>
+            <div id="reducers" class="reducer-options"></div>
+          </section>
+          <section class="field-grid">
+            <label class="field">Per-case reducer timeout (seconds)<input id="timeout" type="number" min="0.001" step="1"><span class="field-note">Maximum wall-clock time for one benchmark × reducer × repeat.</span></label>
+            <label class="field">Parallel jobs<input id="jobs" type="number" min="1" step="1"><span class="field-note">Outer jobs in the frozen schedule.</span></label>
+            <label class="field">Maximum benchmark files<input id="maxFiles" type="number" min="0" step="1" value="0"><span class="field-note">0 = all selected cases; otherwise a random sample cap.</span></label>
+            <label class="field">Repeats<input id="repeats" type="number" min="1" step="1"><span class="field-note">Repeat the same sample for comparison.</span></label>
+          </section>
+          <div class="launch-actions">
+            <button id="start" class="primary-button" type="button">Start reduction run</button>
+          </div>
+        </aside>
+      </div>
+    </section>
+    <section class="panel reduction-panel history-panel">
+      <div class="section-heading history-heading">
+        <div><div class="eyebrow">RUN HISTORY</div><h2>Reduction runs</h2><p>Open a run for reducer summaries, evidence health, logs, and size trajectories.</p></div>
+      </div>
+      <div id="runs" class="runs"></div>
+    </section>
+  </main>
+  <dialog id="confirmDialog" class="reduction-dialog">
+    <div class="dialog-content">
+      <div class="eyebrow">FREEZE RUN PLAN</div>
+      <h2>Start this reduction run?</h2>
+      <p>This is the calculated workload that will be frozen into the run. The estimate uses the per-case reducer timeout; the worst case also includes predicate verification budgets and termination grace.</p>
+      <div id="confirmBody" class="confirm-grid"></div>
+      <div class="dialog-actions"><button id="confirmCancel" class="secondary-button" type="button">Cancel</button><button id="confirmGo" class="primary-button" type="button">Start run</button></div>
+    </div>
+  </dialog>
+  <script>
+    const $=function(id){return document.getElementById(id)};
+    const state={config:null,catalog:null,runs:[],catalogInitialized:false,formInitialized:false,refreshing:false};
+    const esc=function(value){return String(value==null?'':value).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})};
+    const fmt=function(value){if(value===null||value===undefined||value==='')return '—';const n=Number(value);return Number.isFinite(n)?n.toLocaleString():esc(value)};
+    const count=function(run,key){return Number(run&&run[key]||0)};
+    const checked=function(id){return Array.from(document.querySelectorAll('#'+id+' input:checked')).map(function(node){return node.value})};
+    const group=function(id){return (state.catalog&&state.catalog.categories||[]).find(function(item){return item.id===id})};
+    const selectedReducers=function(){return checked('reducers')};
+    const poolSize=function(){return checked('categories').reduce(function(total,id){return total+Number((group(id)||{}).count||0)},0)};
+    const sampleCount=function(pool,cap){return cap===0?pool:Math.min(pool,cap)};
+    const duration=function(value){const total=Math.max(0,Math.ceil(Number(value)||0)),hours=Math.floor(total/3600),minutes=Math.floor((total%3600)/60),seconds=total%60;return hours?hours+'h '+minutes+'m':minutes?minutes+'m '+seconds+'s':seconds+'s'};
+    const metric=function(label,value){return '<div class="plan-metric"><span>'+esc(label)+'</span><strong>'+esc(value)+'</strong></div>'};
+    const setMessage=function(value,error){$('message').textContent=value||'';$('message').className='inline-message'+(error?' error':'')};
+    async function api(url,options){const response=await fetch(url,options);let data={};try{data=await response.json()}catch(_){data={}}if(!response.ok)throw new Error(data.error||response.statusText);return data}
+    function updateHeader(){
+      const catalog=state.catalog||{},config=state.config||{},ready=Boolean(config.can_launch&&catalog.valid);
+      $('controllerDot').className='status-dot'+(ready?'':' bad');
+      $('controllerText').textContent=ready?'Controller connected':'Launch gated';
+      const branch=config.smtbatch_branch||'unknown branch';
+      $('controllerDetail').textContent=ready?branch+' · catalog verified':(config.branch_error||catalog.error||'Catalog unavailable');
+      $('benchmarkCount').textContent=fmt(catalog.total_benchmarks||0);
+      $('groupCount').textContent=fmt((catalog.categories||[]).length);
+      $('runCount').textContent=fmt(state.runs.length);
+      $('activeCount').textContent=fmt(state.runs.filter(function(run){return Boolean(run.live)}).length);
+      $('start').disabled=!ready;
+    }
+    function updateSelectionSummary(){
+      const catalog=state.catalog;
+      if(!catalog||!catalog.valid){$('selectionSummary').textContent='0 selected';$('reducerSummary').textContent='0 selected';return}
+      const pool=poolSize(),reducers=selectedReducers().length;
+      $('selectionSummary').textContent=fmt(checked('categories').length)+' of '+fmt((catalog.categories||[]).length)+' groups · '+fmt(pool)+' cases';
+      $('reducerSummary').textContent=fmt(reducers)+' selected';
+    }
+    function renderCatalog(){
+      const catalog=state.catalog;
+      if(!catalog||!catalog.valid){$('categories').innerHTML='<div class="empty">Benchmark catalog unavailable: '+esc(catalog&&catalog.error||'unknown error')+'</div>';$('reducers').innerHTML='';updateSelectionSummary();return}
+      const previousGroups=new Set(checked('categories')),previousReducers=new Set(checked('reducers')),initial=!state.catalogInitialized,lastRun=state.config&&state.config.last_run||{},groupIds=new Set((catalog.categories||[]).map(function(item){return item.id})),reducerIds=new Set((catalog.reducers||[]).map(function(item){return item.id})),persistedGroups=initial&&Array.isArray(lastRun.categories)?new Set(lastRun.categories.filter(function(id){return groupIds.has(id)})):null,persistedReducers=initial&&Array.isArray(lastRun.reducers)?new Set(lastRun.reducers.filter(function(id){return reducerIds.has(id)})):null,restoreGroups=persistedGroups&&persistedGroups.size?persistedGroups:null,restoreReducers=persistedReducers&&persistedReducers.size?persistedReducers:null;
+      $('categories').innerHTML=(catalog.categories||[]).map(function(item){
+        const active=initial?(restoreGroups?restoreGroups.has(item.id):true):previousGroups.has(item.id);
+        return '<label class="benchmark-option"><input type="checkbox" value="'+esc(item.id)+'"'+(active?' checked':'')+'><span class="benchmark-card"><span class="benchmark-card-head"><strong>'+esc(item.label)+'</strong><span class="case-count">'+fmt(item.count)+' cases</span></span><p>'+esc(item.description||'No description')+'</p><span class="checkmark">'+(active?'Selected':'Available')+'</span></span></label>';
+      }).join('');
+      $('reducers').innerHTML=(catalog.reducers||[]).map(function(item){
+        const active=initial?(restoreReducers?restoreReducers.has(item.id):true):previousReducers.has(item.id);
+        return '<label class="reducer-option"><input type="checkbox" value="'+esc(item.id)+'"'+(active?' checked':'')+'><span class="reducer-card"><strong>'+esc(item.label||item.id)+'</strong><small>'+esc(item.id)+'</small><span class="black-box-tag">BLACK BOX</span></span></label>';
+      }).join('')||'<div class="empty">No reducers configured.</div>';
+      document.querySelectorAll('#categories input,#reducers input').forEach(function(input){input.addEventListener('change',updateSelectionSummary)});
+      if(!state.formInitialized){
+        $('timeout').value=lastRun.timeout_seconds??catalog.default_timeout_seconds;
+        $('jobs').value=lastRun.outer_jobs??catalog.default_outer_jobs;
+        $('maxFiles').value=lastRun.max_files??0;
+        $('repeats').value=lastRun.repeats??catalog.default_repeats;
+        state.formInitialized=true;
+      }
+      state.catalogInitialized=true;
+      updateSelectionSummary();
+    }
+    function statusClass(status){return ['running','starting','resuming','stopping','aborting'].includes(status)?'live':(['complete','verified'].includes(status)?'ok':(['failed','interrupted','invalid'].includes(status)?'bad':''))}
+    function runSelection(run){
+      const selection=run.selection||{},labels=(selection.categories||[]).map(function(id){const item=group(id);return item?item.label:id});
+      return (labels.join(' · ')||'No groups')+' · '+fmt(selection.sampled_count)+' sampled';
+    }
+    function renderRuns(){
+      const target=$('runs');
+      if(!state.runs.length){target.innerHTML='<div class="empty">No reduction runs yet.</div>';updateHeader();return}
+      target.innerHTML=state.runs.slice().reverse().map(function(run){
+        const total=count(run,'total_trials'),done=count(run,'completed_trials'),percent=total?Math.min(100,Math.round(done*100/total)):0;
+        const status=run.status||'unknown',live=Boolean(run.live),url='/runs/'+encodeURIComponent(run.run_id)+'/report';
+        const actions='<a class="secondary-button" href="'+url+'">Open report</a>'+(live?'<button class="secondary-button" data-action="stop" data-mode="graceful" data-run-id="'+esc(run.run_id)+'">Stop scheduling</button><button class="danger-button" data-action="stop" data-mode="immediate" data-run-id="'+esc(run.run_id)+'">Abort</button>':(['interrupted','failed'].includes(status)&&state.config&&state.config.can_launch?'<button class="primary-button" data-action="resume" data-run-id="'+esc(run.run_id)+'">Resume</button>':''));
+        return '<article class="run-card"><div class="run-card-header"><div><h3>'+esc(run.run_id)+'</h3><div class="run-date">'+esc(run.created_at?new Date(run.created_at).toLocaleString():'Creation time unavailable')+'</div></div><span class="run-status '+statusClass(status)+'">'+esc(status)+'</span></div><div class="run-selection">'+esc(runSelection(run))+'</div><div class="run-progress"><i style="width:'+percent+'%"></i></div><div class="run-stats">'+
+          '<div class="run-stat"><span>Sealed trials</span><strong>'+fmt(done)+' / '+fmt(total)+' ('+percent+'%)</strong></div>'+
+          '<div class="run-stat"><span>Active / pending</span><strong>'+fmt(run.active_trials)+' / '+fmt(run.pending_trials)+'</strong></div>'+
+          '<div class="run-stat"><span>Predicate calls / accepted</span><strong>'+fmt(run.realtime_calls)+' / '+fmt(run.realtime_accepted)+'</strong></div>'+
+          '<div class="run-stat"><span>Timeout / outer jobs</span><strong>'+fmt(run.limits&&run.limits.trial_wall_sec)+'s / '+fmt(run.outer_jobs)+'</strong></div>'+
+          '<div class="run-stat"><span>Reducers</span><strong>'+esc(Object.values(run.by_reducer||{}).map(function(item){return item.label||item.id}).join(' · ')||'—')+'</strong></div>'+
+          '<div class="run-stat"><span>Sample / repeats</span><strong>'+fmt(run.selection&&run.selection.sampled_count)+' / '+fmt(run.repeats)+'</strong></div>'+
+          '</div><div class="run-actions">'+actions+'</div></article>';
+      }).join('');
+      updateHeader();
+    }
+    function renderConfirmation(payload){
+      const catalog=state.catalog||{},sample=sampleCount(poolSize(),payload.max_files),waves=payload.reducers.length*payload.repeats,batchesPerWave=sample?Math.ceil(sample/payload.outer_jobs):0,executionBatches=waves*batchesPerWave,estimatedSeconds=executionBatches*payload.timeout_seconds,predicatePasses=Number(catalog.preflight_repeats||1)+Number(catalog.verification_repeats||1),worstPerTrial=payload.timeout_seconds+Number(catalog.termination_grace_seconds||5)+predicatePasses*Number(catalog.predicate_timeout_seconds||25),worstSeconds=executionBatches*worstPerTrial;
+      $('confirmBody').innerHTML=metric('Planned trials',fmt(sample*payload.reducers.length*payload.repeats))+metric('Execution batches',fmt(executionBatches))+metric('Estimated completion',duration(estimatedSeconds))+metric('Worst-case completion',duration(worstSeconds));
+    }
+    function confirmRun(payload){
+      renderConfirmation(payload);
+      const dialog=$('confirmDialog');
+      if(!dialog.showModal)return Promise.resolve(window.confirm('Start this reduction run with the displayed conditions?'));
+      return new Promise(function(resolve){
+        const finish=function(value){dialog.close();resolve(value)};
+        $('confirmCancel').onclick=function(){finish(false)};
+        $('confirmGo').onclick=function(){finish(true)};
+        dialog.showModal();
+      });
+    }
+    function payloadFromForm(){
+      return {categories:checked('categories'),reducers:selectedReducers(),timeout_seconds:Number($('timeout').value),outer_jobs:Number($('jobs').value),max_files:Number($('maxFiles').value),repeats:Number($('repeats').value)};
+    }
+    async function startRun(){
+      try{
+        if(!state.catalog||!state.catalog.valid)throw new Error('Benchmark catalog is unavailable');
+        const payload=payloadFromForm();
+        if(!payload.categories.length)throw new Error('Select at least one benchmark group');
+        if(!payload.reducers.length)throw new Error('Select at least one reducer');
+        if(!Number.isFinite(payload.timeout_seconds)||payload.timeout_seconds<=0)throw new Error('Trial timeout must be positive');
+        if(!Number.isInteger(payload.outer_jobs)||payload.outer_jobs<=0)throw new Error('Parallel jobs must be a positive integer');
+        if(!Number.isInteger(payload.max_files)||payload.max_files<0)throw new Error('Maximum benchmark files must be a non-negative integer (0 means all)');
+        if(!Number.isInteger(payload.repeats)||payload.repeats<=0)throw new Error('Repeats must be a positive integer');
+        if(!await confirmRun(payload))return;
+        $('start').disabled=true;setMessage('Submitting the frozen run plan…');
+        const run=await api('/api/runs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+        location.href='/runs/'+encodeURIComponent(run.run_id)+'/report';
+      }catch(error){setMessage(error.message||String(error),true);updateHeader()}
+    }
+    async function stopRun(id,mode){
+      if(mode==='immediate'&&!window.confirm('Abort in-flight reducer process groups and preserve partial attempts?'))return;
+      try{await api('/api/runs/'+encodeURIComponent(id)+'/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:mode})});setMessage('Stop request sent.');await refresh()}
+      catch(error){setMessage(error.message||String(error),true)}
+    }
+    async function resumeRun(id){
+      try{await api('/api/runs/'+encodeURIComponent(id)+'/resume',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});setMessage('Resume request sent.');await refresh()}
+      catch(error){setMessage(error.message||String(error),true)}
+    }
+    $('runs').addEventListener('click',function(event){
+      const button=event.target.closest('[data-action]');if(!button)return;
+      event.preventDefault();
+      const id=button.getAttribute('data-run-id');
+      if(button.getAttribute('data-action')==='stop')stopRun(id,button.getAttribute('data-mode'));else if(button.getAttribute('data-action')==='resume')resumeRun(id);
+    });
+    document.addEventListener('input',function(event){if(['timeout','jobs','maxFiles','repeats'].includes(event.target.id))updateSelectionSummary()});
+    $('selectAll').onclick=function(){document.querySelectorAll('#categories input').forEach(function(input){input.checked=true});updateSelectionSummary()};
+    $('clearGroups').onclick=function(){document.querySelectorAll('#categories input').forEach(function(input){input.checked=false});updateSelectionSummary()};
+    $('refresh').onclick=refresh;
+    $('start').onclick=startRun;
+    async function refresh(){
+      if(state.refreshing)return;
+      state.refreshing=true;
+      try{
+        const catalogResponse=await api('/api/catalog');
+        state.config=catalogResponse.config;state.catalog=catalogResponse.catalog;
+        renderCatalog();
+        state.runs=(await api('/api/runs')).runs||[];
+        renderRuns();updateHeader();
+        if(state.catalog&&state.catalog.valid)setMessage('');
+      }catch(error){setMessage(error.message||String(error),true);updateHeader()}
+      finally{state.refreshing=false}
+    }
+    refresh();
+    setInterval(function(){if(!document.hidden)refresh()},3000);
+  </script>
+</body>
+
+</html>

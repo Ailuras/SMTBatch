@@ -19,27 +19,20 @@ else:
 CONFIG_NAME = "smtbatch.toml"
 _PLACEHOLDER = re.compile(r"\{(\w+)\}")
 _REDUCER_PLACEHOLDERS = {
-    "input", "output", "workdir", "trace_dir", "stats", "observe",
-    "observation_dir", "observation_stats", "predicate_timeout", "trial_timeout",
-    "memory_mb", "repeat", "seed", "predicate",
+    "input", "output", "workdir", "predicate_timeout", "predicate",
 }
 _CATEGORY_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 @dataclass(frozen=True)
 class ReducerSpec:
-    """One concrete selectable reducer version/configuration."""
+    """One black-box reducer command exposed to the batch runner."""
 
     name: str
     label: str
     command: tuple[str, ...]
     env: dict[str, str]
     executable: Path
-    strategy: str
-    version: str
-    evidence_level: str
-    acceptance: str
-    stats: str
 
     @property
     def option(self) -> dict[str, str]:
@@ -47,9 +40,6 @@ class ReducerSpec:
             "id": self.name,
             "name": self.name,
             "label": self.label,
-            "strategy": self.strategy,
-            "version": self.version,
-            "evidence_level": self.evidence_level,
         }
 
 
@@ -96,9 +86,7 @@ class BenchmarkCategorySpec:
 class Config:
     path: Path
     reducers: dict[str, ReducerSpec]
-    inputs_root: Path
     results_root: Path
-    studies_root: Path
     smtbatch_root: Path
     benchmark_database: Path
     benchmark_inputs_root: Path
@@ -137,9 +125,7 @@ def load_config(start: Path | None = None) -> Config:
     defaults = data.get("defaults", {})
     if not isinstance(defaults, dict):
         raise RuntimeError(f"[defaults] must be a table in {path}")
-    default_extras = sorted(
-        set(defaults) - {"inputs", "results", "studies", "port", "target_branch"}
-    )
+    default_extras = sorted(set(defaults) - {"results", "port", "target_branch"})
     if default_extras:
         raise RuntimeError(f"unknown [defaults] fields in {path}: {', '.join(default_extras)}")
 
@@ -165,7 +151,7 @@ def load_config(start: Path | None = None) -> Config:
     inputs_path = _resolve_path(
         catalog_raw.get("inputs", "benchmarks/inputs"), path
     )
-    template_value = catalog_raw.get("template", "scripts/experiments/smoke.json")
+    template_value = catalog_raw.get("template")
     template_path = _resolve_path(template_value, path) if template_value is not None else None
     categories_raw = data.get("benchmark_categories", {})
     if not isinstance(categories_raw, dict):
@@ -188,9 +174,7 @@ def load_config(start: Path | None = None) -> Config:
     return Config(
         path=path.resolve(),
         reducers=reducers,
-        inputs_root=_resolve_root(defaults.get("inputs", "benchmarks"), path),
         results_root=_resolve_root(defaults.get("results", "results"), path),
-        studies_root=_resolve_root(defaults.get("studies", "scripts/experiments"), path),
         smtbatch_root=(path.parent / "SMTBatch").resolve(),
         benchmark_database=database_path,
         benchmark_inputs_root=inputs_path,
@@ -328,10 +312,7 @@ def _parse_reducer(name: str, value: object, path: Path) -> ReducerSpec:
         raise RuntimeError(f"reducer names must be non-empty and trimmed in {path}")
     if not isinstance(value, dict):
         raise RuntimeError(f"[reducers.{name}] must be a table in {path}")
-    allowed = {
-        "label", "command", "env", "strategy", "version", "evidence_level",
-        "acceptance", "stats",
-    }
+    allowed = {"label", "command", "env"}
     extras = sorted(set(value) - allowed)
     if extras:
         raise RuntimeError(f"[reducers.{name}] has unknown fields: {', '.join(extras)}")
@@ -370,32 +351,10 @@ def _parse_reducer(name: str, value: object, path: Path) -> ReducerSpec:
         isinstance(key, str) and isinstance(item, str) for key, item in env.items()
     ):
         raise RuntimeError(f"[reducers.{name}] env must be a table of strings")
-    strings: dict[str, str] = {}
-    for field, default in (("strategy", ""), ("version", "")):
-        item = value.get(field, default)
-        if not isinstance(item, str):
-            raise RuntimeError(f"[reducers.{name}] {field} must be a string")
-        strings[field] = item
-    evidence_level = value.get("evidence_level", "none")
-    acceptance = value.get("acceptance", "serial-inferred")
-    stats = value.get("stats", "optional")
-    if evidence_level not in {"none", "summary", "full"}:
-        raise RuntimeError(f"[reducers.{name}] evidence_level must be none, summary, or full")
-    if acceptance not in {"serial-inferred", "trace"}:
-        raise RuntimeError(f"[reducers.{name}] acceptance must be serial-inferred or trace")
-    if stats not in {"none", "optional", "required"}:
-        raise RuntimeError(f"[reducers.{name}] stats must be none, optional, or required")
-    if acceptance == "trace" and evidence_level == "none":
-        raise RuntimeError(f"[reducers.{name}] trace acceptance requires summary or full evidence")
     return ReducerSpec(
         name=name,
         label=label.strip(),
         command=tuple(command),
         env=dict(env),
         executable=resolved,
-        strategy=strings["strategy"],
-        version=strings["version"],
-        evidence_level=str(evidence_level),
-        acceptance=str(acceptance),
-        stats=str(stats),
     )

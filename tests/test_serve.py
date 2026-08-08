@@ -19,57 +19,52 @@ class ManagerTests(ReductionFixture):
         super().setUp()
         self.manager = ReductionManager(self.root)
 
-    def test_study_lists_concrete_reducers_and_editable_defaults(self) -> None:
-        record = self.manager.study("fixture")
-        self.assertTrue(record["valid"])
-        self.assertEqual([item["id"] for item in record["reducers"]], ["r1", "r2"])
-        self.assertEqual(record["limits"]["trial_wall_sec"], 30)
-        self.assertEqual(record["outer_jobs"], 2)
-        self.assertEqual(record["trial_count"], 4)
-        self.assertEqual(record["wave_count"], 4)
-
-    def test_create_run_freezes_requested_subset_and_resources(self) -> None:
-        with mock.patch.object(self.manager, "_launch", return_value={"run_id": "launched"}):
-            result = self.manager.create_run({
-                "study_id": "fixture", "reducers": ["r2"],
-                "timeout_seconds": 90, "outer_jobs": 5,
-            })
-        self.assertEqual(result["run_id"], "launched")
-        run_dirs = [path for path in (self.root / "results").iterdir() if path.is_dir()]
-        self.assertEqual(len(run_dirs), 1)
-        plan = reduce.load_plan(run_dirs[0])
-        self.assertEqual([item["id"] for item in plan["reducers"]], ["r2"])
-        self.assertEqual(plan["limits"]["trial_wall_sec"], 90)
-        self.assertEqual(plan["execution"]["outer_jobs"], 5)
+    def test_catalog_exposes_reducer_defaults(self) -> None:
+        catalog = self.manager.benchmark_catalog()
+        self.assertTrue(catalog["valid"])
+        self.assertEqual([item["id"] for item in catalog["reducers"]], ["r1", "r2"])
+        self.assertEqual(catalog["default_timeout_seconds"], 30)
+        self.assertEqual(catalog["default_outer_jobs"], 2)
+        self.assertEqual(catalog["default_repeats"], 2)
+        self.assertEqual(catalog["total_benchmarks"], 1)
 
     def test_catalog_run_samples_categories_and_freezes_four_parameters(self) -> None:
         with mock.patch.object(self.manager, "_launch", return_value={"run_id": "catalog-launched"}):
             result = self.manager.create_run({
                 "categories": ["compact"], "reducers": ["r2"],
                 "timeout_seconds": 90, "outer_jobs": 5,
-                "max_files": 1, "repeats": 3,
+                "max_files": 0, "repeats": 3,
             })
         self.assertEqual(result["run_id"], "catalog-launched")
         run_dirs = [path for path in (self.root / "results").iterdir() if path.is_dir()]
         self.assertEqual(len(run_dirs), 1)
         plan = reduce.load_plan(run_dirs[0])
         self.assertEqual(plan["selection"]["categories"], ["compact"])
+        self.assertEqual(plan["selection"]["max_files"], 0)
         self.assertEqual(plan["selection"]["sampled_count"], 1)
         self.assertEqual(plan["repeats"], 3)
         self.assertEqual(plan["limits"]["trial_wall_sec"], 90)
         self.assertEqual(plan["execution"]["outer_jobs"], 5)
         self.assertEqual(len(plan["benchmarks"]), 1)
         self.assertEqual(len(plan["jobs"]), 3)
+        last_run = self.manager.configuration()["last_run"]
+        self.assertEqual(last_run["categories"], ["compact"])
+        self.assertEqual(last_run["reducers"], ["r2"])
+        self.assertEqual(last_run["timeout_seconds"], 90)
+        self.assertEqual(last_run["outer_jobs"], 5)
+        self.assertEqual(last_run["max_files"], 0)
+        self.assertEqual(last_run["repeats"], 3)
+        self.assertIn("saved_at", last_run)
 
     def test_create_run_validates_exact_request(self) -> None:
         invalid = [
             {"study_id": "fixture"},
-            {"study_id": "fixture", "reducers": [], "timeout_seconds": 1, "outer_jobs": 1},
-            {"study_id": "fixture", "reducers": ["r1"], "timeout_seconds": 0, "outer_jobs": 1},
-            {"study_id": "fixture", "reducers": ["r1"], "timeout_seconds": 1, "outer_jobs": 0},
+            {"study_id": "fixture", "reducers": ["r1"], "timeout_seconds": 1, "outer_jobs": 1},
             {"categories": [], "reducers": ["r1"], "timeout_seconds": 1, "outer_jobs": 1, "max_files": 1, "repeats": 1},
             {"categories": ["missing"], "reducers": ["r1"], "timeout_seconds": 1, "outer_jobs": 1, "max_files": 1, "repeats": 1},
-            {"categories": ["compact"], "reducers": ["r1"], "timeout_seconds": 1, "outer_jobs": 1, "max_files": 0, "repeats": 1},
+            {"categories": ["compact"], "reducers": ["r1"], "timeout_seconds": 0, "outer_jobs": 1, "max_files": 1, "repeats": 1},
+            {"categories": ["compact"], "reducers": ["r1"], "timeout_seconds": 1, "outer_jobs": 0, "max_files": 1, "repeats": 1},
+            {"categories": ["compact"], "reducers": ["r1"], "timeout_seconds": 1, "outer_jobs": 1, "max_files": -1, "repeats": 1},
         ]
         for body in invalid:
             with self.subTest(body=body), self.assertRaises(ValueError):
@@ -81,7 +76,7 @@ class ManagerTests(ReductionFixture):
         config = self.manager.configuration()
         self.assertTrue(config["can_launch"])
         self.assertEqual(config["smtbatch_branch"], "feat/reduction")
-        self.assertEqual(self.manager.studies()[0]["study_id"], "fixture")
+        self.assertTrue(self.manager.benchmark_catalog()["valid"])
 
     def test_wrong_smtbatch_branch_keeps_history_visible_but_blocks_mutations(self) -> None:
         subprocess.run(
@@ -93,11 +88,11 @@ class ManagerTests(ReductionFixture):
         self.assertFalse(config["can_launch"])
         self.assertIn("expected 'feat/reduction'", config["branch_error"])
         self.assertIn("SMTBatch", config["branch_error"])
-        self.assertEqual(self.manager.studies()[0]["study_id"], "fixture")
+        self.assertTrue(self.manager.benchmark_catalog()["valid"])
         with self.assertRaisesRegex(ValueError, "expected 'feat/reduction'"):
             self.manager.create_run({
-                "study_id": "fixture", "reducers": ["r1"],
-                "timeout_seconds": 30, "outer_jobs": 1,
+                "categories": ["compact"], "reducers": ["r1"],
+                "timeout_seconds": 30, "outer_jobs": 1, "max_files": 0, "repeats": 1,
             })
 
     def test_prepared_summary_and_cases_use_frozen_values(self) -> None:
@@ -105,7 +100,10 @@ class ManagerTests(ReductionFixture):
         reduce.prepare(self.study_path, output, reducers=["r1"], timeout_seconds=70, outer_jobs=3)
         summary = self.manager.summary("prepared")
         self.assertEqual(summary["status"], "prepared")
+        self.assertIsNotNone(summary["created_at"])
         self.assertEqual(summary["total_trials"], 2)
+        self.assertEqual(set(summary["by_reducer"]), {"r1"})
+        self.assertNotIn("reducers", summary)
         self.assertEqual(summary["outer_jobs"], 3)
         self.assertEqual(summary["limits"]["trial_wall_sec"], 70)
         self.assertEqual(summary["prepared_smtbatch_branch"], "feat/reduction")
@@ -166,16 +164,29 @@ class HttpTests(ReductionFixture):
         status, _, data = self.request("GET", "/")
         html = data.decode("utf-8")
         self.assertEqual(status, 200)
-        self.assertIn("SMTBatch Reduce", html)
-        self.assertIn("Total trial timeout", html)
+        self.assertIn("Reduction Console", html)
+        self.assertIn("Per-case reducer timeout", html)
         self.assertIn("Parallel jobs", html)
         self.assertIn("Maximum benchmark files", html)
         self.assertIn("Repeats", html)
-        self.assertIn("SMTBatch branch", html)
+        self.assertIn("Controller connected", html)
         self.assertIn('id="categories"', html)
         self.assertIn('id="reducers"', html)
-        self.assertIn("Confirm reduction experiment", html)
-        self.assertIn("View results", html)
+        self.assertIn("FREEZE RUN PLAN", html)
+        self.assertIn("Open report", html)
+        self.assertIn("calculated workload", html)
+        self.assertIn("Estimated completion", html)
+        self.assertIn("Worst-case completion", html)
+        self.assertIn("/api/catalog", html)
+        self.assertNotIn("/api/studies", html)
+        self.assertIn("run.created_at", html)
+        self.assertIn("run.by_reducer", html)
+        self.assertNotIn("run.started_at", html)
+        self.assertNotIn("run.reducers", html)
+        self.assertNotIn("Candidate pool", html)
+        self.assertIn("0 = all selected cases", html)
+        self.assertIn("last_run", html)
+        self.assertNotIn("Read-only execution facts", html)
         self.assertNotIn("Reduction / Observation", html)
         self.assertNotIn("Study conditions", html)
         self.assertNotIn("Cactus", html)
@@ -189,28 +200,38 @@ class HttpTests(ReductionFixture):
         self.assertIn("AST nodes", html)
         self.assertIn("Serialized bytes", html)
         self.assertIn("Predicate calls", html)
+        self.assertIn("Array.isArray(s.categories)", html)
+        self.assertIn("preflight_failed", html)
+        self.assertIn("timeout_verified", html)
+        self.assertNotIn("String(s.categories||[]).join", html)
         self.assertNotIn("Reduction / Observation", html)
 
-    def test_studies_api_exposes_branch_gate_and_catalogue(self) -> None:
-        status, _, data = self.request("GET", "/api/studies")
+    def test_catalog_api_exposes_branch_gate_and_catalogue(self) -> None:
+        status, _, data = self.request("GET", "/api/catalog")
         payload = json.loads(data)
         self.assertEqual(status, 200)
         self.assertTrue(payload["config"]["can_launch"])
         self.assertEqual(payload["config"]["smtbatch_branch"], "feat/reduction")
+        self.assertNotIn("current_branch", payload["config"])
         self.assertEqual({item["id"] for item in payload["config"]["reducers"]}, {"r1", "r2"})
-        self.assertEqual(payload["studies"][0]["study_id"], "fixture")
         self.assertTrue(payload["catalog"]["valid"])
         self.assertEqual(payload["catalog"]["total_benchmarks"], 1)
         self.assertEqual(payload["catalog"]["categories"][0]["id"], "compact")
+        self.assertEqual(payload["config"]["last_run"], {})
 
-    def test_runs_api_rejects_old_study_only_shape(self) -> None:
-        status, _, data = self.request("POST", "/api/runs", {"study_id": "fixture"})
+    def test_runs_api_rejects_old_study_shape(self) -> None:
+        status, _, data = self.request(
+            "POST", "/api/runs",
+            {"study_id": "fixture", "reducers": ["r1"], "timeout_seconds": 1, "outer_jobs": 1},
+        )
         self.assertEqual(status, 400)
-        self.assertIn("reducers", json.loads(data)["error"])
+        self.assertIn("categories", json.loads(data)["error"])
 
     def test_unknown_route_is_not_found(self) -> None:
-        status, _, _ = self.request("GET", "/api/unknown")
-        self.assertEqual(status, 404)
+        for path in ("/api/unknown", "/api/studies", "/api/studies/fixture"):
+            with self.subTest(path=path):
+                status, _, _ = self.request("GET", path)
+                self.assertEqual(status, 404)
 
 
 if __name__ == "__main__":
