@@ -396,7 +396,7 @@ class ReductionManager:
                 "predicate": {
                     "command": [
                         sys.executable,
-                        str(self.project_root / "benchmarks" / "ddsmt_artifact.py"),
+                        str(self.project_root / "benchmarks" / "oracle.py"),
                         filename,
                     ],
                     "match": predicate_match,
@@ -860,8 +860,7 @@ class ReductionManager:
             sealed_statuses = selected_status.get("statuses", {})
             if not isinstance(sealed_statuses, dict):
                 sealed_statuses = {}
-            verified_match = requested_status == "verified" and int(selected_status.get("verified", 0) or 0) > 0
-            if requested_status and requested_status not in sealed_statuses and requested_status != derived_status and not verified_match:
+            if requested_status and requested_status not in sealed_statuses and requested_status != derived_status:
                 continue
             filtered.append({**row, "status": derived_status})
         try:
@@ -899,11 +898,6 @@ class ReductionManager:
     def summary(self, run_id: str) -> dict[str, object]:
         run_dir, plan = self._load_run(run_id)
         progress = self._progress(run_dir)
-        provenance_errors: list[str] = []
-        try:
-            reduction.verify_runtime_identity(plan)
-        except reduction.ReductionError as exc:
-            provenance_errors.append(str(exc))
         state = str(progress.get("status", "prepared"))
         live = self._run_live(run_id, run_dir)
         if state in {"running", "starting", "stopping", "aborting"} and not live:
@@ -919,12 +913,12 @@ class ReductionManager:
                 "id": reducer["id"], "label": reducer["label"],
                 "planned": len(plan["benchmarks"]) * int(plan["repeats"]),
                 "completed": len(selected),
-                "verified": sum(bool(item.get("verified")) for item in selected),
-                "evidence_ok": sum(bool(item.get("evidence_ok")) for item in selected),
                 "predicate_calls": sum(int(item.get("predicate_calls", 0) or 0) for item in selected),
                 "accepted_moves": sum(int(item.get("accepted_moves", 0) or 0) for item in selected),
                 "statuses": dict(Counter(str(item.get("status")) for item in selected)),
             }
+        sealed_calls = sum(int(item.get("predicate_calls", 0) or 0) for item in results)
+        sealed_accepted = sum(int(item.get("accepted_moves", 0) or 0) for item in results)
         active = progress.get("active", [])
         if not isinstance(active, list):
             active = []
@@ -972,24 +966,14 @@ class ReductionManager:
             "limits": plan["limits"],
             "target_branch": self.config.target_branch,
             "smtbatch_branch": self.current_smtbatch_branch,
-            "prepared_smtbatch_branch": reduction.repository_branch(
-                plan.get("repository", {}), self.config.smtbatch_root
-            ) if isinstance(plan.get("repository"), dict) else None,
             "source_sha256": plan["source"]["sha256"],
             "plan_sha256": plan.get("plan_sha256"),
-            "repository": plan.get("repository"),
-            "provenance_errors": provenance_errors,
             "by_reducer": by_reducer,
-            "comparisons": reduction.comparison_rows(plan, results),
             "realtime_calls": realtime_calls,
             "realtime_accepted": realtime_accepted,
+            "calls": realtime_calls + sealed_calls,
+            "accepted": realtime_accepted + sealed_accepted,
             "current_quality": current_quality,
-            "evidence_health": {
-                "sealed": len(results),
-                "verified": sum(bool(item.get("verified")) for item in results),
-                "evidence_ok": sum(bool(item.get("evidence_ok")) for item in results),
-                "warnings": sum(len(item.get("evidence_warnings", [])) for item in results),
-            },
         }
 
     def runs(self) -> list[dict[str, object]]:
@@ -1006,14 +990,6 @@ class ReductionManager:
                 record = {"run_id": run_id, "status": "invalid", "error": str(exc)}
             records.append(record)
         return records
-
-    def export(self, run_id: str) -> dict[str, object]:
-        self._refresh_config()
-        run_dir, _ = self._load_run(run_id)
-        path = reduction.export_xlsx(run_dir, run_dir / "report" / f"{run_id}.xlsx")
-        if not _within(path, run_dir):
-            raise ValueError("export path escapes run directory")
-        return {"run_id": run_id, "path": str(path), "download": f"/api/runs/{quote(run_id)}/export"}
 
 
 def handler_factory(manager: ReductionManager):
@@ -1092,23 +1068,6 @@ def handler_factory(manager: ReductionManager):
                 match = re.fullmatch(r"/api/runs/([^/]+)/resume", path)
                 if match:
                     _json_response(self, manager.resume(unquote(match.group(1)), body), HTTPStatus.ACCEPTED)
-                    return
-                match = re.fullmatch(r"/api/runs/([^/]+)/export", path)
-                if match:
-                    value = manager.export(unquote(match.group(1)))
-                    if parsed.query:
-                        _json_response(self, value)
-                    else:
-                        export_path = Path(str(value["path"]))
-                        if not _within(export_path, manager.results_root):
-                            raise ValueError("export path escapes results root")
-                        payload = export_path.read_bytes()
-                        self.send_response(HTTPStatus.OK)
-                        self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-                        self.send_header("Content-Disposition", f"attachment; filename={export_path.name}")
-                        self.send_header("Content-Length", str(len(payload)))
-                        self.end_headers()
-                        self.wfile.write(payload)
                     return
                 raise ValueError("not found")
             except ValueError as exc:

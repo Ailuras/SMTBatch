@@ -65,10 +65,10 @@ WRAPPER_SCALAR_PLACEHOLDERS = {
 }
 RESULT_FIELDS = [
     "job_id", "benchmark", "reducer", "repeat", "wave", "status",
-    "verified", "evidence_ok", "input_expressions", "input_nodes",
-    "input_bytes", "output_expressions", "output_nodes", "output_bytes",
-    "size_ratio", "trial_wall_sec", "cleanup_wall_sec", "predicate_calls",
-    "accepted_moves", "attempt", "output",
+    "status_detail", "verified", "evidence_ok", "input_expressions",
+    "input_nodes", "input_bytes", "output_expressions", "output_nodes",
+    "output_bytes", "size_ratio", "trial_wall_sec", "cleanup_wall_sec",
+    "predicate_calls", "accepted_moves", "attempt", "output",
 ]
 RUNNING_STATES = {"starting", "running", "stopping", "aborting", "resuming"}
 FINAL_STATES = {"complete", "interrupted", "failed"}
@@ -277,103 +277,6 @@ def _fingerprint(path: Path, cache: dict[Path, dict[str, object]] | None = None)
     return value
 
 
-def _command_identity(
-    command: Sequence[str], root: Path, cache: dict[Path, dict[str, object]] | None = None
-) -> dict[str, object]:
-    executable_token = command[0]
-    executable = Path(executable_token).expanduser()
-    if not executable.is_absolute() and "/" in executable_token:
-        executable = root / executable
-    resolved = executable.resolve() if executable.exists() else None
-    if resolved is None:
-        located = shutil.which(executable_token)
-        resolved = Path(located).resolve() if located else None
-    executable_record = _fingerprint(resolved, cache) if resolved and resolved.is_file() else None
-    files = []
-    seen: set[Path] = set()
-    for token in command:
-        if "{" in token or "}" in token:
-            continue
-        candidate = Path(token).expanduser()
-        candidate = root / candidate if not candidate.is_absolute() else candidate
-        if candidate.is_file():
-            resolved_candidate = candidate.resolve()
-            if resolved_candidate not in seen:
-                files.append(_fingerprint(resolved_candidate, cache))
-                seen.add(resolved_candidate)
-    return {
-        "command": list(command),
-        "executable": str(resolved) if resolved else "",
-        "executable_sha256": executable_record["sha256"] if executable_record else "",
-        "files": files,
-    }
-
-
-def _repository_identity(root: Path) -> dict[str, object]:
-    def snapshot(repository: Path) -> dict[str, object]:
-        def repo_run(*args: str) -> subprocess.CompletedProcess[str]:
-            return subprocess.run(
-                ["git", "-C", str(repository), *args], text=True,
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
-            )
-
-        head = repo_run("rev-parse", "HEAD")
-        branch = repo_run("symbolic-ref", "--quiet", "--short", "HEAD")
-        status = repo_run("status", "--porcelain=v1")
-        files = repo_run("ls-files", "-z")
-        untracked = repo_run("ls-files", "--others", "--exclude-standard", "-z")
-        digest = hashlib.sha256()
-        file_names = []
-        if files.returncode == 0:
-            file_names.extend(files.stdout.split("\0"))
-        if untracked.returncode == 0:
-            file_names.extend(untracked.stdout.split("\0"))
-        for relative in sorted(set(file_names)):
-            if not relative:
-                continue
-            path = repository / relative
-            if path.is_file() and not path.is_symlink():
-                digest.update(relative.encode("utf-8"))
-                digest.update(b"\0")
-                digest.update(_sha256_path(path).encode("ascii"))
-                digest.update(b"\n")
-        return {
-            "root": str(repository.resolve()),
-            "head": head.stdout.strip() if head.returncode == 0 else "",
-            "branch": branch.stdout.strip() if branch.returncode == 0 else "",
-            "dirty": status.returncode != 0 or bool(status.stdout.strip()),
-            "tracked_sha256": digest.hexdigest(),
-        }
-
-    repositories = [root]
-    nested = root / "SMTBatch"
-    if (nested / ".git").exists():
-        repositories.append(nested)
-    snapshots = [snapshot(repository) for repository in repositories]
-    primary = snapshots[0]
-    return {
-        "root": primary["root"],
-        "head": primary["head"],
-        "branch": primary["branch"],
-        "dirty": primary["dirty"],
-        "tracked_sha256": primary["tracked_sha256"],
-        "repositories": snapshots,
-    }
-
-
-def repository_branch(identity: Mapping[str, object], repository: Path) -> str:
-    """Return the frozen branch for one repository in a provenance record."""
-    target = str(repository.resolve())
-    records = identity.get("repositories")
-    if isinstance(records, list):
-        for record in records:
-            if isinstance(record, dict) and record.get("root") == target:
-                return str(record.get("branch", ""))
-    if identity.get("root") == target:
-        return str(identity.get("branch", ""))
-    return ""
-
-
 def _normalize_match(value: object, label: str) -> dict[str, object]:
     raw = _mapping(value or {}, label)
     _only_fields(raw, MATCH_FIELDS, label)
@@ -471,7 +374,6 @@ def load_study(path: Path) -> dict[str, object]:
     wrapper = {
         "command": wrapper_command,
         "env": _string_mapping(wrapper_raw.get("env"), "predicate_wrapper.env"),
-        "identity": _command_identity(wrapper_command, root, fingerprints),
     }
 
     benchmarks_raw = raw.get("benchmarks")
@@ -516,7 +418,6 @@ def load_study(path: Path) -> dict[str, object]:
                 "match": _normalize_match(
                     predicate.get("match"), f"benchmark {benchmark_id} predicate.match"
                 ),
-                "identity": _command_identity(predicate_command, root, fingerprints),
             },
         })
 
@@ -562,7 +463,6 @@ def load_study(path: Path) -> dict[str, object]:
         "comparisons": comparisons,
         "catalog": dict(catalog),
         "source": {"path": str(study_path), "sha256": _sha256_path(study_path)},
-        "repository": _repository_identity(root),
         "environment": {
             "python": sys.version,
             "python_executable": sys.executable,
@@ -594,7 +494,6 @@ def _plan_reducer(spec: ReducerSpec, root: Path) -> dict[str, object]:
         "label": spec.label,
         "command": command,
         "env": dict(spec.env),
-        "identity": _command_identity(command, root),
     }
 
 
@@ -700,7 +599,6 @@ def build_plan(
         "catalog": study.get("catalog", {}),
         "selection": selection_record,
         "source": study["source"],
-        "repository": study["repository"],
         "environment": study["environment"],
         "jobs": jobs,
         "job_count": len(jobs),
@@ -756,7 +654,6 @@ def prepare(
             "schema_version": SCHEMA_VERSION,
             "format": FORMAT,
             "study_source": study["source"],
-            "repository": study["repository"],
             "environment": study["environment"],
             "inputs": [
                 {"id": item["id"], "path": item["input"], "sha256": item["input_sha256"]}
@@ -821,56 +718,6 @@ def _lookup(plan: Mapping[str, object], collection: str, identifier: str) -> dic
     if len(matches) != 1:
         raise ReductionError(f"plan has no unique {collection} id {identifier}")
     return matches[0]
-
-
-def _verify_identity_record(record: Mapping[str, object], root: Path, label: str) -> None:
-    command = record.get("command")
-    if not isinstance(command, list) or not command:
-        raise ReductionError(f"invalid recorded {label} command")
-    current = _command_identity([str(item) for item in command], root)
-    if current != record:
-        raise ReductionError(f"{label} command drift")
-
-
-def verify_runtime_identity(plan: Mapping[str, object]) -> None:
-    root = Path(str(plan["root"]))
-    try:
-        config = load_config(root)
-        validate_target_branch(config)
-    except RuntimeError as exc:
-        raise ReductionError(str(exc)) from None
-    source = _mapping(plan.get("source"), "plan source")
-    source_path = Path(str(source.get("path", "")))
-    if not source_path.is_file() or _sha256_path(source_path) != source.get("sha256"):
-        raise ReductionError(f"study manifest drift: {source_path}")
-    prepared_repository = _mapping(plan.get("repository"), "repository identity")
-    current_repository = _repository_identity(root)
-    if current_repository != prepared_repository:
-        raise ReductionError("repository HEAD, dirty state, or tracked content drift since prepare")
-    for benchmark in plan["benchmarks"]:
-        input_path = Path(str(benchmark["input"]))
-        if not input_path.is_file() or _sha256_path(input_path) != benchmark.get("input_sha256"):
-            raise ReductionError(f"benchmark input drift: {input_path}")
-        _verify_identity_record(benchmark["predicate"]["identity"], root, f"benchmark {benchmark['id']} predicate")
-    _verify_identity_record(plan["predicate_wrapper"]["identity"], root, "predicate wrapper")
-    for reducer in plan["reducers"]:
-        reducer_id = str(reducer["id"])
-        configured = config.reducers.get(reducer_id)
-        if configured is None:
-            raise ReductionError(f"configured reducer removed since prepare: {reducer_id}")
-        recorded = {
-            "label": reducer.get("label"),
-            "command": reducer.get("command"),
-            "env": reducer.get("env"),
-        }
-        current = {
-            "label": configured.label,
-            "command": list(configured.command),
-            "env": configured.env,
-        }
-        if current != recorded:
-            raise ReductionError(f"configured reducer changed since prepare: {reducer_id}")
-        _verify_identity_record(reducer["identity"], root, f"reducer {reducer_id}")
 
 
 class _ProcessRegistry:
@@ -1490,7 +1337,8 @@ def _execute_job(output: Path, plan: Mapping[str, object], job: Mapping[str, obj
             result = {
                 **enriched_job,
                 "schema_version": SCHEMA_VERSION, "format": FORMAT,
-                "status": "preflight_failed", "verified": False,
+                "status": "invalid", "status_detail": "preflight_failed",
+                "verified": False,
                 "evidence_ok": False, "evidence_warnings": ["preflight is unstable"],
                 "input_quality": None, "output_quality": None,
                 "input_bytes": benchmark["input_bytes"], "output_bytes": None,
@@ -1548,17 +1396,17 @@ def _execute_job(output: Path, plan: Mapping[str, object], job: Mapping[str, obj
             shutil.copy2(output_path, attempt_dir / "output.verified.smt2")
 
         if reducer_result["error"] is not None:
-            status_value = "infrastructure_error"
+            status_value, status_detail = "invalid", "infrastructure_error"
         elif not output_valid:
-            status_value = "invalid_output"
+            status_value, status_detail = "invalid", "invalid_output"
         elif not verified:
-            status_value = "verification_failed"
+            status_value, status_detail = "invalid", "verification_failed"
         elif reducer_result["timed_out"]:
-            status_value = "timeout_verified"
+            status_value, status_detail = "truncated", "timeout"
         elif reducer_result["returncode"] != 0:
-            status_value = "reducer_error_verified"
+            status_value, status_detail = "truncated", "reducer_error"
         else:
-            status_value = "ok"
+            status_value, status_detail = "completed", ""
         health = _evidence_health(attempt_dir, benchmark, reducer, allow_partial=False)
         trajectory = health["trajectory"]
         initial_quality = trajectory["initial"]
@@ -1567,7 +1415,8 @@ def _execute_job(output: Path, plan: Mapping[str, object], job: Mapping[str, obj
         result = {
             **enriched_job,
             "schema_version": SCHEMA_VERSION, "format": FORMAT,
-            "status": status_value, "verified": verified,
+            "status": status_value, "status_detail": status_detail,
+            "verified": verified,
             "evidence_ok": health["ok"], "evidence_warnings": health["warnings"],
             "input_quality": initial_quality, "output_quality": output_quality,
             "input_bytes": benchmark["input_bytes"], "input_sha256": benchmark["input_sha256"],
@@ -1621,6 +1470,7 @@ def write_results_index(output: Path, plan: Mapping[str, object]) -> list[dict[s
                     "job_id": result["job_id"], "benchmark": result["benchmark_id"],
                     "reducer": result["reducer_id"], "repeat": result["repeat"],
                     "wave": result["wave"], "status": result["status"],
+                    "status_detail": result.get("status_detail", ""),
                     "verified": str(bool(result["verified"])).lower(),
                     "evidence_ok": str(bool(result["evidence_ok"])).lower(),
                     **_quality_columns(result.get("input_quality"), "input"),
@@ -1686,7 +1536,6 @@ def _run_locked(output: Path, plan: Mapping[str, object]) -> list[dict[str, obje
     # still needs the concrete run directory identity.
     plan = dict(plan)
     plan["run_id"] = output.name
-    verify_runtime_identity(plan)
     _clear_control_for_resume(output)
     workers = int(plan["execution"]["outer_jobs"])
     _append_resume(

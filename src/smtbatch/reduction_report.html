@@ -1,28 +1,235 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SMTBatch Reduce · Results</title>
-<style>
-:root{--ink:#172636;--muted:#68798a;--line:#dce4ea;--paper:#fff;--wash:#f3f6f8;--blue:#21699b;--green:#247353;--red:#a23b35;--amber:#9a6516}*{box-sizing:border-box}body{margin:0;background:var(--wash);color:var(--ink);font:14px/1.45 Inter,system-ui,sans-serif}.top{background:#162a3b;color:#fff;padding:22px max(22px,calc((100vw - 1320px)/2));display:flex;align-items:center;gap:18px}.top h1{font-size:20px;margin:0;overflow-wrap:anywhere}.top a{color:#c4dbe9;text-decoration:none}.wrap{max-width:1320px;margin:20px auto;padding:0 20px 50px}.panel{background:#fff;border:1px solid var(--line);border-radius:13px;padding:18px;margin-bottom:16px}.head{display:flex;gap:16px;justify-content:space-between;align-items:start}.muted{color:var(--muted)}.metrics,.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:9px;margin-top:14px}.metric,.card{background:#f7f9fa;border:1px solid #edf1f3;border-radius:9px;padding:11px}.metric span{display:block;color:var(--muted);font-size:11px;text-transform:uppercase}.metric b{display:block;font-size:17px;margin-top:2px}.card h3{font-size:13px;margin:0 0 8px}.row{display:flex;justify-content:space-between;border-top:1px solid #e8edef;padding:5px 0}.badge{display:inline-block;border-radius:99px;padding:2px 7px;background:#edf1f4;font-size:10px;text-transform:uppercase}.badge.live{background:#e4f1f8;color:#17618f}.badge.ok{background:#e5f3ec;color:var(--green)}.badge.bad{background:#fae9e7;color:var(--red)}.badge.warn{background:#fff3d9;color:var(--amber)}button,.button{border:0;border-radius:8px;padding:9px 12px;background:var(--blue);color:#fff;font-weight:700;cursor:pointer;text-decoration:none}button.secondary{background:#edf2f5;color:#29475d}button.warn{background:#a66b15}button.danger{background:var(--red)}button:disabled{opacity:.45}.actions,.toolbar{display:flex;gap:8px;align-items:end;flex-wrap:wrap}.toolbar{margin:13px 0}.toolbar label{font-size:11px;color:var(--muted);text-transform:uppercase}.toolbar input,.toolbar select{display:block;margin-top:4px;border:1px solid #cbd7df;border-radius:7px;padding:8px;background:#fff;color:var(--ink)}.notice{padding:10px;border-radius:8px;background:#fff3d9;color:#80520f;margin-top:10px}.notice.ok{background:#e7f4ed;color:var(--green)}.scroll{overflow:auto}table{border-collapse:collapse;width:100%;min-width:850px}th,td{text-align:left;padding:9px;border-bottom:1px solid #e6ecef}th{font-size:11px;text-transform:uppercase;color:var(--muted)}.case-link{background:none;color:var(--blue);padding:0}.detail{display:none}.detail.open{display:block}.detail-top{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px}.legend{display:flex;gap:7px;flex-wrap:wrap;margin:10px 0}.legend button{background:#edf2f5;color:#304b5d;border:1px solid transparent}.legend button.off{opacity:.42}.charts{display:grid;grid-template-columns:repeat(3,minmax(300px,1fr));gap:10px}.chart{border:1px solid var(--line);border-radius:9px;padding:10px;overflow:hidden}.chart h3{margin:0 0 5px;font-size:12px}.chart svg{width:100%;height:auto}.grid{stroke:#e6ecef;stroke-width:1}.axis{stroke:#7d8e9c;stroke-width:1}.curve{fill:none;stroke-width:2}.accept{stroke:#fff;stroke-width:1.5}.phase{stroke:#aebbc4;stroke-width:1;stroke-dasharray:4 3}.comparison{display:flex;gap:10px;align-items:center}.comparison b{font-size:16px}.error{color:var(--red)}@media(max-width:1050px){.charts{grid-template-columns:1fr}.head{display:block}.actions{margin-top:10px}}
-</style><style>.logs{margin-top:16px}.logs details{border:1px solid var(--line);border-radius:9px;margin-top:8px;background:#f7f9fa}.logs summary{cursor:pointer;padding:10px;font-weight:700}.logs h4{margin:10px 12px 4px;font-size:11px;color:var(--muted);text-transform:uppercase}.logs pre{margin:0 12px 12px;padding:10px;max-height:260px;overflow:auto;background:#172636;color:#e7eef3;border-radius:7px;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.4 ui-monospace,SFMono-Regular,monospace}</style></head>
-<body><header class="top"><a href="/">← Reduction runs</a><h1 id="title">SMTBatch Reduce · Results</h1><span id="status"></span></header>
-<main class="wrap"><div id="error" class="error"></div>
-<section class="panel"><div class="head"><div><h2 style="margin:0">Run summary</h2><div id="subtitle" class="muted"></div></div><div class="actions"><button id="graceful" class="warn">Stop scheduling</button><button id="immediate" class="danger">Abort now</button><button id="resume">Resume frozen plan</button><button id="export" class="secondary">Export workbook</button></div></div><div id="metrics" class="metrics"></div><div id="evidence"></div></section>
-<section class="panel"><h2 style="margin:0">Reducers</h2><div id="reducers" class="cards"></div><div id="comparisons" class="cards"></div></section>
-<section class="panel"><h2 style="margin:0">Cases</h2><div class="toolbar"><label>Text<input id="query" placeholder="case, family, theory"></label><label>Reducer<select id="reducer"><option value="">All</option></select></label><label>Status<select id="caseStatus"><option value="">All</option><option>running</option><option>pending</option><option>complete</option><option>verified</option><option>ok</option><option>preflight_failed</option><option>invalid_output</option><option>verification_failed</option><option>timeout_verified</option><option>reducer_error_verified</option><option>infrastructure_error</option></select></label><button id="filter" class="secondary">Apply</button></div><div id="cases" class="scroll"></div><div class="actions"><button id="prev" class="secondary">Previous</button><button id="next" class="secondary">Next</button><span id="page" class="muted"></span></div></section>
-<section id="detail" class="panel detail"><div class="head"><div><h2 id="caseTitle" style="margin:0">Trajectory</h2><div id="caseSub" class="muted"></div></div><div class="toolbar"><label>X axis<select id="xaxis"><option value="calls">Predicate calls</option><option value="time">Wall time</option></select></label><label>Y values<select id="ymode"><option value="absolute">Absolute size</option><option value="relative">Initial (%)</option></select></label></div></div><div id="caseMetrics" class="detail-top"></div><div id="caseEvidence"></div><div id="legend" class="legend"></div><div class="charts"><div class="chart"><h3>Top-level expressions</h3><svg id="expr" viewBox="0 0 600 245"></svg></div><div class="chart"><h3>AST nodes</h3><svg id="nodes" viewBox="0 0 600 245"></svg></div><div class="chart"><h3>Serialized bytes</h3><svg id="bytes" viewBox="0 0 600 245"></svg></div></div></section>
-<section id="logs" class="panel logs"><h2 style="margin:0">Reducer logs</h2><div id="logTrials" class="muted">Select a case to inspect its bounded stdout and stderr.</div></section>
-</main>
-<script>
-const $=id=>document.getElementById(id),parts=location.pathname.split('/'),runId=decodeURIComponent(parts[2]||''),state={summary:null,cases:null,trajectory:null,page:1,hidden:new Set(),x:'calls',y:'absolute'};
-const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])),fmt=v=>v==null?'—':(typeof v==='number'&&!Number.isInteger(v)?v.toFixed(2):Number(v).toLocaleString());
-async function api(url,opt){const r=await fetch(url,opt),d=await r.json();if(!r.ok)throw new Error(d.error||r.statusText);return d}function badge(s){const c=['complete','verified','ok'].includes(s)?'ok':['running','starting','resuming','stopping','aborting'].includes(s)?'live':s==='timeout_verified'?'warn':['failed','invalid','preflight_failed','invalid_output','verification_failed','reducer_error_verified','infrastructure_error'].includes(s)?'bad':'';return `<span class="badge ${c}">${esc(s||'unknown')}</span>`}function metric(k,v){return `<div class="metric"><span>${esc(k)}</span><b>${esc(v??'—')}</b></div>`}
-function renderSummary(){const r=state.summary,l=r.limits||{},s=r.selection||{},categories=Array.isArray(s.categories)?s.categories:(typeof s.categories==='string'?[s.categories]:[]);$('title').textContent=`${r.run_id}`;$('status').innerHTML=badge(r.status);$('subtitle').textContent=`Reduction run · groups ${categories.join(', ')||'—'} · source ${String(r.source_sha256||'').slice(0,16)}… · plan ${String(r.plan_sha256||'').slice(0,16)}…`;$('metrics').innerHTML=metric('Sealed trials',`${fmt(r.completed_trials)} / ${fmt(r.total_trials)}`)+metric('Active / pending',`${fmt(r.active_trials)} / ${fmt(r.pending_trials)}`)+metric('Calls / accepted',`${fmt(r.realtime_calls)} / ${fmt(r.realtime_accepted)}`)+metric('Reducers / repeats',`${Object.keys(r.by_reducer||{}).length} / ${r.repeats}`)+metric('Sampled / max files',`${fmt(s.sampled_count)} / ${s.max_files===0?'all':fmt(s.max_files)}`)+metric('Reducer timeout / case',`${l.trial_wall_sec}s`)+metric('Parallel jobs',r.outer_jobs)+metric('Predicate timeout',`${l.predicate_timeout_sec}s`)+metric('Waves',r.wave_count);const h=r.evidence_health||{},notes=[];if(r.stale_status)notes.push(`Stale controller state ${r.stale_status}; resume will create new attempts.`);if((r.provenance_errors||[]).length)notes.push(...r.provenance_errors);$('evidence').innerHTML=notes.length?`<div class="notice">${esc(notes.join(' · '))}</div>`:`<div class="notice ok">Evidence: ${fmt(h.evidence_ok)} healthy / ${fmt(h.sealed)} sealed · ${fmt(h.verified)} verified · ${fmt(h.warnings)} warnings</div>`;$('graceful').disabled=!r.live;$('immediate').disabled=!r.live;$('resume').disabled=r.live||!['interrupted','failed'].includes(r.status)||r.provenance_errors?.length>0;$('reducers').innerHTML=Object.values(r.by_reducer||{}).map(v=>`<div class="card"><h3>${esc(v.label)} ${badge(v.id)}</h3><div class="row"><span>Sealed</span><b>${fmt(v.completed)} / ${fmt(v.planned)}</b></div><div class="row"><span>Verified / healthy</span><b>${fmt(v.verified)} / ${fmt(v.evidence_ok)}</b></div><div class="row"><span>Calls / accepted</span><b>${fmt(v.predicate_calls)} / ${fmt(v.accepted_moves)}</b></div></div>`).join('');$('reducer').innerHTML='<option value="">All</option>'+Object.values(r.by_reducer||{}).map(v=>`<option value="${esc(v.id)}">${esc(v.label)}</option>`).join('');$('comparisons').innerHTML=(r.comparisons||[]).map(c=>`<div class="card comparison"><span>${esc(c.left)} vs ${esc(c.right)}</span><b>${fmt(c.wins)} / ${fmt(c.ties)} / ${fmt(c.losses)}</b><small class="muted">win / tie / loss · ${fmt(c.paired_cases)} paired</small></div>`).join('')}
-async function loadCases(){const q=new URLSearchParams({page:String(state.page),page_size:'25'});if($('query').value)q.set('q',$('query').value);if($('reducer').value)q.set('reducer',$('reducer').value);if($('caseStatus').value)q.set('status',$('caseStatus').value);state.cases=await api(`/api/runs/${encodeURIComponent(runId)}/cases?${q}`);$('cases').innerHTML=`<table><thead><tr><th>Case</th><th>Family / theory</th><th>Status</th><th>Trials</th><th>Calls</th><th>Current size</th></tr></thead><tbody>${state.cases.cases.map(c=>`<tr><td><button class="case-link" onclick="openCase('${esc(c.case_id)}')"><b>${esc(c.case_id)}</b></button><div class="muted">${esc(c.predicate_mode)}</div></td><td>${esc(c.family)} / ${esc(c.theory)}</td><td>${badge(c.status)}<div class="muted">${fmt(c.verified)} verified · ${fmt(c.evidence_ok)} healthy</div></td><td>${fmt(c.completed)} / ${fmt(c.planned)}</td><td>${fmt(c.realtime_calls)}<div class="muted">${fmt(c.realtime_accepted)} accepted</div></td><td class="muted">${esc(JSON.stringify(c.current_quality||{}))}</td></tr>`).join('')}</tbody></table>`;$('page').textContent=`Page ${state.cases.page} / ${state.cases.pages||1} · ${state.cases.total} cases`;$('prev').disabled=state.page<=1;$('next').disabled=state.page>=(state.cases.pages||1)}
-function xy(p,t,key){const x=state.x==='time'?Number(p.elapsed_sec||0):Number(p.call_index||0);let y=Number(p[key]||0);if(state.y==='relative'){const i=Number(t.trajectory?.initial?.[key]||0);y=i?y/i*100:0}return[x,y]}
-function chart(id,key){const svg=$(id),trials=(state.trajectory?.trials||[]).filter((_,i)=>!state.hidden.has(i)),W=600,H=245,L=50,R=12,T=12,B=31;svg.innerHTML='';let values=[];trials.forEach(t=>(t.trajectory.points||[]).forEach(p=>values.push(xy(p,t,key))));if(!values.length)values=[[0,0]];const maxX=Math.max(1,...values.map(x=>x[0])),maxY=Math.max(1,...values.map(x=>x[1])),X=x=>L+x/maxX*(W-L-R),Y=y=>H-B-y/maxY*(H-T-B);for(let i=0;i<5;i++){const value=maxY*i/4,y=Y(value);svg.insertAdjacentHTML('beforeend',`<line class="grid" x1="${L}" x2="${W-R}" y1="${y}" y2="${y}"/><text x="3" y="${y+4}" font-size="10" fill="#6b7b88">${fmt(value)}</text>`)}svg.insertAdjacentHTML('beforeend',`<line class="axis" x1="${L}" x2="${W-R}" y1="${H-B}" y2="${H-B}"/><text x="${W/2-35}" y="${H-6}" font-size="10" fill="#6b7b88">${state.x==='time'?'wall time (s)':'predicate calls'}</text>`);trials.forEach(t=>{const original=state.trajectory.trials.indexOf(t),pts=t.trajectory.points||[],color=`hsl(${(original*79+205)%360} 53% 42%)`;if(!pts.length)return;(t.trajectory.phase_boundaries||[]).forEach(p=>{const v=state.x==='time'?Number(p.elapsed_sec||0):Number(p.call_index||0);svg.insertAdjacentHTML('beforeend',`<line class="phase" x1="${X(v)}" x2="${X(v)}" y1="${T}" y2="${H-B}"><title>${esc(p.phase||p.event||'phase boundary')}</title></line>`)});const c=pts.map(p=>xy(p,t,key));let d=`M ${X(c[0][0])} ${Y(c[0][1])}`;for(let i=1;i<c.length;i++)d+=` H ${X(c[i][0])} V ${Y(c[i][1])}`;svg.insertAdjacentHTML('beforeend',`<path class="curve" stroke="${color}" d="${d}"/>`);pts.filter(p=>p.accepted&&p.call_index>0).forEach(p=>{const q=xy(p,t,key);svg.insertAdjacentHTML('beforeend',`<circle class="accept" fill="${color}" cx="${X(q[0])}" cy="${Y(q[1])}" r="4"><title>${esc(t.reducer_label)} · call ${p.call_index} · ${esc(p.phase||'')} · ${esc(p.mutator||'')} · delta ${esc(JSON.stringify(p.size_delta||''))}</title></circle>`)});})}
-function renderTrajectory(){const d=state.trajectory,trials=d.trials||[],points=trials.flatMap(t=>t.trajectory?.points||[]),warnings=[...new Set(trials.flatMap(t=>t.trajectory?.warnings||[]))],calls=Math.max(0,...trials.map(t=>Number(t.trajectory?.candidate_calls||0))),accepted=trials.reduce((n,t)=>n+Number(t.trajectory?.accepted_moves||0),0),final=trials.map(t=>t.trajectory?.final).filter(Boolean).at(-1);$('detail').classList.add('open');$('caseTitle').textContent=`Trajectory · ${d.case.id}`;$('caseSub').textContent=`${d.case.family} · ${d.case.theory} · ${d.case.predicate_mode}`;$('caseMetrics').innerHTML=metric('Candidate calls',calls)+metric('Accepted moves',accepted)+metric('Current / final size',JSON.stringify(final||{}))+metric('Trials',trials.length);$('caseEvidence').innerHTML=warnings.length?`<div class="notice">Evidence warning: ${esc(warnings.join(' · '))}</div>`:'<div class="notice ok">Journal and trace alignment has no warning in this view.</div>';$('legend').innerHTML=trials.map((t,i)=>`<button class="${state.hidden.has(i)?'off':''}" onclick="toggle(${i})">${esc(t.reducer_label)} / r${t.repeat} ${badge(t.status)}</button>`).join('');chart('expr','expression_count');chart('nodes','node_count');chart('bytes','byte_count')}
-async function openCase(id){state.hidden.clear();state.trajectory=await api(`/api/runs/${encodeURIComponent(runId)}/cases/${encodeURIComponent(id)}/trajectory`);renderTrajectory();$('detail').scrollIntoView({behavior:'smooth'})}function toggle(i){state.hidden.has(i)?state.hidden.delete(i):state.hidden.add(i);renderTrajectory()}
-async function refresh(all=true){try{state.summary=await api(`/api/runs/${encodeURIComponent(runId)}/summary`);renderSummary();if(all)await loadCases();if(state.trajectory){state.trajectory=await api(`/api/runs/${encodeURIComponent(runId)}/cases/${encodeURIComponent(state.trajectory.case.id)}/trajectory`);renderTrajectory()}$('error').textContent=''}catch(e){$('error').textContent=e.message}}
-async function post(path,body){try{await api(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});await refresh()}catch(e){$('error').textContent=e.message}}$('graceful').onclick=()=>post(`/api/runs/${encodeURIComponent(runId)}/stop`,{mode:'graceful'});$('immediate').onclick=()=>{if(confirm('Abort in-flight reducer process groups and preserve partial attempts?'))post(`/api/runs/${encodeURIComponent(runId)}/stop`,{mode:'immediate'})};$('resume').onclick=()=>post(`/api/runs/${encodeURIComponent(runId)}/resume`,{});$('export').onclick=async()=>{try{const r=await fetch(`/api/runs/${encodeURIComponent(runId)}/export`,{method:'POST'});if(!r.ok)throw new Error((await r.json()).error);const a=document.createElement('a');a.href=URL.createObjectURL(await r.blob());a.download=`${runId}.xlsx`;a.click();URL.revokeObjectURL(a.href)}catch(e){$('error').textContent=e.message}};$('filter').onclick=()=>{state.page=1;loadCases()};$('prev').onclick=()=>{state.page--;loadCases()};$('next').onclick=()=>{state.page++;loadCases()};$('xaxis').onchange=e=>{state.x=e.target.value;renderTrajectory()};$('ymode').onchange=e=>{state.y=e.target.value;renderTrajectory()};window.openCase=openCase;window.toggle=toggle;refresh();setInterval(()=>refresh(false),2500);
-function renderLogs(){const trials=state.trajectory?.trials||[],warnings=[...new Set(trials.flatMap(t=>t.trajectory?.warnings||[]))];if(!warnings.length)$('caseEvidence').innerHTML='<div class="notice ok">External predicate journal has no warning in this view.</div>';$('logTrials').innerHTML=trials.length?trials.map(t=>{const logs=t.logs||{},out=logs.stdout?.text||'—',err=logs.stderr?.text||'—',suffix=(logs.stdout?.truncated||logs.stderr?.truncated)?' · truncated':'';return `<details><summary>${esc(t.reducer_label)} / repeat ${esc(t.repeat)} · ${esc(t.status)}${esc(suffix)}</summary><h4>stdout</h4><pre>${esc(out)}</pre><h4>stderr</h4><pre>${esc(err)}</pre></details>`}).join(''):'Select a case to inspect its bounded stdout and stderr.'}const renderTrajectoryBase=renderTrajectory;renderTrajectory=()=>{renderTrajectoryBase();renderLogs()};
-</script></body></html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SMTBatch Reduce · Results</title>
+  <style>
+    :root{--page:#07111b;--panel:#0f1d2b;--panel2:#142636;--soft:#0c1926;--line:#263b4e;--text:#e9f1f7;--muted:#8fa5b8;--accent:#47d7a1;--blue:#80bcff;--red:#ff827a;--yellow:#f0c96c}
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--page);color:var(--text);font:14px/1.45 Inter,ui-sans-serif,system-ui,sans-serif}
+    .top{background:var(--panel);color:var(--text);border-bottom:1px solid var(--line);padding:22px max(22px,calc((100vw - 1320px)/2));display:flex;align-items:center;gap:18px}
+    .top h1{font-size:20px;margin:0;overflow-wrap:anywhere}
+    .top a{color:var(--blue);text-decoration:none}
+    .wrap{max-width:1320px;margin:20px auto;padding:0 20px 50px}
+    .panel{background:linear-gradient(145deg,rgba(15,29,43,.98),rgba(11,23,35,.98));border:1px solid var(--line);border-radius:13px;padding:18px;margin-bottom:16px}
+    .head{display:flex;gap:16px;justify-content:space-between;align-items:start}
+    .muted{color:var(--muted)}
+    .badge{display:inline-block;border-radius:99px;padding:2px 7px;background:rgba(143,165,184,.12);color:var(--muted);font-size:10px;text-transform:uppercase}
+    .badge.live{background:rgba(128,188,255,.13);color:var(--blue)}
+    .badge.ok{background:rgba(71,215,161,.13);color:var(--accent)}
+    .badge.bad{background:rgba(255,130,122,.13);color:var(--red)}
+    .badge.warn{background:rgba(240,201,108,.13);color:var(--yellow)}
+    button,.button{border:1px solid rgba(71,215,161,.6);border-radius:8px;padding:9px 12px;background:var(--accent);color:#061a17;font-weight:700;cursor:pointer;text-decoration:none}
+    button.secondary{background:var(--soft);color:var(--text);border-color:var(--line)}
+    button.warn{background:rgba(240,201,108,.14);color:var(--yellow);border-color:rgba(240,201,108,.4)}
+    button.danger{background:rgba(255,130,122,.15);color:var(--red);border-color:rgba(255,130,122,.35)}
+    button:disabled{opacity:.45}
+    .actions,.toolbar{display:flex;gap:8px;align-items:end;flex-wrap:wrap}
+    .toolbar{margin:13px 0}
+    .toolbar label{font-size:11px;color:var(--muted);text-transform:uppercase}
+    .toolbar input,.toolbar select{display:block;margin-top:4px;border:1px solid var(--line);border-radius:7px;padding:8px;background:var(--soft);color:var(--text)}
+    .case-list .toolbar{margin:0 0 4px;padding-bottom:10px;border-bottom:1px solid var(--line)}
+    .case-list .toolbar label{flex:1 1 120px}
+    .case-list .toolbar input,.case-list .toolbar select{width:100%;padding:6px 8px;font-size:13px;background:var(--panel2)}
+    .case-list .toolbar button{padding:6px 11px;font-size:13px;font-weight:600}
+    .notice{padding:10px;border-radius:8px;background:rgba(240,201,108,.12);color:var(--yellow);margin-top:10px}
+    .notice.ok{background:rgba(71,215,161,.1);color:var(--accent)}
+    .scroll{overflow:auto}
+    table{border-collapse:collapse;width:100%}
+    th,td{text-align:left;padding:8px;border-bottom:1px solid var(--line)}
+    th{font-size:11px;text-transform:uppercase;color:var(--muted)}
+    tr:last-child td{border-bottom:0}
+    td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+    .summary-table{margin-top:14px}
+    .summary-table th,.summary-table td{text-align:center}
+    .case-layout{display:grid;grid-template-columns:minmax(300px,.85fr) minmax(0,1.35fr);gap:16px;margin-top:14px;align-items:start}
+    .case-list{min-width:0;background:var(--soft);border:1px solid var(--line);border-radius:10px;padding:10px 10px 0;display:flex;flex-direction:column}
+    .case-list .scroll{flex:1;max-height:620px}
+    .pager{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:4px;padding:9px 2px;border-top:1px solid var(--line)}
+    .pager button{padding:5px 11px;font-size:12px;font-weight:600}
+    .pager span{font-size:12px}
+    .case-row{cursor:pointer}
+    .case-row:hover td{background:rgba(128,188,255,.06)}
+    .case-row.selected td{background:rgba(71,215,161,.09)}
+    .case-link{background:none;border:0;color:var(--blue);padding:0;cursor:pointer}
+    .detail{min-width:0;display:none;background:var(--soft);border:1px solid var(--line);border-radius:10px;padding:14px}
+    .detail.open{display:block}
+    .legend{display:flex;gap:7px;flex-wrap:wrap;margin:10px 0}
+    .legend button{background:var(--soft);color:var(--text);border:1px solid var(--line)}
+    .legend button.off{opacity:.42}
+    .chart{border:1px solid var(--line);border-radius:9px;padding:10px;margin-top:10px;overflow:hidden}
+    .chart h3{margin:0 0 5px;font-size:12px}
+    .chart svg{display:block;width:100%;height:auto}
+    .grid{stroke:#22374a;stroke-width:1}
+    .axis{stroke:#51687c;stroke-width:1}
+    .curve{fill:none;stroke-width:2}
+    .accept{stroke:var(--page);stroke-width:1.5}
+    .error{color:var(--red)}
+    .logs{margin-top:16px}
+    .logs details{border:1px solid var(--line);border-radius:9px;margin-top:8px;background:var(--soft)}
+    .logs summary{cursor:pointer;padding:10px;font-weight:700}
+    .logs h4{margin:10px 12px 4px;font-size:11px;color:var(--muted);text-transform:uppercase}
+    .logs pre{margin:0 12px 12px;padding:10px;max-height:260px;overflow:auto;background:#0a1520;color:#e7eef3;border-radius:7px;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.4 ui-monospace,SFMono-Regular,monospace}
+    @media(max-width:1050px){.case-layout{grid-template-columns:1fr}.head{display:block}.actions{margin-top:10px}}
+  </style>
+</head>
+<body>
+  <header class="top"><a href="/">← Reduction runs</a><h1 id="title">SMTBatch Reduce · Results</h1><span id="status"></span></header>
+  <main class="wrap">
+    <div id="error" class="error"></div>
+    <section class="panel">
+      <h2 style="margin:0">Run summary</h2>
+      <div id="evidence"></div>
+      <div class="scroll"><table class="summary-table"><thead id="reducerHead"></thead><tbody id="reducerRows"></tbody></table></div>
+    </section>
+    <section class="panel">
+      <h2 style="margin:0">Cases</h2>
+      <div class="case-layout">
+        <div class="case-list">
+          <div class="toolbar">
+            <label>Text<input id="query" placeholder="case, family, theory"></label>
+            <label>Reducer<select id="reducer"><option value="">All</option></select></label>
+            <label>Status<select id="caseStatus"><option value="">All</option><option>running</option><option>pending</option><option>completed</option><option>truncated</option><option>invalid</option></select></label>
+            <button id="filter" class="secondary">Apply</button>
+          </div>
+          <div class="scroll"><table><thead><tr><th>Case</th><th>Status</th><th class="num">Trials</th></tr></thead><tbody id="cases"></tbody></table></div>
+          <div class="pager"><button id="prev" class="secondary">‹ Prev</button><span id="page" class="muted"></span><button id="next" class="secondary">Next ›</button></div>
+        </div>
+        <div id="detail" class="detail">
+          <h3 id="caseTitle" style="margin:0"></h3>
+          <div id="caseSub" class="muted"></div>
+          <div class="scroll" style="margin-top:10px"><table><thead><tr><th>Reducer</th><th>Status</th><th class="num">Calls</th><th class="num">Accepted</th><th class="num">Final bytes</th><th class="num">Ratio</th></tr></thead><tbody id="trialRows"></tbody></table></div>
+          <div class="legend" id="legend"></div>
+          <div class="chart"><h3>Size over time (serialized bytes)</h3><svg id="sizeChart" viewBox="0 0 580 300"></svg></div>
+          <div class="chart"><h3>Accepted moves over time</h3><svg id="opsChart" viewBox="0 0 580 300"></svg></div>
+        </div>
+      </div>
+    </section>
+    <section id="logs" class="panel logs">
+      <h2 style="margin:0">Reducer logs</h2>
+      <div id="logTrials" class="muted">Select a case to inspect its bounded stdout and stderr.</div>
+    </section>
+  </main>
+  <script>
+    const $=id=>document.getElementById(id),parts=location.pathname.split('/'),runId=decodeURIComponent(parts[2]||''),state={summary:null,cases:null,trajectory:null,page:1,selected:null,autoOpened:false,hidden:new Set()};
+    const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])),fmt=v=>v==null?'—':(typeof v==='number'&&!Number.isInteger(v)?v.toFixed(2):Number(v).toLocaleString());
+    const seconds=v=>{const n=Number(v)||0;return n<60?n.toFixed(1)+'s':Math.floor(n/60)+'m '+String(Math.round(n%60)).padStart(2,'0')+'s'};
+    const COLORS=['#47d7a1','#80bcff','#f0c96c','#d8a4ff','#ff827a','#66d9e8'];
+    function bucketCounts(statuses){const b={completed:0,truncated:0,invalid:0};for(const[k,n]of Object.entries(statuses||{}))b[k in b?k:'invalid']+=Number(n)||0;return b}
+    function badge(s){const c=['complete','completed'].includes(s)?'ok':['running','starting','resuming','stopping','aborting'].includes(s)?'live':s==='truncated'?'warn':['failed','invalid','interrupted'].includes(s)?'bad':'';return `<span class="badge ${c}">${esc(s||'unknown')}</span>`}
+    async function api(url,opt){const r=await fetch(url,opt),d=await r.json();if(!r.ok)throw new Error(d.error||r.statusText);return d}
+    function reducerColor(id){const ids=Object.keys((state.summary||{}).by_reducer||{id:0});const i=Math.max(0,ids.indexOf(id));return COLORS[i%COLORS.length]}
+
+    function renderSummary(){
+      const r=state.summary;
+      $('title').textContent=`${r.run_id}`;
+      $('status').innerHTML=badge(r.status);
+      const notes=[];
+      if(r.stale_status)notes.push(`Stale controller state ${r.stale_status}; resume will create new attempts.`);
+      $('evidence').innerHTML=notes.length?`<div class="notice">${esc(notes.join(' · '))}</div>`:'';
+      $('reducerHead').innerHTML='<tr><th>Reducer</th><th class="num">Done</th><th class="num">completed</th><th class="num">truncated</th><th class="num">invalid</th><th class="num">Calls</th><th class="num">Accepted</th></tr>';
+      $('reducerRows').innerHTML=Object.values(r.by_reducer||{}).map(v=>{const b=bucketCounts(v.statuses);return `<tr><td>${esc(v.label)}</td><td class="num">${fmt(v.completed)} / ${fmt(v.planned)}</td><td class="num">${fmt(b.completed)}</td><td class="num">${fmt(b.truncated)}</td><td class="num">${fmt(b.invalid)}</td><td class="num">${fmt(v.predicate_calls)}</td><td class="num">${fmt(v.accepted_moves)}</td></tr>`}).join('')||'<tr><td class="muted">No reducers in this run.</td></tr>';
+      $('reducer').innerHTML='<option value="">All</option>'+Object.values(r.by_reducer||{}).map(v=>`<option value="${esc(v.id)}">${esc(v.label)}</option>`).join('');
+    }
+
+    async function loadCases(){
+      const q=new URLSearchParams({page:String(state.page),page_size:'25'});
+      if($('query').value)q.set('q',$('query').value);
+      if($('reducer').value)q.set('reducer',$('reducer').value);
+      if($('caseStatus').value)q.set('status',$('caseStatus').value);
+      state.cases=await api(`/api/runs/${encodeURIComponent(runId)}/cases?${q}`);
+      $('cases').innerHTML=state.cases.cases.map(c=>`<tr class="case-row${state.selected===c.case_id?' selected':''}" data-case="${esc(c.case_id)}"><td><b>${esc(c.case_id)}</b><div class="muted">${esc(c.family)} / ${esc(c.theory)}</div></td><td>${badge(c.status)}</td><td class="num">${fmt(c.completed)} / ${fmt(c.planned)}</td></tr>`).join('')||'<tr><td class="muted">No cases match the current filters.</td></tr>';
+      $('page').textContent=`Page ${state.cases.page} / ${state.cases.pages||1} · ${state.cases.total} cases`;
+      $('prev').disabled=state.page<=1;$('next').disabled=state.page>=(state.cases.pages||1);
+      if(!state.autoOpened&&state.cases.cases.length){state.autoOpened=true;openCase(state.cases.cases[0].case_id)}
+    }
+
+    function axisBox(svg,W,H,maxX,maxY,ylabel){
+      const L=52,R=12,T=12,B=30;
+      svg.innerHTML='';
+      for(let i=0;i<=4;i++){
+        const gx=L+(W-L-R)*i/4,gy=T+(H-T-B)*i/4;
+        svg.insertAdjacentHTML('beforeend',`<line class="grid" x1="${gx}" y1="${T}" x2="${gx}" y2="${H-B}"/><line class="grid" x1="${L}" y1="${gy}" x2="${W-R}" y2="${gy}"/>`);
+        svg.insertAdjacentHTML('beforeend',`<text x="${gx}" y="${H-8}" font-size="10" fill="#8fa5b8" text-anchor="middle">${seconds(maxX*i/4)}</text>`);
+        svg.insertAdjacentHTML('beforeend',`<text x="${L-6}" y="${T+(H-T-B)*(4-i)/4+3}" font-size="10" fill="#8fa5b8" text-anchor="end">${fmt(Math.round(maxY*i/4))}</text>`);
+      }
+      svg.insertAdjacentHTML('beforeend',`<line class="axis" x1="${L}" y1="${H-B}" x2="${W-R}" y2="${H-B}"/><line class="axis" x1="${L}" y1="${T}" x2="${L}" y2="${H-B}"/>`);
+      return {L,R,T,B,X:v=>L+(W-L-R)*Math.min(1,Math.max(0,v/maxX)),Y:v=>T+(H-T-B)*(1-Math.min(1,Math.max(0,v/maxY)))};
+    }
+
+    function drawCharts(){
+      const d=state.trajectory,trials=(d.trials||[]).filter((_,i)=>!state.hidden.has(i));
+      // size chart: step-down of serialized bytes over wall time, one curve per trial
+      let series=trials.map(t=>{const pts=(t.trajectory?.points||[]).slice().sort((a,b)=>Number(a.elapsed_sec||0)-Number(b.elapsed_sec||0));return{t,pts}});
+      const maxT=Math.max(1,...series.flatMap(s=>s.pts.map(p=>Number(p.elapsed_sec||0))));
+      const maxB=Math.max(1,...series.flatMap(s=>s.pts.map(p=>Number(p.byte_count||0))));
+      const sizeSvg=$('sizeChart'),box=axisBox(sizeSvg,580,300,maxT,maxB);
+      for(const s of series){
+        if(!s.pts.length)continue;
+        const color=reducerColor(s.t.reducer_id);
+        let dPath=`M ${box.X(Number(s.pts[0].elapsed_sec||0))} ${box.Y(Number(s.pts[0].byte_count||0))}`;
+        for(let i=1;i<s.pts.length;i++)dPath+=` H ${box.X(Number(s.pts[i].elapsed_sec||0))} V ${box.Y(Number(s.pts[i].byte_count||0))}`;
+        sizeSvg.insertAdjacentHTML('beforeend',`<path class="curve" stroke="${color}" d="${dPath}"/>`);
+        s.pts.filter(p=>p.accepted&&Number(p.call_index||0)>0).forEach(p=>{sizeSvg.insertAdjacentHTML('beforeend',`<circle class="accept" fill="${color}" cx="${box.X(Number(p.elapsed_sec||0))}" cy="${box.Y(Number(p.byte_count||0))}" r="3.5"><title>${esc(s.t.reducer_label)} / r${esc(s.t.repeat)} · ${seconds(Number(p.elapsed_sec||0))} · ${esc(p.mutator||'')} · ${fmt(p.byte_count)} B</title></circle>`)});
+      }
+      // accepted-moves chart: cumulative accepted count over wall time
+      const opsSvg=$('opsChart');
+      let opsSeries=series.map(s=>{let acc=0;const pts=[[0,0]];for(const p of s.pts){if(p.accepted){acc+=1;pts.push([Number(p.elapsed_sec||0),acc])}}return{t:s.t,pts,acc}});
+      const maxA=Math.max(1,...opsSeries.map(s=>s.acc));
+      const obox=axisBox(opsSvg,580,300,maxT,maxA);
+      for(const s of opsSeries){
+        if(!s.acc)continue;
+        const color=reducerColor(s.t.reducer_id);
+        let dPath=`M ${obox.X(s.pts[0][0])} ${obox.Y(s.pts[0][1])}`;
+        for(let i=1;i<s.pts.length;i++)dPath+=` H ${obox.X(s.pts[i][0])} V ${obox.Y(s.pts[i][1])}`;
+        dPath+=` H ${obox.X(maxT)}`;
+        opsSvg.insertAdjacentHTML('beforeend',`<path class="curve" stroke="${color}" d="${dPath}"/>`);
+      }
+    }
+
+    function renderTrajectory(){
+      const d=state.trajectory,trials=d.trials||[];
+      $('detail').classList.add('open');
+      $('caseTitle').textContent=`${d.case.id}`;
+      $('caseSub').textContent=`${d.case.family} · ${d.case.theory} · ${d.case.predicate_mode}`;
+      $('trialRows').innerHTML=trials.map(t=>{const tr=t.trajectory||{},fin=tr.final||{},init=tr.initial||{},ratio=init.byte_count?fin.byte_count/init.byte_count:null;return `<tr><td>${esc(t.reducer_label)} <span class="muted">r${esc(t.repeat)}</span></td><td>${badge(t.status)}</td><td class="num">${fmt(tr.candidate_calls)}</td><td class="num">${fmt(tr.accepted_moves)}</td><td class="num">${fmt(fin.byte_count)}</td><td class="num">${ratio==null?'—':(ratio*100).toFixed(1)+'%'}</td></tr>`}).join('');
+      $('legend').innerHTML=trials.map((t,i)=>`<button class="${state.hidden.has(i)?'off':''}" onclick="toggle(${i})"><i style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${reducerColor(t.reducer_id)};margin-right:5px"></i>${esc(t.reducer_label)} / r${esc(t.repeat)} ${badge(t.status)}</button>`).join('');
+      drawCharts();
+    }
+
+    function renderLogs(){
+      const trials=state.trajectory?.trials||[];
+      const open=new Set([...$('logTrials').querySelectorAll('details')].flatMap((d,i)=>d.open?[i]:[]));
+      $('logTrials').innerHTML=trials.length?trials.map(t=>{const logs=t.logs||{},out=logs.stdout?.text||'—',err=logs.stderr?.text||'—',suffix=(logs.stdout?.truncated||logs.stderr?.truncated)?' · truncated':'';return `<details><summary>${esc(t.reducer_label)} / repeat ${esc(t.repeat)} · ${esc(t.status)}${esc(suffix)}</summary><h4>stdout</h4><pre>${esc(out)}</pre><h4>stderr</h4><pre>${esc(err)}</pre></details>`}).join(''):'Select a case to inspect its bounded stdout and stderr.';
+      $('logTrials').querySelectorAll('details').forEach((d,i)=>{if(open.has(i))d.open=true});
+    }
+
+    async function openCase(id){
+      state.selected=id;state.hidden.clear();
+      state.trajectory=await api(`/api/runs/${encodeURIComponent(runId)}/cases/${encodeURIComponent(id)}/trajectory`);
+      $('logTrials').innerHTML='';
+      renderTrajectory();renderLogs();
+      document.querySelectorAll('.case-row').forEach(row=>row.classList.toggle('selected',row.dataset.case===id));
+    }
+    function toggle(i){state.hidden.has(i)?state.hidden.delete(i):state.hidden.add(i);drawCharts()}
+
+    async function refresh(all=true){
+      try{
+        state.summary=await api(`/api/runs/${encodeURIComponent(runId)}/summary`);
+        renderSummary();
+        if(all)await loadCases();
+        if(state.trajectory){state.trajectory=await api(`/api/runs/${encodeURIComponent(runId)}/cases/${encodeURIComponent(state.trajectory.case.id)}/trajectory`);renderTrajectory();renderLogs()}
+        $('error').textContent='';
+      }catch(e){$('error').textContent=e.message}
+    }
+    $('filter').onclick=()=>{state.page=1;state.autoOpened=false;loadCases()};
+    $('prev').onclick=()=>{state.page--;loadCases()};
+    $('next').onclick=()=>{state.page++;loadCases()};
+    $('cases').addEventListener('click',event=>{const row=event.target.closest('.case-row');if(row)openCase(row.dataset.case)});
+    window.toggle=toggle;
+    refresh();
+    setInterval(()=>refresh(false),2500);
+  </script>
+</body>
+</html>

@@ -37,7 +37,7 @@ The report therefore gives a generic size-decline curve for every reducer. D3SMT
 logs may be inspected for white-box diagnosis, but no baseline must implement a D3SMT-specific
 observer.
 
-A reduction-v2 study contains benchmark predicates, default resource limits, repeats, comparisons, and a list of allowed reducer IDs. Reducer commands are not duplicated in the study. When a run is created, SMTBatch freezes the selected reducer definitions, resolved command/file hashes, timeout, outer jobs, repository identity, and strict-wave job matrix into the run plan. Resume always uses that immutable plan.
+A reduction-v2 study contains benchmark predicates, default resource limits, repeats, comparisons, and a list of allowed reducer IDs. Reducer commands are not duplicated in the study. When a run is created, SMTBatch freezes the selected reducer definitions, timeout, outer jobs, and strict-wave job matrix into the run plan. Resume always uses that immutable plan.
 
 The SMTBatch checkout at `<project-root>/SMTBatch` must match `[defaults] target_branch` to launch or resume work. The consuming project branch is independent. A mismatched SMTBatch branch may still start the service and inspect historical runs.
 

@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import time
@@ -226,26 +227,48 @@ def main(argv: list[str] | None = None) -> int:
     stderr = b""
     error = None
     timed_out = False
+    killed = False
     try:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             [*args.command[:-1], candidate.as_posix(), f"{args.solver_timeout:g}"],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=args.solver_timeout + 1.0,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
         )
-        returncode = completed.returncode
-        stdout = completed.stdout
-        stderr = completed.stderr
-    except subprocess.TimeoutExpired as exc:
-        timed_out = True
-        stdout = bytes(exc.stdout or b"")
-        stderr = bytes(exc.stderr or b"")
-        returncode = 124
-        error = "predicate wrapper timeout"
     except OSError as exc:
+        process = None
         error = f"{type(exc).__name__}: {exc}"
         stderr = (error + "\n").encode("utf-8", errors="replace")
+    if process is not None:
+        interrupted: dict[str, int] = {}
+
+        def _forward(signum: int, _frame: object) -> None:
+            # SMTBatch terminates the whole process group on trial timeout.
+            # Forward the signal to the predicate child and stay alive long
+            # enough to close this journal entry with a finish event.
+            interrupted["signum"] = signum
+            try:
+                os.killpg(process.pid, signum)
+            except ProcessLookupError:
+                pass
+
+        signal.signal(signal.SIGTERM, _forward)
+        signal.signal(signal.SIGINT, _forward)
+        try:
+            stdout, stderr = process.communicate(timeout=args.solver_timeout + 1.0)
+            returncode = process.returncode
+        except subprocess.TimeoutExpired as exc:
+            timed_out = True
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = process.communicate()
+            returncode = 124
+            error = "predicate wrapper timeout"
+        if interrupted:
+            killed = True
+            timed_out = False
+            returncode = 128 + interrupted["signum"]
+            error = f"predicate interrupted by signal {interrupted['signum']}"
 
     _append(args.log, {
         "schema_version": 2,
@@ -256,6 +279,7 @@ def main(argv: list[str] | None = None) -> int:
         "runtime_sec": time.monotonic() - started,
         "returncode": returncode,
         "timed_out": timed_out,
+        "killed": killed,
         "stdout_bytes": len(stdout),
         "stderr_bytes": len(stderr),
         "stdout_sha256": _sha256_bytes(stdout),

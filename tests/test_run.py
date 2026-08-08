@@ -178,29 +178,15 @@ class PlanTests(ReductionFixture):
         self.assertEqual([item["id"] for item in loaded["reducers"]], ["r1"])
         self.assertEqual(loaded["limits"]["trial_wall_sec"], 61)
         self.assertEqual(loaded["execution"]["outer_jobs"], 4)
-        self.assertTrue(loaded["reducers"][0]["identity"]["executable_sha256"])
         self.assertTrue((output / "plan.complete.json").is_file())
         self.assertEqual(len((output / "jobs.tsv").read_text().splitlines()), 3)
-        self.assertEqual(
-            reduce.repository_branch(plan["repository"], self.smtbatch_root),
-            "feat/reduction",
-        )
+        self.assertNotIn("repository", plan)
 
     def test_prepare_rejects_different_options_for_existing_run(self) -> None:
         output = self.root / "results" / "prepared"
         reduce.prepare(self.study_path, output, reducers=["r1"], timeout_seconds=30, outer_jobs=1)
         with self.assertRaisesRegex(reduce.ReductionError, "non-empty output"):
             reduce.prepare(self.study_path, output, reducers=["r2"], timeout_seconds=30, outer_jobs=1)
-
-    def test_runtime_identity_detects_reducer_config_drift(self) -> None:
-        output = self.root / "results" / "prepared"
-        plan = reduce.prepare(self.study_path, output, reducers=["r1"], timeout_seconds=30, outer_jobs=1)
-        self.config_path.write_text(
-            self.config_path.read_text(encoding="utf-8").replace("--r1", "--changed"),
-            encoding="utf-8",
-        )
-        with self.assertRaisesRegex(reduce.ReductionError, "drift|changed"):
-            reduce.verify_runtime_identity(plan)
 
     def test_run_lock_rejects_second_controller_and_cleans_pid(self) -> None:
         output = self.root / "results" / "locked"
