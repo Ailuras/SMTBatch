@@ -13,49 +13,57 @@
     .top a{color:var(--blue);text-decoration:none}
     .wrap{max-width:1320px;margin:20px auto;padding:0 20px 50px}
     .panel{background:linear-gradient(145deg,rgba(15,29,43,.98),rgba(11,23,35,.98));border:1px solid var(--line);border-radius:13px;padding:18px;margin-bottom:16px}
-    .head{display:flex;gap:16px;justify-content:space-between;align-items:start}
     .muted{color:var(--muted)}
     .badge{display:inline-block;border-radius:99px;padding:2px 7px;background:rgba(143,165,184,.12);color:var(--muted);font-size:10px;text-transform:uppercase}
     .badge.live{background:rgba(128,188,255,.13);color:var(--blue)}
     .badge.ok{background:rgba(71,215,161,.13);color:var(--accent)}
     .badge.bad{background:rgba(255,130,122,.13);color:var(--red)}
     .badge.warn{background:rgba(240,201,108,.13);color:var(--yellow)}
-    button,.button{border:1px solid rgba(71,215,161,.6);border-radius:8px;padding:9px 12px;background:var(--accent);color:#061a17;font-weight:700;cursor:pointer;text-decoration:none}
+    button{border:1px solid rgba(71,215,161,.6);border-radius:8px;padding:9px 12px;background:var(--accent);color:#061a17;font-weight:700;cursor:pointer;text-decoration:none}
     button.secondary{background:var(--soft);color:var(--text);border-color:var(--line)}
-    button.warn{background:rgba(240,201,108,.14);color:var(--yellow);border-color:rgba(240,201,108,.4)}
-    button.danger{background:rgba(255,130,122,.15);color:var(--red);border-color:rgba(255,130,122,.35)}
     button:disabled{opacity:.45}
-    .actions,.toolbar{display:flex;gap:8px;align-items:end;flex-wrap:wrap}
+    .toolbar{display:flex;gap:8px;align-items:end;flex-wrap:wrap}
     .toolbar{margin:13px 0}
     .toolbar label{font-size:11px;color:var(--muted);text-transform:uppercase}
     .toolbar input,.toolbar select{display:block;margin-top:4px;border:1px solid var(--line);border-radius:7px;padding:8px;background:var(--soft);color:var(--text)}
-    .case-list .toolbar{margin:0 0 4px;padding-bottom:10px;border-bottom:1px solid var(--line)}
-    .case-list .toolbar label{flex:1 1 120px}
+    .case-list .toolbar{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:0 0 4px;padding-bottom:10px;border-bottom:1px solid var(--line)}
+    .case-list .toolbar label:first-child{grid-column:1/-1}
+    .case-list .toolbar label{display:block}
     .case-list .toolbar input,.case-list .toolbar select{width:100%;padding:6px 8px;font-size:13px;background:var(--panel2)}
-    .case-list .toolbar button{padding:6px 11px;font-size:13px;font-weight:600}
     .notice{padding:10px;border-radius:8px;background:rgba(240,201,108,.12);color:var(--yellow);margin-top:10px}
-    .notice.ok{background:rgba(71,215,161,.1);color:var(--accent)}
     .scroll{overflow:auto}
     table{border-collapse:collapse;width:100%}
     th,td{text-align:left;padding:8px;border-bottom:1px solid var(--line)}
     th{font-size:11px;text-transform:uppercase;color:var(--muted)}
     tr:last-child td{border-bottom:0}
-    td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+    td.num,th.num{text-align:center;font-variant-numeric:tabular-nums}
+    th.sortable{cursor:pointer;user-select:none}
+    th.sortable:hover{color:var(--text)}
+    th.sorting{color:var(--text)}
+    th.sorting::after{content:' ↑';color:var(--accent)}
+    th.sorting.desc::after{content:' ↓';color:var(--accent)}
+    .summary-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
     .summary-table{margin-top:14px}
     .summary-table th,.summary-table td{text-align:center}
-    .case-layout{display:grid;grid-template-columns:minmax(300px,.85fr) minmax(0,1.35fr);gap:16px;margin-top:14px;align-items:start}
+    .winner{color:var(--accent);font-weight:700}
+    .case-layout{display:grid;grid-template-columns:minmax(300px,.85fr) minmax(0,1.35fr);gap:16px;margin-top:14px;align-items:stretch}
     .case-list{min-width:0;background:var(--soft);border:1px solid var(--line);border-radius:10px;padding:10px 10px 0;display:flex;flex-direction:column}
-    .case-list .scroll{flex:1;max-height:620px}
-    .pager{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:4px;padding:9px 2px;border-top:1px solid var(--line)}
-    .pager button{padding:5px 11px;font-size:12px;font-weight:600}
-    .pager span{font-size:12px}
+    .case-list .scroll{flex:1 1 0;min-height:0}
+    .pager{display:flex;align-items:center;justify-content:center;gap:14px;margin-top:auto;padding:9px 2px;border-top:1px solid var(--line)}
+    .pager-center{display:flex;align-items:center;gap:12px}
+    .page-arrow{min-width:30px;padding:4px 8px;font-size:14px;font-weight:700;line-height:1}
+    .pager-page{min-width:44px;text-align:center;font-size:13px;font-weight:700;color:var(--text);cursor:pointer;user-select:none;padding:4px 6px;border:1px solid transparent;border-radius:6px}
+    .pager-page:hover{border-color:var(--line)}
+    .pager-input{width:52px;padding:4px 6px;border:1px solid var(--line);border-radius:6px;background:var(--soft);color:var(--text);font:inherit;text-align:center}
     .case-row{cursor:pointer}
     .case-row:hover td{background:rgba(128,188,255,.06)}
     .case-row.selected td{background:rgba(71,215,161,.09)}
-    .case-link{background:none;border:0;color:var(--blue);padding:0;cursor:pointer}
     .detail{min-width:0;display:none;background:var(--soft);border:1px solid var(--line);border-radius:10px;padding:14px}
     .detail.open{display:block}
-    .legend{display:flex;gap:7px;flex-wrap:wrap;margin:10px 0}
+    .legend{display:flex;gap:7px;flex-wrap:wrap;margin:0}
+    .legend-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:10px 0}
+    .repeat-filter{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+    .repeat-filter select{padding:4px 6px;border:1px solid var(--line);border-radius:6px;background:var(--panel2);color:var(--text);font:inherit}
     .legend button{background:var(--soft);color:var(--text);border:1px solid var(--line)}
     .legend button.off{opacity:.42}
     .chart{border:1px solid var(--line);border-radius:9px;padding:10px;margin-top:10px;overflow:hidden}
@@ -66,12 +74,7 @@
     .curve{fill:none;stroke-width:2}
     .accept{stroke:var(--page);stroke-width:1.5}
     .error{color:var(--red)}
-    .logs{margin-top:16px}
-    .logs details{border:1px solid var(--line);border-radius:9px;margin-top:8px;background:var(--soft)}
-    .logs summary{cursor:pointer;padding:10px;font-weight:700}
-    .logs h4{margin:10px 12px 4px;font-size:11px;color:var(--muted);text-transform:uppercase}
-    .logs pre{margin:0 12px 12px;padding:10px;max-height:260px;overflow:auto;background:#0a1520;color:#e7eef3;border-radius:7px;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.4 ui-monospace,SFMono-Regular,monospace}
-    @media(max-width:1050px){.case-layout{grid-template-columns:1fr}.head{display:block}.actions{margin-top:10px}}
+    @media(max-width:1050px){.case-layout{grid-template-columns:1fr}.case-list .scroll{flex:none;max-height:620px}.case-list .toolbar{display:flex}.case-list .toolbar label{flex:1 1 0}}
   </style>
 </head>
 <body>
@@ -79,7 +82,7 @@
   <main class="wrap">
     <div id="error" class="error"></div>
     <section class="panel">
-      <h2 style="margin:0">Run summary</h2>
+      <div class="summary-head"><h2 style="margin:0">Run summary</h2><label class="repeat-filter">Repeat<select id="summaryRepeat"><option value="">All repeats</option></select></label></div>
       <div id="evidence"></div>
       <div class="scroll"><table class="summary-table"><thead id="reducerHead"></thead><tbody id="reducerRows"></tbody></table></div>
     </section>
@@ -91,28 +94,22 @@
             <label>Text<input id="query" placeholder="case, family, theory"></label>
             <label>Reducer<select id="reducer"><option value="">All</option></select></label>
             <label>Status<select id="caseStatus"><option value="">All</option><option>running</option><option>pending</option><option>completed</option><option>truncated</option><option>invalid</option></select></label>
-            <button id="filter" class="secondary">Apply</button>
           </div>
-          <div class="scroll"><table><thead><tr><th>Case</th><th>Status</th><th class="num">Trials</th></tr></thead><tbody id="cases"></tbody></table></div>
-          <div class="pager"><button id="prev" class="secondary">‹ Prev</button><span id="page" class="muted"></span><button id="next" class="secondary">Next ›</button></div>
+          <div class="scroll"><table><thead><tr><th data-sort="case" class="sortable">Case</th><th data-sort="status" class="sortable">Status</th></tr></thead><tbody id="cases"></tbody></table></div>
+          <div class="pager"><button id="prev" class="secondary page-arrow" title="Previous page">‹</button><div class="pager-center"><span id="pageLabel" class="pager-page" title="Double-click to jump">1/1</span></div><button id="next" class="secondary page-arrow" title="Next page">›</button></div>
         </div>
         <div id="detail" class="detail">
           <h3 id="caseTitle" style="margin:0"></h3>
-          <div id="caseSub" class="muted"></div>
           <div class="scroll" style="margin-top:10px"><table><thead><tr><th>Reducer</th><th>Status</th><th class="num">Calls</th><th class="num">Accepted</th><th class="num">Final bytes</th><th class="num">Ratio</th></tr></thead><tbody id="trialRows"></tbody></table></div>
-          <div class="legend" id="legend"></div>
+          <div class="legend-row"><div class="legend" id="legend"></div><label class="repeat-filter">Repeat<select id="repeatSel"></select></label></div>
           <div class="chart"><h3>Size over time (serialized bytes)</h3><svg id="sizeChart" viewBox="0 0 580 300"></svg></div>
           <div class="chart"><h3>Accepted moves over time</h3><svg id="opsChart" viewBox="0 0 580 300"></svg></div>
         </div>
       </div>
     </section>
-    <section id="logs" class="panel logs">
-      <h2 style="margin:0">Reducer logs</h2>
-      <div id="logTrials" class="muted">Select a case to inspect its bounded stdout and stderr.</div>
-    </section>
-  </main>
+    </main>
   <script>
-    const $=id=>document.getElementById(id),parts=location.pathname.split('/'),runId=decodeURIComponent(parts[2]||''),state={summary:null,cases:null,trajectory:null,page:1,selected:null,autoOpened:false,hidden:new Set()};
+    const $=id=>document.getElementById(id),parts=location.pathname.split('/'),runId=decodeURIComponent(parts[2]||''),state={summary:null,cases:null,trajectory:null,page:1,selected:null,autoOpened:false,hidden:new Set(),sort:null,sortDir:'asc',pageSize:20,repeatFilter:'',summaryRepeat:''};
     const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])),fmt=v=>v==null?'—':(typeof v==='number'&&!Number.isInteger(v)?v.toFixed(2):Number(v).toLocaleString());
     const seconds=v=>{const n=Number(v)||0;return n<60?n.toFixed(1)+'s':Math.floor(n/60)+'m '+String(Math.round(n%60)).padStart(2,'0')+'s'};
     const COLORS=['#47d7a1','#80bcff','#f0c96c','#d8a4ff','#ff827a','#66d9e8'];
@@ -121,28 +118,68 @@
     async function api(url,opt){const r=await fetch(url,opt),d=await r.json();if(!r.ok)throw new Error(d.error||r.statusText);return d}
     function reducerColor(id){const ids=Object.keys((state.summary||{}).by_reducer||{id:0});const i=Math.max(0,ids.indexOf(id));return COLORS[i%COLORS.length]}
 
+    const boldIf=(cond,text)=>cond?`<span class="winner">${text}</span>`:text;
+    function winnersOf(reducers){
+      const ids=reducers.map(v=>v.id);
+      const win=arr=>{
+        const finite=arr.map((x,i)=>({x:Number(x),i})).filter(o=>Number.isFinite(o.x));
+        if(!finite.length)return new Set();
+        const m=Math.min(...finite.map(o=>o.x));
+        return new Set(finite.filter(o=>o.x===m).map(o=>ids[o.i]));
+      };
+      return {
+        truncated:win(reducers.map(v=>bucketCounts(v.statuses).truncated)),
+        time:win(reducers.map(v=>v.completed_avg_sec)),
+        size:win(reducers.map(v=>v.truncated_avg_bytes)),
+      };
+    }
+    function summaryUrl(){
+      const q=state.summaryRepeat?`?repeat=${encodeURIComponent(state.summaryRepeat)}`:'';
+      return `/api/runs/${encodeURIComponent(runId)}/summary${q}`;
+    }
     function renderSummary(){
       const r=state.summary;
       $('title').textContent=`${r.run_id}`;
       $('status').innerHTML=badge(r.status);
+      const repeats=r.repeats||[];
+      $('summaryRepeat').innerHTML='<option value="">All repeats</option>'+repeats.map(rr=>`<option value="${esc(rr)}"${state.summaryRepeat===String(rr)?' selected':''}>repeat ${esc(rr)}</option>`).join('');
       const notes=[];
       if(r.stale_status)notes.push(`Stale controller state ${r.stale_status}; resume will create new attempts.`);
       $('evidence').innerHTML=notes.length?`<div class="notice">${esc(notes.join(' · '))}</div>`:'';
-      $('reducerHead').innerHTML='<tr><th>Reducer</th><th class="num">Done</th><th class="num">completed</th><th class="num">truncated</th><th class="num">invalid</th><th class="num">Calls</th><th class="num">Accepted</th></tr>';
-      $('reducerRows').innerHTML=Object.values(r.by_reducer||{}).map(v=>{const b=bucketCounts(v.statuses);return `<tr><td>${esc(v.label)}</td><td class="num">${fmt(v.completed)} / ${fmt(v.planned)}</td><td class="num">${fmt(b.completed)}</td><td class="num">${fmt(b.truncated)}</td><td class="num">${fmt(b.invalid)}</td><td class="num">${fmt(v.predicate_calls)}</td><td class="num">${fmt(v.accepted_moves)}</td></tr>`}).join('')||'<tr><td class="muted">No reducers in this run.</td></tr>';
+      const reducers=Object.values(r.by_reducer||[]);
+      const winners=winnersOf(reducers);
+      $('reducerHead').innerHTML='<tr><th>Reducer</th><th class="num">completed</th><th class="num">AVG TIME</th><th class="num">truncated</th><th class="num">AVG SIZE</th><th class="num">invalid</th><th class="num">Calls</th><th class="num">Accepted</th></tr>';
+      $('reducerRows').innerHTML=reducers.map(v=>{
+        const b=bucketCounts(v.statuses);
+        const timeText=v.completed_avg_sec==null?'—':seconds(v.completed_avg_sec);
+        const sizeText=v.truncated_avg_bytes==null?'—':fmt(v.truncated_avg_bytes);
+        return `<tr><td>${esc(v.label)}</td><td class="num">${fmt(b.completed)}</td><td class="num">${boldIf(winners.time.has(v.id),timeText)}</td><td class="num">${boldIf(winners.truncated.has(v.id),fmt(b.truncated))}</td><td class="num">${boldIf(winners.size.has(v.id),sizeText)}</td><td class="num">${fmt(b.invalid)}</td><td class="num">${fmt(v.predicate_calls)}</td><td class="num">${fmt(v.accepted_moves)}</td></tr>`;
+      }).join('')||'<tr><td class="muted">No reducers in this run.</td></tr>';
       $('reducer').innerHTML='<option value="">All</option>'+Object.values(r.by_reducer||{}).map(v=>`<option value="${esc(v.id)}">${esc(v.label)}</option>`).join('');
     }
 
     async function loadCases(){
-      const q=new URLSearchParams({page:String(state.page),page_size:'25'});
+      const q=new URLSearchParams({page:String(state.page),page_size:String(state.pageSize)});
       if($('query').value)q.set('q',$('query').value);
       if($('reducer').value)q.set('reducer',$('reducer').value);
       if($('caseStatus').value)q.set('status',$('caseStatus').value);
+      if(state.sort){q.set('sort',state.sort);q.set('sort_dir',state.sortDir)}
       state.cases=await api(`/api/runs/${encodeURIComponent(runId)}/cases?${q}`);
-      $('cases').innerHTML=state.cases.cases.map(c=>`<tr class="case-row${state.selected===c.case_id?' selected':''}" data-case="${esc(c.case_id)}"><td><b>${esc(c.case_id)}</b><div class="muted">${esc(c.family)} / ${esc(c.theory)}</div></td><td>${badge(c.status)}</td><td class="num">${fmt(c.completed)} / ${fmt(c.planned)}</td></tr>`).join('')||'<tr><td class="muted">No cases match the current filters.</td></tr>';
-      $('page').textContent=`Page ${state.cases.page} / ${state.cases.pages||1} · ${state.cases.total} cases`;
+      $('cases').innerHTML=state.cases.cases.map(c=>`<tr class="case-row${state.selected===c.case_id?' selected':''}" data-case="${esc(c.case_id)}"><td><b>${esc(c.case_id)}</b><div class="muted">${esc(c.family)} / ${esc(c.theory)}</div></td><td>${badge(c.status)}</td></tr>`).join('')||'<tr><td class="muted">No cases match the current filters.</td></tr>';
+      updatePageLabel();
       $('prev').disabled=state.page<=1;$('next').disabled=state.page>=(state.cases.pages||1);
+      updateSortIndicators();
       if(!state.autoOpened&&state.cases.cases.length){state.autoOpened=true;openCase(state.cases.cases[0].case_id)}
+    }
+    function updateSortIndicators(){
+      document.querySelectorAll('th.sortable').forEach(th=>{
+        th.classList.toggle('sorting',th.dataset.sort===state.sort);
+        th.classList.toggle('desc',state.sort===th.dataset.sort&&state.sortDir==='desc');
+      });
+    }
+    function updatePageLabel(){
+      const pages=state.cases?Number(state.cases.pages)||1:1;
+      $('pageLabel').textContent=`${state.page}/${pages}`;
     }
 
     function axisBox(svg,W,H,maxX,maxY,ylabel){
@@ -158,8 +195,12 @@
       return {L,R,T,B,X:v=>L+(W-L-R)*Math.min(1,Math.max(0,v/maxX)),Y:v=>T+(H-T-B)*(1-Math.min(1,Math.max(0,v/maxY)))};
     }
 
+    function filteredTrials(){
+      const trials=state.trajectory?.trials||[];
+      return state.repeatFilter?trials.filter(t=>String(t.repeat)===String(state.repeatFilter)):trials;
+    }
     function drawCharts(){
-      const d=state.trajectory,trials=(d.trials||[]).filter((_,i)=>!state.hidden.has(i));
+      const d=state.trajectory,trials=filteredTrials().filter((_,i)=>!state.hidden.has(i));
       // size chart: step-down of serialized bytes over wall time, one curve per trial
       let series=trials.map(t=>{const pts=(t.trajectory?.points||[]).slice().sort((a,b)=>Number(a.elapsed_sec||0)-Number(b.elapsed_sec||0));return{t,pts}});
       const maxT=Math.max(1,...series.flatMap(s=>s.pts.map(p=>Number(p.elapsed_sec||0))));
@@ -192,40 +233,63 @@
       const d=state.trajectory,trials=d.trials||[];
       $('detail').classList.add('open');
       $('caseTitle').textContent=`${d.case.id}`;
-      $('caseSub').textContent=`${d.case.family} · ${d.case.theory} · ${d.case.predicate_mode}`;
       $('trialRows').innerHTML=trials.map(t=>{const tr=t.trajectory||{},fin=tr.final||{},init=tr.initial||{},ratio=init.byte_count?fin.byte_count/init.byte_count:null;return `<tr><td>${esc(t.reducer_label)} <span class="muted">r${esc(t.repeat)}</span></td><td>${badge(t.status)}</td><td class="num">${fmt(tr.candidate_calls)}</td><td class="num">${fmt(tr.accepted_moves)}</td><td class="num">${fmt(fin.byte_count)}</td><td class="num">${ratio==null?'—':(ratio*100).toFixed(1)+'%'}</td></tr>`}).join('');
-      $('legend').innerHTML=trials.map((t,i)=>`<button class="${state.hidden.has(i)?'off':''}" onclick="toggle(${i})"><i style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${reducerColor(t.reducer_id)};margin-right:5px"></i>${esc(t.reducer_label)} / r${esc(t.repeat)} ${badge(t.status)}</button>`).join('');
+      const repeats=[...new Set(trials.map(t=>t.repeat))].sort((a,b)=>Number(a)-Number(b));
+      const repeatOptions=repeats.map(String);
+      if(!repeatOptions.includes(state.repeatFilter))state.repeatFilter=repeatOptions[0]||'';
+      $('repeatSel').innerHTML=repeatOptions.map(r=>`<option value="${esc(r)}"${state.repeatFilter===String(r)?' selected':''}>repeat ${esc(r)}</option>`).join('');
+      const filtered=filteredTrials();
+      $('legend').innerHTML=filtered.map((t,i)=>`<button class="${state.hidden.has(i)?'off':''}" onclick="toggle(${i})"><i style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${reducerColor(t.reducer_id)};margin-right:5px"></i>${esc(t.reducer_label)} ${badge(t.status)}</button>`).join('');
       drawCharts();
-    }
-
-    function renderLogs(){
-      const trials=state.trajectory?.trials||[];
-      const open=new Set([...$('logTrials').querySelectorAll('details')].flatMap((d,i)=>d.open?[i]:[]));
-      $('logTrials').innerHTML=trials.length?trials.map(t=>{const logs=t.logs||{},out=logs.stdout?.text||'—',err=logs.stderr?.text||'—',suffix=(logs.stdout?.truncated||logs.stderr?.truncated)?' · truncated':'';return `<details><summary>${esc(t.reducer_label)} / repeat ${esc(t.repeat)} · ${esc(t.status)}${esc(suffix)}</summary><h4>stdout</h4><pre>${esc(out)}</pre><h4>stderr</h4><pre>${esc(err)}</pre></details>`}).join(''):'Select a case to inspect its bounded stdout and stderr.';
-      $('logTrials').querySelectorAll('details').forEach((d,i)=>{if(open.has(i))d.open=true});
     }
 
     async function openCase(id){
       state.selected=id;state.hidden.clear();
       state.trajectory=await api(`/api/runs/${encodeURIComponent(runId)}/cases/${encodeURIComponent(id)}/trajectory`);
-      $('logTrials').innerHTML='';
-      renderTrajectory();renderLogs();
+      renderTrajectory();
       document.querySelectorAll('.case-row').forEach(row=>row.classList.toggle('selected',row.dataset.case===id));
     }
     function toggle(i){state.hidden.has(i)?state.hidden.delete(i):state.hidden.add(i);drawCharts()}
 
     async function refresh(all=true){
       try{
-        state.summary=await api(`/api/runs/${encodeURIComponent(runId)}/summary`);
+        state.summary=await api(summaryUrl());
         renderSummary();
         if(all)await loadCases();
-        if(state.trajectory){state.trajectory=await api(`/api/runs/${encodeURIComponent(runId)}/cases/${encodeURIComponent(state.trajectory.case.id)}/trajectory`);renderTrajectory();renderLogs()}
+        if(state.trajectory){state.trajectory=await api(`/api/runs/${encodeURIComponent(runId)}/cases/${encodeURIComponent(state.trajectory.case.id)}/trajectory`);renderTrajectory()}
         $('error').textContent='';
       }catch(e){$('error').textContent=e.message}
     }
-    $('filter').onclick=()=>{state.page=1;state.autoOpened=false;loadCases()};
     $('prev').onclick=()=>{state.page--;loadCases()};
     $('next').onclick=()=>{state.page++;loadCases()};
+    let queryTimer;
+    $('query').addEventListener('input',()=>{clearTimeout(queryTimer);queryTimer=setTimeout(()=>{state.page=1;state.autoOpened=false;loadCases()},300)});
+    $('reducer').addEventListener('change',()=>{state.page=1;state.autoOpened=false;loadCases()});
+    $('caseStatus').addEventListener('change',()=>{state.page=1;state.autoOpened=false;loadCases()});
+    $('pageLabel').addEventListener('dblclick',()=>{
+      const label=$('pageLabel');
+      const input=document.createElement('input');
+      input.type='number';input.min=1;input.max=state.cases?Number(state.cases.pages)||1:1;input.value=state.page;
+      input.className='pager-input';
+      label.textContent='';label.appendChild(input);
+      input.focus();input.select();
+      const commit=()=>{
+        const p=parseInt(input.value,10);
+        const max=state.cases?Number(state.cases.pages)||1:1;
+        if(Number.isFinite(p)&&p>=1){state.page=Math.min(p,max);loadCases()}
+        else{updatePageLabel()}
+      };
+      input.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();commit();input.remove()}else if(e.key==='Escape'){input.remove();updatePageLabel()}});
+      input.addEventListener('blur',()=>{commit();input.remove()});
+    });
+    document.querySelectorAll('th.sortable').forEach(th=>th.addEventListener('click',()=>{
+      const key=th.dataset.sort;
+      if(state.sort===key){state.sortDir=state.sortDir==='asc'?'desc':'asc'}
+      else{state.sort=key;state.sortDir='asc'}
+      state.page=1;state.autoOpened=false;loadCases();
+    }));
+    $('repeatSel').addEventListener('change',()=>{state.repeatFilter=$('repeatSel').value;state.hidden.clear();renderTrajectory()});
+    $('summaryRepeat').addEventListener('change',()=>{state.summaryRepeat=$('summaryRepeat').value;refresh(false)});
     $('cases').addEventListener('click',event=>{const row=event.target.closest('.case-row');if(row)openCase(row.dataset.case)});
     window.toggle=toggle;
     refresh();

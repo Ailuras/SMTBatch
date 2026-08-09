@@ -10,16 +10,16 @@
     button,input { font:inherit; }
     button { cursor:pointer; }
     button:disabled { cursor:not-allowed; opacity:.55; }
-    .reduction-topbar{max-width:none;min-height:142px;padding:28px max(28px,calc((100vw - 1440px)/2));display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:32px;align-items:center}
+    .reduction-topbar{max-width:none;min-height:142px;padding:28px max(28px,calc((100vw - 1440px)/2));display:grid;grid-template-columns:minmax(0,1fr) auto;gap:32px;align-items:center}
     .reduction-topbar .brand-kicker{color:var(--accent);font-size:11px;font-weight:800;letter-spacing:.16em}
     .reduction-topbar h1{margin:6px 0 4px;font-size:32px;letter-spacing:-.03em}
-    .topbar-status{display:flex;gap:10px;align-items:center;color:var(--text);min-width:190px}
-    .topbar-status small{display:block;color:var(--muted);margin-top:3px}
     .status-dot{width:10px;height:10px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 4px rgba(71,215,161,.12);flex:none}
     .status-dot.bad{background:var(--red);box-shadow:0 0 0 4px rgba(255,130,122,.12)}
-    .topbar-metrics{display:flex;gap:25px}
-    .topbar-metrics span{display:block;color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.12em}
-    .topbar-metrics strong{display:block;margin-top:4px;font-size:23px;color:var(--text)}
+    .topbar-card{display:grid;gap:8px;padding:9px 16px;border:1px solid var(--line);border-radius:11px;background:linear-gradient(145deg,rgba(15,29,43,.98),rgba(11,23,35,.98));box-shadow:0 12px 40px rgba(0,0,0,.18)}
+    .card-metrics{display:flex;gap:24px}
+    .card-metrics span{display:block;text-align:center;color:var(--muted);font-size:9px;text-transform:uppercase;letter-spacing:.12em}
+    .card-metrics strong{display:block;margin-top:3px;font-size:17px;color:var(--text);text-align:center}
+    .card-status{display:flex;gap:6px;align-items:center;justify-content:center;color:var(--text);font-size:11px;font-weight:700;white-space:nowrap}
     .reduction-shell{max-width:1440px;margin:0 auto;padding:28px max(28px,calc((100vw - 1440px)/2)) 70px}
     .reduction-panel{background:linear-gradient(145deg,rgba(15,29,43,.98),rgba(11,23,35,.98));border:1px solid var(--line);border-radius:16px;box-shadow:0 18px 55px rgba(0,0,0,.18);padding:25px;margin-bottom:22px}
     .section-heading{display:flex;gap:20px;justify-content:space-between;align-items:flex-start;margin-bottom:21px}
@@ -38,12 +38,11 @@
     .benchmark-selector,.launch-sidebar{min-width:0}
     .block-heading{display:flex;justify-content:space-between;align-items:end;gap:12px;margin-bottom:11px}
     .block-heading h3{margin:0;font-size:14px}
-    .block-heading p{margin:3px 0 0;color:var(--muted);font-size:12px}
     .selection-count{color:var(--accent);font-size:12px;font-weight:700;white-space:nowrap}
-    .selector-toolbar{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:11px}
-    .selector-toolbar small{color:var(--muted)}
-    .toolbar-actions{display:flex;gap:7px}
+    .toolbar-actions{display:flex;align-items:center;gap:7px}
     .toolbar-actions button{padding:6px 9px;border:1px solid var(--line);border-radius:7px;background:transparent;color:var(--blue);font-size:11px}
+    .toolbar-actions button.active{color:var(--accent);border-color:rgba(71,215,161,.55);background:rgba(71,215,161,.14)}
+    .toolbar-actions button.none{color:var(--red);border-color:rgba(255,130,122,.4);background:rgba(255,130,122,.14);text-decoration:line-through}
     .benchmark-groups{display:grid;grid-template-columns:repeat(auto-fit,minmax(205px,1fr));gap:10px}
     .benchmark-option,.reducer-option{position:relative;display:block;cursor:pointer}
     .benchmark-option input,.reducer-option input{position:absolute;opacity:0;pointer-events:none}
@@ -125,8 +124,8 @@
     .confirm-item span{display:block;color:var(--muted);font-size:10px;text-transform:uppercase}
     .confirm-item strong{display:block;margin-top:3px;color:var(--text);font-size:12px}
     .dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
-    @media(max-width:1050px){.reduction-topbar{grid-template-columns:1fr auto}.topbar-status{grid-column:1/-1;grid-row:2}.launch-layout{grid-template-columns:1fr}}
-    @media(max-width:650px){.reduction-topbar{display:block;padding:23px 18px}.topbar-status{margin-top:18px}.topbar-metrics{margin-top:18px;gap:18px}.reduction-shell{padding:18px 14px 45px}.reduction-panel{padding:18px}.section-heading{display:block}.section-heading button{margin-top:14px}.field-grid,.plan-metrics,.confirm-grid{grid-template-columns:1fr}.run-card{grid-template-columns:1fr}.run-execution{border-right:0;border-bottom:1px solid var(--line)}}
+    @media(max-width:1050px){.launch-layout{grid-template-columns:1fr}}
+    @media(max-width:650px){.reduction-topbar{padding:23px 18px}.reduction-shell{padding:18px 14px 45px}.reduction-panel{padding:18px}.section-heading{display:block}.section-heading button{margin-top:14px}.field-grid,.plan-metrics,.confirm-grid{grid-template-columns:1fr}.run-card{grid-template-columns:1fr}.run-execution{border-right:0;border-bottom:1px solid var(--line)}}
 
   </style>
 </head>
@@ -137,15 +136,16 @@
       <div class="brand-kicker">SMTBATCH / LOCAL CONTROL</div>
       <h1>Reduction Console</h1>
     </div>
-    <div class="topbar-status">
-      <i id="controllerDot" class="status-dot"></i>
-      <div><strong id="controllerText">Connecting…</strong><small id="controllerDetail">Loading project catalog</small></div>
-    </div>
-    <div class="topbar-metrics">
-      <div><span>Benchmarks</span><strong id="benchmarkCount">0</strong></div>
-      <div><span>Groups</span><strong id="groupCount">0</strong></div>
-      <div><span>Runs</span><strong id="runCount">0</strong></div>
-      <div><span>Active</span><strong id="activeCount">0</strong></div>
+    <div class="topbar-card">
+      <div class="card-metrics">
+        <div><span>Runs</span><strong id="runCount">0</strong></div>
+        <div><span>Active</span><strong id="activeCount">0</strong></div>
+        <div><span>Done</span><strong id="doneCount">0</strong></div>
+      </div>
+      <div class="card-status">
+        <i id="controllerDot" class="status-dot"></i>
+        <strong id="controllerText">Connecting…</strong>
+      </div>
     </div>
   </header>
   <main class="reduction-shell">
@@ -161,12 +161,8 @@
       <div class="launch-layout">
         <section class="benchmark-selector">
           <div class="block-heading">
-            <div><h3>Benchmark groups</h3><p>Manual size categories; all cases are assigned to exactly one group.</p></div>
-            <span id="selectionSummary" class="selection-count">0 selected</span>
-          </div>
-          <div class="selector-toolbar">
-            <small>Use groups to run a focused sample instead of the complete catalog.</small>
-            <div class="toolbar-actions"><button id="selectAll" type="button">All groups</button><button id="clearGroups" type="button">Clear</button></div>
+            <div><h3>Benchmark groups</h3></div>
+            <div class="toolbar-actions"><span id="groupSummary" class="selection-count">0 cases</span><button id="toggleGroups" type="button">All</button></div>
           </div>
           <div id="categories" class="benchmark-groups"></div>
         </section>
@@ -225,20 +221,26 @@
       const catalog=state.catalog||{},config=state.config||{},ready=Boolean(config.can_launch&&catalog.valid);
       $('controllerDot').className='status-dot'+(ready?'':' bad');
       $('controllerText').textContent=ready?'Controller connected':'Launch gated';
-      const branch=config.smtbatch_branch||'unknown branch';
-      $('controllerDetail').textContent=ready?branch+' · catalog verified':(config.branch_error||catalog.error||'Catalog unavailable');
-      $('benchmarkCount').textContent=fmt(catalog.total_benchmarks||0);
-      $('groupCount').textContent=fmt((catalog.categories||[]).length);
       $('runCount').textContent=fmt(state.runs.length);
       $('activeCount').textContent=fmt(state.runs.filter(function(run){return Boolean(run.live)}).length);
+      $('doneCount').textContent=fmt(state.runs.filter(function(run){return !Boolean(run.live)}).length);
       $('start').disabled=!ready;
     }
     function updateSelectionSummary(){
       const catalog=state.catalog;
-      if(!catalog||!catalog.valid){$('selectionSummary').textContent='0 selected';$('reducerSummary').textContent='0 selected';return}
-      const pool=poolSize(),reducers=selectedReducers().length;
-      $('selectionSummary').textContent=fmt(checked('categories').length)+' of '+fmt((catalog.categories||[]).length)+' groups · '+fmt(pool)+' cases';
-      $('reducerSummary').textContent=fmt(reducers)+' selected';
+      if(!catalog||!catalog.valid){$('reducerSummary').textContent='0 selected';$('groupSummary').textContent='0 cases';updateToggleButton();return}
+      $('reducerSummary').textContent=fmt(selectedReducers().length)+' selected';
+      $('groupSummary').textContent=fmt(poolSize())+' cases';
+      updateToggleButton();
+    }
+    function updateToggleButton(){
+      const inputs=Array.from(document.querySelectorAll('#categories input'));
+      const button=$('toggleGroups');
+      if(!button)return;
+      const allChecked=inputs.length>0&&inputs.every(function(input){return input.checked});
+      const none=inputs.length>0&&!inputs.some(function(input){return input.checked});
+      button.classList.toggle('active',allChecked);
+      button.classList.toggle('none',none);
     }
     function renderCatalog(){
       const catalog=state.catalog;
@@ -260,6 +262,7 @@
         $('repeats').value=lastRun.repeats??catalog.default_repeats;
         state.formInitialized=true;
       }
+      if(initial)state.snapshotChecked=new Set(checked('categories'));
       state.catalogInitialized=true;
       updateSelectionSummary();
     }
@@ -348,8 +351,19 @@
       if(button.getAttribute('data-action')==='stop')stopRun(id,button.getAttribute('data-mode'));else if(button.getAttribute('data-action')==='resume')resumeRun(id);
     });
     document.addEventListener('input',function(event){if(['timeout','jobs','maxFiles','repeats'].includes(event.target.id))updateSelectionSummary()});
-    $('selectAll').onclick=function(){document.querySelectorAll('#categories input').forEach(function(input){input.checked=true});updateSelectionSummary()};
-    $('clearGroups').onclick=function(){document.querySelectorAll('#categories input').forEach(function(input){input.checked=false});updateSelectionSummary()};
+    $('toggleGroups').onclick=function(){
+      const inputs=Array.from(document.querySelectorAll('#categories input'));
+      const all=inputs.length>0&&inputs.every(function(input){return input.checked});
+      const none=!inputs.some(function(input){return input.checked});
+      if(all){
+        inputs.forEach(function(input){input.checked=false});
+      }else if(none){
+        inputs.forEach(function(input){input.checked=Boolean(state.snapshotChecked&&state.snapshotChecked.has(input.value))});
+      }else{
+        inputs.forEach(function(input){input.checked=true});
+      }
+      updateSelectionSummary();
+    };
     $('refresh').onclick=refresh;
     $('start').onclick=startRun;
     async function refresh(){

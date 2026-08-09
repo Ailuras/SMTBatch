@@ -863,6 +863,13 @@ class ReductionManager:
             if requested_status and requested_status not in sealed_statuses and requested_status != derived_status:
                 continue
             filtered.append({**row, "status": derived_status})
+        sort_key = (query.get("sort") or [""])[0]
+        sort_dir = (query.get("sort_dir") or ["asc"])[0]
+        reverse = sort_dir == "desc"
+        if sort_key == "case":
+            filtered.sort(key=lambda r: str(r["case_id"]), reverse=reverse)
+        elif sort_key == "status":
+            filtered.sort(key=lambda r: str(r.get("status", "")), reverse=reverse)
         try:
             page = max(1, int((query.get("page") or ["1"])[0]))
             page_size = min(MAX_PAGE_SIZE, max(1, int((query.get("page_size") or [str(DEFAULT_PAGE_SIZE)])[0])))
@@ -895,7 +902,7 @@ class ReductionManager:
             "study_id": plan["study_id"],
         }
 
-    def summary(self, run_id: str) -> dict[str, object]:
+    def summary(self, run_id: str, query: dict[str, list[str]] | None = None) -> dict[str, object]:
         run_dir, plan = self._load_run(run_id)
         progress = self._progress(run_dir)
         state = str(progress.get("status", "prepared"))
@@ -906,13 +913,27 @@ class ReductionManager:
         else:
             stale_status = None
         results = reduction.completed_results(run_dir, plan)
+        repeat = ((query or {}).get("repeat") or [""])[0]
         by_reducer: dict[str, dict[str, object]] = {}
         for reducer in plan["reducers"]:
-            selected = [item for item in results if item["reducer_id"] == reducer["id"]]
+            selected = [
+                item for item in results
+                if item["reducer_id"] == reducer["id"]
+                and (not repeat or str(item.get("repeat")) == repeat)
+            ]
+            completed_items = [item for item in selected if str(item.get("status")) == "completed"]
+            truncated_items = [item for item in selected if str(item.get("status")) == "truncated"]
+            completed_times = [float(item.get("trial_wall_sec", 0) or 0) for item in completed_items if float(item.get("trial_wall_sec", 0) or 0) > 0]
+            truncated_sizes = []
+            for item in truncated_items:
+                quality = item.get("output_quality") or {}
+                size = quality.get("byte_count")
+                if size is not None:
+                    truncated_sizes.append(int(size))
             by_reducer[str(reducer["id"])] = {
                 "id": reducer["id"], "label": reducer["label"],
-                "planned": len(plan["benchmarks"]) * int(plan["repeats"]),
-                "completed": len(selected),
+                "completed_avg_sec": (sum(completed_times) / len(completed_times)) if completed_times else None,
+                "truncated_avg_bytes": (sum(truncated_sizes) / len(truncated_sizes)) if truncated_sizes else None,
                 "predicate_calls": sum(int(item.get("predicate_calls", 0) or 0) for item in selected),
                 "accepted_moves": sum(int(item.get("accepted_moves", 0) or 0) for item in selected),
                 "statuses": dict(Counter(str(item.get("status")) for item in selected)),
@@ -969,6 +990,7 @@ class ReductionManager:
             "source_sha256": plan["source"]["sha256"],
             "plan_sha256": plan.get("plan_sha256"),
             "by_reducer": by_reducer,
+            "repeats": sorted({int(item.get("repeat", 0)) for item in results}),
             "realtime_calls": realtime_calls,
             "realtime_accepted": realtime_accepted,
             "calls": realtime_calls + sealed_calls,
@@ -1037,7 +1059,7 @@ def handler_factory(manager: ReductionManager):
                     return
                 match = re.fullmatch(r"/api/runs/([^/]+)/summary", path)
                 if match:
-                    _json_response(self, manager.summary(unquote(match.group(1))))
+                    _json_response(self, manager.summary(unquote(match.group(1)), parse_qs(parsed.query)))
                     return
                 match = re.fullmatch(r"/api/runs/([^/]+)/cases", path)
                 if match:
