@@ -33,6 +33,8 @@ class ReducerSpec:
     command: tuple[str, ...]
     env: dict[str, str]
     executable: Path
+    provenance_paths: tuple[Path, ...]
+    require_clean: bool
 
     @property
     def option(self) -> dict[str, str]:
@@ -91,7 +93,9 @@ class Config:
     benchmark_database: Path
     benchmark_inputs_root: Path
     benchmark_template: Path | None
+    benchmark_identity_command: tuple[str, ...]
     benchmark_categories: dict[str, BenchmarkCategorySpec]
+    comparisons: tuple[tuple[str, str], ...]
     port: int = 8001
     target_branch: str = "main"
 
@@ -125,7 +129,9 @@ def load_config(start: Path | None = None) -> Config:
     defaults = data.get("defaults", {})
     if not isinstance(defaults, dict):
         raise RuntimeError(f"[defaults] must be a table in {path}")
-    default_extras = sorted(set(defaults) - {"results", "port", "target_branch"})
+    default_extras = sorted(
+        set(defaults) - {"results", "port", "target_branch", "comparisons"}
+    )
     if default_extras:
         raise RuntimeError(f"unknown [defaults] fields in {path}: {', '.join(default_extras)}")
 
@@ -140,7 +146,9 @@ def load_config(start: Path | None = None) -> Config:
     catalog_raw = data.get("benchmark_catalog", {})
     if not isinstance(catalog_raw, dict):
         raise RuntimeError(f"[benchmark_catalog] must be a table in {path}")
-    catalog_extras = sorted(set(catalog_raw) - {"database", "inputs", "template"})
+    catalog_extras = sorted(
+        set(catalog_raw) - {"database", "inputs", "template", "identity_command"}
+    )
     if catalog_extras:
         raise RuntimeError(
             f"unknown [benchmark_catalog] fields in {path}: {', '.join(catalog_extras)}"
@@ -153,6 +161,9 @@ def load_config(start: Path | None = None) -> Config:
     )
     template_value = catalog_raw.get("template")
     template_path = _resolve_path(template_value, path) if template_value is not None else None
+    identity_command = _command_tuple(
+        catalog_raw.get("identity_command"), "[benchmark_catalog] identity_command", path
+    )
     categories_raw = data.get("benchmark_categories", {})
     if not isinstance(categories_raw, dict):
         raise RuntimeError(f"[benchmark_categories] must be a table in {path}")
@@ -162,6 +173,8 @@ def load_config(start: Path | None = None) -> Config:
     }
     if sum(spec.fallback for spec in categories.values()) > 1:
         raise RuntimeError(f"[benchmark_categories] may contain at most one fallback category in {path}")
+
+    comparisons = _parse_comparisons(defaults.get("comparisons", []), reducers, path)
 
     target_branch = defaults.get("target_branch", "main")
     if (
@@ -179,7 +192,9 @@ def load_config(start: Path | None = None) -> Config:
         benchmark_database=database_path,
         benchmark_inputs_root=inputs_path,
         benchmark_template=template_path,
+        benchmark_identity_command=identity_command,
         benchmark_categories=categories,
+        comparisons=comparisons,
         port=_parse_port(defaults.get("port", 8001), path),
         target_branch=target_branch,
     )
@@ -251,6 +266,51 @@ def _string_tuple(value: object, label: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in value)
 
 
+def _command_tuple(value: object, label: str, path: Path) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(isinstance(item, str) and item for item in value)
+    ):
+        raise RuntimeError(f"{label} must be a non-empty list of strings in {path}")
+    executable_token = value[0]
+    executable = Path(executable_token).expanduser()
+    if not executable.is_absolute() and "/" in executable_token:
+        executable = path.parent / executable
+    resolved = executable.resolve() if executable.exists() else None
+    if resolved is None:
+        located = shutil.which(executable_token)
+        resolved = Path(located).resolve() if located else None
+    if resolved is None or not resolved.is_file() or not os.access(resolved, os.X_OK):
+        raise RuntimeError(f"{label} executable missing or not executable: {executable_token}")
+    return tuple(value)
+
+
+def _parse_comparisons(
+    value: object, reducers: dict[str, ReducerSpec], path: Path
+) -> tuple[tuple[str, str], ...]:
+    if not isinstance(value, list):
+        raise RuntimeError(f"[defaults] comparisons must be a list in {path}")
+    comparisons: list[tuple[str, str]] = []
+    for index, pair in enumerate(value):
+        if (
+            not isinstance(pair, list)
+            or len(pair) != 2
+            or not all(isinstance(item, str) for item in pair)
+            or pair[0] == pair[1]
+            or any(item not in reducers for item in pair)
+        ):
+            raise RuntimeError(
+                f"[defaults] comparisons[{index}] must reference two different configured reducers in {path}"
+            )
+        normalized = (pair[0], pair[1])
+        if normalized not in comparisons:
+            comparisons.append(normalized)
+    return tuple(comparisons)
+
+
 def _parse_category(name: str, value: object, path: Path) -> BenchmarkCategorySpec:
     if not isinstance(name, str) or not _CATEGORY_ID.fullmatch(name):
         raise RuntimeError(f"benchmark category names must match {_CATEGORY_ID.pattern} in {path}")
@@ -312,7 +372,7 @@ def _parse_reducer(name: str, value: object, path: Path) -> ReducerSpec:
         raise RuntimeError(f"reducer names must be non-empty and trimmed in {path}")
     if not isinstance(value, dict):
         raise RuntimeError(f"[reducers.{name}] must be a table in {path}")
-    allowed = {"label", "command", "env"}
+    allowed = {"label", "command", "env", "provenance_paths", "require_clean"}
     extras = sorted(set(value) - allowed)
     if extras:
         raise RuntimeError(f"[reducers.{name}] has unknown fields: {', '.join(extras)}")
@@ -351,10 +411,33 @@ def _parse_reducer(name: str, value: object, path: Path) -> ReducerSpec:
         isinstance(key, str) and isinstance(item, str) for key, item in env.items()
     ):
         raise RuntimeError(f"[reducers.{name}] env must be a table of strings")
+    provenance_paths_raw = _string_tuple(
+        value.get("provenance_paths"), f"[reducers.{name}] provenance_paths"
+    )
+    provenance_paths = []
+    for item in provenance_paths_raw:
+        candidate = Path(item).expanduser()
+        if not candidate.is_absolute():
+            candidate = path.parent / candidate
+        if candidate.is_symlink():
+            raise RuntimeError(
+                f"[reducers.{name}] provenance path must not be a symbolic link: {candidate}"
+            )
+        resolved_path = candidate.resolve()
+        if not resolved_path.exists():
+            raise RuntimeError(
+                f"[reducers.{name}] provenance path is missing: {resolved_path}"
+            )
+        provenance_paths.append(resolved_path)
+    require_clean = value.get("require_clean", False)
+    if not isinstance(require_clean, bool):
+        raise RuntimeError(f"[reducers.{name}] require_clean must be boolean")
     return ReducerSpec(
         name=name,
         label=label.strip(),
         command=tuple(command),
         env=dict(env),
         executable=resolved,
+        provenance_paths=tuple(provenance_paths),
+        require_clean=require_clean,
     )

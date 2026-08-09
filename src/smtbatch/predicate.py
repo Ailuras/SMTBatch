@@ -255,7 +255,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             stdout, stderr = process.communicate(timeout=args.solver_timeout + 1.0)
             returncode = process.returncode
-        except subprocess.TimeoutExpired as exc:
+        except subprocess.TimeoutExpired:
             timed_out = True
             try:
                 os.killpg(process.pid, signal.SIGKILL)

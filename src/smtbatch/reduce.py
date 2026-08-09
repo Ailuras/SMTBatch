@@ -31,10 +31,12 @@ from datetime import datetime, timezone
 from typing import Iterable, Mapping, Sequence
 
 from .config import Config, ReducerSpec, load_config, validate_target_branch
+from . import provenance
 
 
-SCHEMA_VERSION = 2
-FORMAT = "reduction-v2"
+SCHEMA_VERSION = 3
+FORMAT = "reduction-v3"
+SUPPORTED_FORMATS = {2: "reduction-v2", 3: FORMAT}
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 MAX_LOG_BYTES = 64 * 1024
 STUDY_FIELDS = {
@@ -80,6 +82,18 @@ class ReductionError(RuntimeError):
 
 class ImmediateAbort(ReductionError):
     """Stop one in-flight trial without sealing it as complete."""
+
+
+def _schema_identity(value: Mapping[str, object], label: str) -> tuple[int, str]:
+    version = value.get("schema_version")
+    format_value = value.get("format")
+    if (
+        isinstance(version, bool)
+        or not isinstance(version, int)
+        or SUPPORTED_FORMATS.get(version) != format_value
+    ):
+        raise ReductionError(f"unsupported {label} schema/format")
+    return version, str(format_value)
 
 
 class _RunLock:
@@ -338,7 +352,7 @@ def load_study(path: Path) -> dict[str, object]:
     raw = _mapping(_read_json(study_path, "study"), "study")
     _only_fields(raw, STUDY_FIELDS, "study")
     if raw.get("schema_version") != SCHEMA_VERSION or raw.get("kind") != "reduction":
-        raise ReductionError("study must use schema_version 2 and kind 'reduction'")
+        raise ReductionError("study must use schema_version 3 and kind 'reduction'")
     study_id = _identifier(raw.get("study_id"), "study_id")
     root = _resolve_root(study_path, raw.get("root"))
     fingerprints: dict[Path, dict[str, object]] = {}
@@ -489,11 +503,18 @@ def _plan_reducer(spec: ReducerSpec, root: Path) -> dict[str, object]:
     for required in ("{input}", "{output}", "{predicate}"):
         if not any(required in token for token in command):
             raise ReductionError(f"reducer {spec.name} command must contain {required}")
+    try:
+        frozen_provenance = provenance.snapshot_reducer(
+            spec.executable, spec.provenance_paths, require_clean=spec.require_clean
+        )
+    except provenance.ProvenanceError as exc:
+        raise ReductionError(f"unable to freeze reducer {spec.name}: {exc}") from exc
     return {
         "id": spec.name,
         "label": spec.label,
         "command": command,
         "env": dict(spec.env),
+        "provenance": frozen_provenance,
     }
 
 
@@ -532,8 +553,9 @@ def build_plan(
     limits = dict(study["limits"])
     limits["trial_wall_sec"] = trial_timeout
     execution = {"outer_jobs": workers, "schedule": "strict-wave"}
+    configured_comparisons = list(config.comparisons) or list(study["comparisons"])
     comparisons = [
-        list(pair) for pair in study["comparisons"]
+        list(pair) for pair in configured_comparisons
         if pair[0] in selected_ids and pair[1] in selected_ids
     ]
     reducers = resolved_reducers
@@ -583,6 +605,12 @@ def build_plan(
                     "reducer_id": reducer["id"],
                     "repeat": repeat,
                 })
+    try:
+        harness_provenance = provenance.snapshot_command(
+            list(study["predicate_wrapper"]["command"]), cwd=root, execute=False
+        )
+    except provenance.ProvenanceError as exc:
+        raise ReductionError(f"unable to freeze predicate wrapper: {exc}") from exc
     plan = {
         "schema_version": SCHEMA_VERSION,
         "format": FORMAT,
@@ -591,6 +619,7 @@ def build_plan(
         "root": study["root"],
         "execution": execution,
         "predicate_wrapper": study["predicate_wrapper"],
+        "harness_provenance": harness_provenance,
         "benchmarks": benchmarks,
         "reducers": reducers,
         "repeats": repeat_count,
@@ -618,6 +647,80 @@ def _write_jobs(path: Path, jobs: Sequence[Mapping[str, object]]) -> None:
     _atomic_write(path, "".join(lines).encode("utf-8"))
 
 
+def _validate_frozen_file(value: object, label: str) -> None:
+    record = _mapping(value, label)
+    path_value = record.get("path")
+    expected = record.get("sha256")
+    if not isinstance(path_value, str) or not isinstance(expected, str):
+        raise ReductionError(f"malformed {label} fingerprint")
+    path = Path(path_value)
+    if path.is_symlink() or not path.is_file():
+        raise ReductionError(f"{label} is missing or not a regular file: {path}")
+    if _sha256_path(path) != expected:
+        raise ReductionError(f"{label} drift: {path}")
+
+
+def _validate_live_provenance(plan: Mapping[str, object]) -> None:
+    """Reject any live asset that differs from a freshly prepared v3 plan."""
+
+    version, _ = _schema_identity(plan, "plan")
+    if version != SCHEMA_VERSION:
+        raise ReductionError(
+            "reduction-v2 plans are read-only; prepare a reduction-v3 plan before execution"
+        )
+
+    source = _mapping(plan.get("source"), "plan source")
+    _validate_frozen_file(source, "study source")
+    for benchmark in plan.get("benchmarks", []):
+        item = _mapping(benchmark, "benchmark")
+        _validate_frozen_file(
+            {"path": item.get("input"), "sha256": item.get("input_sha256")},
+            f"benchmark {item.get('id')} input",
+        )
+
+    reducers = plan.get("reducers")
+    if not isinstance(reducers, list):
+        raise ReductionError("plan reducers must be a list")
+    for item in reducers:
+        reducer = _mapping(item, "plan reducer")
+        frozen = _mapping(
+            reducer.get("provenance"), f"reducer {reducer.get('id')} provenance"
+        )
+        try:
+            current = provenance.resnapshot_reducer(frozen)
+        except provenance.ProvenanceError as exc:
+            raise ReductionError(
+                f"reducer {reducer.get('id')} provenance drift: {exc}"
+            ) from exc
+        if not provenance.same_snapshot(frozen, current):
+            raise ReductionError(f"reducer {reducer.get('id')} provenance drift")
+
+    frozen_harness = _mapping(plan.get("harness_provenance"), "predicate wrapper provenance")
+    try:
+        current_harness = provenance.resnapshot_command(frozen_harness)
+    except provenance.ProvenanceError as exc:
+        raise ReductionError(f"predicate wrapper provenance drift: {exc}") from exc
+    if not provenance.same_snapshot(frozen_harness, current_harness):
+        raise ReductionError("predicate wrapper provenance drift")
+
+    catalog = plan.get("catalog", {})
+    if not isinstance(catalog, dict):
+        raise ReductionError("plan catalog must be an object")
+    for key in ("database", "template"):
+        record = catalog.get(key)
+        if record is not None:
+            _validate_frozen_file(record, f"benchmark catalog {key}")
+    frozen_identity = catalog.get("identity")
+    if frozen_identity is not None:
+        identity_record = _mapping(frozen_identity, "benchmark identity")
+        try:
+            current_identity = provenance.resnapshot_command(identity_record)
+        except provenance.ProvenanceError as exc:
+            raise ReductionError(f"benchmark identity drift: {exc}") from exc
+        if not provenance.same_snapshot(identity_record, current_identity):
+            raise ReductionError("benchmark identity drift")
+
+
 def prepare(
     study_path: Path, output: Path, *, reducers: Sequence[str] | None = None,
     timeout_seconds: float | None = None, outer_jobs: int | None = None,
@@ -635,6 +738,7 @@ def prepare(
         timeout_seconds=timeout_seconds, outer_jobs=outer_jobs,
         benchmark_ids=benchmark_ids, repeats=repeats, selection=selection,
     )
+    _validate_live_provenance(plan)
     output = output.expanduser().resolve()
     if output.exists() and any(output.iterdir()):
         existing = output / "plan.json"
@@ -655,9 +759,14 @@ def prepare(
             "format": FORMAT,
             "study_source": study["source"],
             "environment": study["environment"],
+            "reducers": {
+                item["id"]: item["provenance"] for item in plan["reducers"]
+            },
+            "predicate_wrapper": plan["harness_provenance"],
+            "catalog": plan.get("catalog", {}),
             "inputs": [
                 {"id": item["id"], "path": item["input"], "sha256": item["input_sha256"]}
-                for item in study["benchmarks"]
+                for item in plan["benchmarks"]
             ],
         },
     )
@@ -693,10 +802,11 @@ def load_plan(output: Path) -> dict[str, object]:
     output = output.expanduser().resolve()
     plan = _mapping(_read_json(output / "plan.json", "plan"), "plan")
     marker = _mapping(_read_json(output / "plan.complete.json", "plan marker"), "plan marker")
+    plan_version, plan_format = _schema_identity(plan, "plan")
+    marker_version, marker_format = _schema_identity(marker, "plan marker")
     if (
-        plan.get("schema_version") != SCHEMA_VERSION
-        or plan.get("format") != FORMAT
-        or marker.get("format") != FORMAT
+        marker_version != plan_version
+        or marker_format != plan_format
         or marker.get("plan_sha256") != _sha256_path(output / "plan.json")
         or marker.get("jobs_sha256") != _sha256_path(output / "jobs.tsv")
         or marker.get("study_sha256") != _sha256_path(output / "study.json")
@@ -1177,7 +1287,7 @@ def _marker_valid(job_dir: Path) -> bool:
     try:
         marker = _mapping(_read_json(marker_path, "job marker"), "job marker")
         return (
-            marker.get("schema_version") == SCHEMA_VERSION
+            marker.get("schema_version") in SUPPORTED_FORMATS
             and marker.get("result_sha256") == _sha256_path(result_path)
         )
     except (OSError, ReductionError):
@@ -1232,8 +1342,10 @@ def request_stop(output: Path, mode: str) -> dict[str, object]:
     if mode not in {"graceful", "immediate"}:
         raise ReductionError("stop mode must be graceful or immediate")
     output = output.expanduser().resolve()
-    if not (output / "plan.json").is_file():
-        raise ReductionError(f"not a reduction run: {output}")
+    plan = load_plan(output)
+    version, _ = _schema_identity(plan, "plan")
+    if version != SCHEMA_VERSION:
+        raise ReductionError("reduction-v2 plans are read-only and cannot be stopped")
     current = _control_mode(output)
     effective = "immediate" if "immediate" in {current, mode} else "graceful"
     request = {
@@ -1634,9 +1746,25 @@ def _run_locked(output: Path, plan: Mapping[str, object]) -> list[dict[str, obje
 def run(output: Path) -> list[dict[str, object]]:
     output = output.expanduser().resolve()
     plan = load_plan(output)
+    version, _ = _schema_identity(plan, "plan")
+    if version != SCHEMA_VERSION:
+        raise ReductionError(
+            "reduction-v2 plans are read-only; prepare a reduction-v3 plan before execution"
+        )
     lock = _RunLock(output)
     try:
         lock.acquire()
+        try:
+            _validate_live_provenance(plan)
+        except ReductionError as exc:
+            _append_jsonl(output / "resume_history.jsonl", {
+                "schema_version": SCHEMA_VERSION,
+                "event": "run_rejected",
+                "at": _utc_now(),
+                "pid": os.getpid(),
+                "reason": str(exc),
+            })
+            raise
         return _run_locked(output, plan)
     except ValueError as exc:
         raise ReductionError(str(exc)) from exc
@@ -1654,7 +1782,7 @@ def status(output: Path) -> dict[str, object]:
     except ReductionError:
         pass
     return {
-        "study_id": plan["study_id"], "format": FORMAT,
+        "study_id": plan["study_id"], "format": plan["format"],
         "benchmarks": len(plan["benchmarks"]), "reducers": len(plan["reducers"]),
         "repeats": plan["repeats"], "outer_jobs": plan["execution"]["outer_jobs"],
         "selection": plan.get("selection", {}), "limits": plan["limits"],
@@ -1742,7 +1870,7 @@ def trajectory_for_case(output: Path, case_id: str) -> dict[str, object]:
             "trajectory": trajectory,
         })
     return {
-        "schema_version": SCHEMA_VERSION, "format": FORMAT,
+        "schema_version": plan["schema_version"], "format": plan["format"],
         "study_id": plan["study_id"],
         "case": {
             "id": benchmark["id"], "family": benchmark["family"],
@@ -1912,7 +2040,7 @@ def build_report(output: Path) -> tuple[dict[str, object], list[dict[str, object
     except ReductionError:
         pass
     summary = {
-        "schema_version": SCHEMA_VERSION, "format": FORMAT,
+        "schema_version": plan["schema_version"], "format": plan["format"],
         "study_id": plan["study_id"], "generated_at": _utc_now(),
         "status": progress.get("status", "unknown"),
         "total_jobs": len(plan["jobs"]), "completed_jobs": len(results),
@@ -1945,10 +2073,11 @@ def report(output: Path) -> dict[str, object]:
     _atomic_write(report_dir / "raw.tsv", _tsv(raw_rows))
     _atomic_write(report_dir / "curves.tsv", _tsv(curve_rows))
     _write_json(report_dir / "summary.json", summary)
+    plan = load_plan(output)
     _write_json(report_dir / "report.complete.json", {
-        "schema_version": SCHEMA_VERSION,
-        "format": FORMAT,
-        "plan_sha256": load_plan(output).get("plan_sha256"),
+        "schema_version": plan["schema_version"],
+        "format": plan["format"],
+        "plan_sha256": plan.get("plan_sha256"),
         "results_sha256": _sha256_path(output / "results.tsv") if (output / "results.tsv").is_file() else None,
         "summary_sha256": _sha256_path(report_dir / "summary.json"),
         "raw_sha256": _sha256_path(report_dir / "raw.tsv"),
@@ -2017,7 +2146,7 @@ def export_xlsx(output: Path, destination: Path | None = None) -> Path:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="action", required=True)
-    prepare_parser = commands.add_parser("prepare", help="validate a v2 study and freeze its job plan")
+    prepare_parser = commands.add_parser("prepare", help="validate a v3 study and freeze its job plan")
     prepare_parser.add_argument("study", type=Path)
     prepare_parser.add_argument("--output", required=True, type=Path)
     prepare_parser.add_argument(

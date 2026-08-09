@@ -6,6 +6,7 @@ import unittest
 
 from smtbatch import cli, reduce
 from smtbatch.config import load_config, validate_target_branch
+from smtbatch.reduction_serve import ReductionManager
 
 
 class ReductionFixture(unittest.TestCase):
@@ -19,6 +20,10 @@ class ReductionFixture(unittest.TestCase):
             json.dumps({"case.smt2": {"match": "exitcode", "binary": "fixture"}}),
             encoding="utf-8",
         )
+        (self.root / "reducer-source.py").write_text("VALUE = 1\n", encoding="utf-8")
+        identity = self.root / "identity.sh"
+        identity.write_text("#!/bin/sh\nprintf 'fixture-identity-v1\\n'\n", encoding="utf-8")
+        identity.chmod(0o755)
         (self.root / ".gitignore").write_text("results/\nSMTBatch/\n", encoding="utf-8")
         self.smtbatch_root = self.root / "SMTBatch"
         self.smtbatch_root.mkdir()
@@ -31,11 +36,13 @@ class ReductionFixture(unittest.TestCase):
 results = "results"
 port = 8001
 target_branch = "feat/reduction"
+comparisons = [["r1", "r2"]]
 
 [benchmark_catalog]
 database = "benchmarks/database.json"
 inputs = "benchmarks"
 template = "studies/study.json"
+identity_command = ["./identity.sh"]
 
 [benchmark_categories.compact]
 label = "Compact fixture"
@@ -46,17 +53,21 @@ max_bytes = 100
 [reducers.r1]
 label = "Reducer one"
 command = ["/bin/true", "--r1", "{input}", "{output}", "{predicate}"]
+provenance_paths = ["reducer-source.py"]
+require_clean = true
 
 [reducers.r2]
 label = "Reducer two"
 command = ["/bin/true", "--r2", "{input}", "{output}", "{predicate}"]
+provenance_paths = ["reducer-source.py"]
+require_clean = true
 """,
             encoding="utf-8",
         )
         self.study_path = self.root / "studies" / "study.json"
         self.study_path.write_text(
             json.dumps({
-                "schema_version": 2,
+                "schema_version": 3,
                 "kind": "reduction",
                 "study_id": "fixture",
                 "root": "..",
@@ -125,6 +136,13 @@ class ConfigTests(ReductionFixture):
         self.assertEqual(set(config.reducers), {"r1", "r2"})
         self.assertEqual(config.reducers["r1"].label, "Reducer one")
         self.assertEqual(config.reducers["r2"].command[0], "/bin/true")
+        self.assertEqual(
+            config.reducers["r1"].provenance_paths,
+            ((self.root / "reducer-source.py").resolve(),),
+        )
+        self.assertTrue(config.reducers["r1"].require_clean)
+        self.assertEqual(config.comparisons, (("r1", "r2"),))
+        self.assertEqual(config.benchmark_identity_command, ("./identity.sh",))
         self.assertEqual(validate_target_branch(config), "feat/reduction")
 
     def test_legacy_solver_and_project_fields_are_rejected(self) -> None:
@@ -179,6 +197,10 @@ class PlanTests(ReductionFixture):
         self.assertEqual(loaded["limits"]["trial_wall_sec"], 61)
         self.assertEqual(loaded["execution"]["outer_jobs"], 4)
         self.assertTrue((output / "plan.complete.json").is_file())
+        self.assertEqual(loaded["schema_version"], 3)
+        self.assertEqual(loaded["format"], "reduction-v3")
+        self.assertIn("provenance", loaded["reducers"][0])
+        self.assertIn("harness_provenance", loaded)
         self.assertEqual(len((output / "jobs.tsv").read_text().splitlines()), 3)
         self.assertNotIn("repository", plan)
 
@@ -187,6 +209,78 @@ class PlanTests(ReductionFixture):
         reduce.prepare(self.study_path, output, reducers=["r1"], timeout_seconds=30, outer_jobs=1)
         with self.assertRaisesRegex(reduce.ReductionError, "non-empty output"):
             reduce.prepare(self.study_path, output, reducers=["r2"], timeout_seconds=30, outer_jobs=1)
+
+    def test_prepare_rejects_dirty_required_reducer_source(self) -> None:
+        (self.root / "reducer-source.py").write_text("VALUE = 2\n", encoding="utf-8")
+        with self.assertRaisesRegex(reduce.ReductionError, "must be clean"):
+            reduce.prepare(
+                self.study_path, self.root / "results" / "dirty", reducers=["r1"]
+            )
+
+    def test_resume_rejects_reducer_source_drift_before_starting_jobs(self) -> None:
+        output = self.root / "results" / "drift"
+        reduce.prepare(self.study_path, output, reducers=["r1"])
+        (self.root / "reducer-source.py").write_text("VALUE = 2\n", encoding="utf-8")
+        with self.assertRaisesRegex(reduce.ReductionError, "reducer r1 provenance drift"):
+            reduce.run(output)
+        history = [json.loads(line) for line in (output / "resume_history.jsonl").read_text().splitlines()]
+        self.assertEqual(history[-1]["event"], "run_rejected")
+        self.assertFalse((output / "jobs").exists())
+
+    def test_resume_rejects_oracle_identity_drift(self) -> None:
+        output = self.root / "results" / "identity-drift"
+        catalog = ReductionManager(self.root).benchmark_catalog()
+        reduce.prepare(Path(catalog["manifest_path"]), output, reducers=["r1"])
+        identity = self.root / "identity.sh"
+        identity.write_text("#!/bin/sh\nprintf 'fixture-identity-v2\\n'\n", encoding="utf-8")
+        identity.chmod(0o755)
+        with self.assertRaisesRegex(reduce.ReductionError, "benchmark identity drift"):
+            reduce.run(output)
+
+    def test_resume_rejects_input_and_database_drift(self) -> None:
+        input_output = self.root / "results" / "input-drift"
+        reduce.prepare(self.study_path, input_output, reducers=["r1"])
+        (self.root / "benchmarks" / "case.smt2").write_text(
+            "(set-logic ALL)\n(check-sat)\n", encoding="utf-8"
+        )
+        with self.assertRaisesRegex(reduce.ReductionError, "benchmark case input drift"):
+            reduce.run(input_output)
+
+        (self.root / "benchmarks" / "case.smt2").write_text(
+            "(check-sat)\n", encoding="utf-8"
+        )
+        manager = ReductionManager(self.root)
+        catalog = manager.benchmark_catalog()
+        database_output = self.root / "results" / "database-drift"
+        reduce.prepare(Path(catalog["manifest_path"]), database_output, reducers=["r1"])
+        (self.root / "benchmarks" / "database.json").write_text("{}\n", encoding="utf-8")
+        with self.assertRaisesRegex(reduce.ReductionError, "benchmark catalog database drift"):
+            reduce.run(database_output)
+
+    def test_v2_plan_remains_reportable_but_cannot_resume(self) -> None:
+        output = self.root / "results" / "legacy"
+        reduce.prepare(self.study_path, output, reducers=["r1"])
+        plan_path = output / "plan.json"
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        plan.pop("plan_sha256")
+        plan["schema_version"] = 2
+        plan["format"] = "reduction-v2"
+        plan.pop("harness_provenance")
+        for reducer in plan["reducers"]:
+            reducer.pop("provenance")
+        plan["plan_sha256"] = reduce._hash_json(plan)
+        reduce._write_json(plan_path, plan)
+        marker = json.loads((output / "plan.complete.json").read_text(encoding="utf-8"))
+        marker.update({
+            "schema_version": 2,
+            "format": "reduction-v2",
+            "plan_sha256": reduce._sha256_path(plan_path),
+        })
+        reduce._write_json(output / "plan.complete.json", marker)
+        self.assertEqual(reduce.status(output)["format"], "reduction-v2")
+        self.assertEqual(reduce.report(output)["format"], "reduction-v2")
+        with self.assertRaisesRegex(reduce.ReductionError, "read-only"):
+            reduce.run(output)
 
     def test_run_lock_rejects_second_controller_and_cleans_pid(self) -> None:
         output = self.root / "results" / "locked"

@@ -22,8 +22,7 @@ import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
-from typing import Any
-from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from . import reduce as reduction
 from .config import (
@@ -298,6 +297,7 @@ class ReductionManager:
             input_signature,
             str(template_path) if template_path else "", _stat_signature(template_path) if template_path else None,
             str(self.config.path), _stat_signature(self.config.path),
+            self.config.benchmark_identity_command,
             tuple(
                 (name, spec.label, spec.description, spec.min_bytes, spec.max_bytes,
                  spec.any_features, spec.required_features, spec.forbidden_features,
@@ -413,6 +413,19 @@ class ReductionManager:
 
         database_sha256 = reduction._sha256_path(database_path)
         template_sha256 = reduction._sha256_path(template_path) if template_path is not None else None
+        try:
+            identity = (
+                reduction.provenance.snapshot_command(
+                    self.config.benchmark_identity_command,
+                    cwd=self.project_root,
+                    execute=True,
+                )
+                if self.config.benchmark_identity_command else None
+            )
+        except reduction.provenance.ProvenanceError as exc:
+            base["error"] = f"benchmark identity validation failed: {exc}"
+            self._catalog_cache = (signature, base)
+            return base
         category_payload = []
         for name, spec in category_specs.items():
             category_payload.append({
@@ -435,6 +448,7 @@ class ReductionManager:
             ),
             "categories": category_payload,
             "category_config_sha256": category_config_sha256,
+            "identity": identity,
         }
         template_limits = template.get("limits", {})
         if not isinstance(template_limits, dict):
@@ -471,11 +485,7 @@ class ReductionManager:
             "env": {},
         }
         configured_reducers = list(self.config.reducers)
-        comparisons = (
-            [["ddsmt", "d3smt"]]
-            if {"ddsmt", "d3smt"}.issubset(configured_reducers)
-            else []
-        )
+        comparisons = [list(pair) for pair in self.config.comparisons]
         normalized_template = {
             "schema_version": reduction.SCHEMA_VERSION,
             "kind": "reduction",
@@ -512,6 +522,7 @@ class ReductionManager:
             "study_id": study["study_id"],
             "database": catalog_payload["database"],
             "template": catalog_payload["template"],
+            "identity": identity,
             "category_config_sha256": category_config_sha256,
             "categories": category_payload,
             "total_benchmarks": len(benchmarks),
@@ -981,7 +992,7 @@ class ReductionManager:
             "outer_jobs": plan["execution"]["outer_jobs"],
             "schedule": plan["execution"]["schedule"],
             "wave_count": max((int(job["wave"]) for job in plan["jobs"]), default=0),
-            "repeats": plan["repeats"],
+            "repeat_count": plan["repeats"],
             "selection": plan.get("selection", {}),
             "catalog": plan.get("catalog", {}),
             "limits": plan["limits"],

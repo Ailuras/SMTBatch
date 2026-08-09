@@ -1,9 +1,7 @@
 import http.client
 import json
 from http.server import ThreadingHTTPServer
-from pathlib import Path
 import subprocess
-import tempfile
 import threading
 import unittest
 from unittest import mock
@@ -27,6 +25,20 @@ class ManagerTests(ReductionFixture):
         self.assertEqual(catalog["default_outer_jobs"], 2)
         self.assertEqual(catalog["default_repeats"], 2)
         self.assertEqual(catalog["total_benchmarks"], 1)
+        self.assertEqual(catalog["identity"]["stdout"], "fixture-identity-v1\n")
+
+    def test_catalog_identity_failure_blocks_launch(self) -> None:
+        self.config_path.write_text(
+            self.config_path.read_text(encoding="utf-8").replace(
+                'identity_command = ["./identity.sh"]',
+                'identity_command = ["/bin/false"]',
+            ),
+            encoding="utf-8",
+        )
+        manager = ReductionManager(self.root)
+        catalog = manager.benchmark_catalog()
+        self.assertFalse(catalog["valid"])
+        self.assertIn("benchmark identity validation failed", catalog["error"])
 
     def test_catalog_run_samples_categories_and_freezes_four_parameters(self) -> None:
         with mock.patch.object(self.manager, "_launch", return_value={"run_id": "catalog-launched"}):
@@ -166,7 +178,7 @@ class HttpTests(ReductionFixture):
         html = data.decode("utf-8")
         self.assertEqual(status, 200)
         self.assertIn("Reduction Console", html)
-        self.assertIn("Per-case reducer timeout", html)
+        self.assertIn("Per-case timeout", html)
         self.assertIn("Parallel jobs", html)
         self.assertIn("Maximum benchmark files", html)
         self.assertIn("Repeats", html)

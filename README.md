@@ -21,14 +21,24 @@ Every `[reducers.<id>]` entry is one black-box reducer command. SMTBatch only su
 results = "results"
 port = 8001
 target_branch = "feat/reduction" # SMTBatch checkout branch; defaults to main
+comparisons = [["ddsmt_latest", "d3smt_control"]]
 
-[reducers.ddsmt]
-label = "ddSMT"
+[benchmark_catalog]
+database = "benchmarks/database.json"
+inputs = "benchmarks/inputs"
+identity_command = ["/usr/bin/python3", "benchmarks/oracle.py", "--identity"]
+
+[reducers.ddsmt_latest]
+label = "ddSMT latest"
 command = ["/home/hanrui/ddsmt/bin/ddsmt", "-j", "1", "--timeout", "{predicate_timeout}", "--ignore-output", "{input}", "{output}", "{predicate}"]
+provenance_paths = ["/home/hanrui/ddsmt/ddsmt", "/home/hanrui/ddsmt/requirements.txt"]
+require_clean = true
 
-[reducers.d3smt]
-label = "D3SMT"
+[reducers.d3smt_control]
+label = "D3SMT control"
 command = ["/usr/bin/python3", "-m", "src", "-j", "1", "--timeout", "{predicate_timeout}", "--ignore-output", "{input}", "{output}", "{predicate}"]
+provenance_paths = ["src", "requirements.txt"]
+require_clean = true
 ```
 
 The default evidence path is external: SMTBatch wraps every predicate call, records the
@@ -37,7 +47,7 @@ The report therefore gives a generic size-decline curve for every reducer. D3SMT
 logs may be inspected for white-box diagnosis, but no baseline must implement a D3SMT-specific
 observer.
 
-A reduction-v2 study contains benchmark predicates, default resource limits, repeats, comparisons, and a list of allowed reducer IDs. Reducer commands are not duplicated in the study. When a run is created, SMTBatch freezes the selected reducer definitions, timeout, outer jobs, and strict-wave job matrix into the run plan. Resume always uses that immutable plan.
+A reduction-v3 study contains benchmark predicates, default resource limits, repeats, comparisons, and a list of allowed reducer IDs. Reducer commands are not duplicated in the study. When a run is created, SMTBatch freezes the selected reducer definitions, executable and declared-source hashes, relevant Git identities and scoped dirty state, predicate-wrapper assets, input hashes, and an optional executed benchmark identity command together with the timeout, outer jobs, and strict-wave job matrix. Prepare rejects a dirty reducer marked `require_clean`; resume re-snapshots every frozen asset and rejects any drift before starting jobs. Historical reduction-v2 plans remain available to status and reporting commands but cannot be resumed.
 
 The SMTBatch checkout at `<project-root>/SMTBatch` must match `[defaults] target_branch` to launch or resume work. The consuming project branch is independent. A mismatched SMTBatch branch may still start the service and inspect historical runs.
 
@@ -52,7 +62,7 @@ smtbatch serve foreground
 
 smtbatch reduce prepare results/.benchmark-catalog.json \
   --output results/smoke \
-  --reducers ddsmt d3smt \
+  --reducers ddsmt_latest d3smt_control \
   --timeout 3600 \
   --jobs 4
 smtbatch reduce run results/smoke
