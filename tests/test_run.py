@@ -1,10 +1,13 @@
+import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
-from smtbatch import cli, reduce
+from smtbatch import cli, predicate, reduce
 from smtbatch.config import load_config, validate_target_branch
 from smtbatch.reduction_serve import ReductionManager
 
@@ -309,6 +312,81 @@ class PlanTests(ReductionFixture):
         self.assertEqual(events, [{"event": "start", "call_id": "one"}])
         self.assertTrue(truncated)
         self.assertEqual(error, "")
+
+    def test_predicate_journal_joins_validated_internal_correlation(self) -> None:
+        journal = self.root / "predicate.jsonl"
+        candidate = self.root / "benchmarks" / "case.smt2"
+        arguments = [
+            "--log", str(journal), "--phase", "reducer",
+            "--solver-timeout", "1", "--ignore-stdout", "--ignore-stderr",
+            "--", "/bin/true", str(candidate),
+        ]
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(predicate.main(arguments), 0)
+
+        call_id = "d3smt-owner1-worker2-call3"
+        proposal_id = "d3smt-owner1-proposal7"
+        environment = {
+            "SMTBATCH_PREDICATE_CALL_ID": call_id,
+            "SMTBATCH_PREDICATE_ROLE": "candidate",
+            "SMTBATCH_PROPOSAL_ID": proposal_id,
+            "SMTBATCH_CANDIDATE_SEQUENCE": "7",
+            "SMTBATCH_INCUMBENT_SEQUENCE": "2",
+            "SMTBATCH_CANDIDATE_RAW_SHA256": hashlib.sha256(
+                candidate.read_bytes()
+            ).hexdigest(),
+            "SMTBATCH_STRATEGY": "ddmin",
+            "SMTBATCH_PASS": "1",
+            "SMTBATCH_MUTATOR": "EraseNode",
+            "SMTBATCH_TASK": "4",
+        }
+        with mock.patch.dict(os.environ, environment, clear=True):
+            self.assertEqual(predicate.main(arguments), 0)
+
+        rows = [json.loads(line) for line in journal.read_text().splitlines()]
+        correlated = next(
+            row for row in rows
+            if row.get("event") == "start" and row.get("call_id") == call_id
+        )
+        self.assertEqual(correlated["schema_version"], 3)
+        self.assertEqual(correlated["role"], "candidate")
+        self.assertEqual(correlated["internal"]["proposal_id"], proposal_id)
+        self.assertEqual(correlated["internal"]["candidate_sequence"], 7)
+        self.assertEqual(correlated["internal"]["incumbent_sequence"], 2)
+        self.assertEqual(correlated["internal"]["strategy"], "ddmin")
+        self.assertEqual(
+            correlated["internal"]["candidate_raw_sha256"],
+            correlated["candidate"]["sha256"],
+        )
+        self.assertEqual(
+            sum(
+                row.get("event") == "finish" and row.get("call_id") == call_id
+                for row in rows
+            ),
+            1,
+        )
+
+    def test_predicate_rejects_partial_or_inconsistent_correlation(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires SMTBATCH_PREDICATE_CALL_ID"):
+            predicate._internal_context({"SMTBATCH_STRATEGY": "ddmin"})
+        with self.assertRaisesRegex(ValueError, "requires SMTBATCH_PROPOSAL_ID"):
+            predicate._internal_context({
+                "SMTBATCH_PREDICATE_CALL_ID": "call-1",
+                "SMTBATCH_PREDICATE_ROLE": "candidate",
+            })
+
+        candidate = self.root / "benchmarks" / "case.smt2"
+        with self.assertRaisesRegex(ValueError, "hash does not match"):
+            predicate._append_start(
+                self.root / "bad-predicate.jsonl",
+                call_id="call-2",
+                phase="reducer",
+                candidate=candidate,
+                internal={
+                    "role": "golden",
+                    "candidate_raw_sha256": "0" * 64,
+                },
+            )
 
 
 if __name__ == "__main__":

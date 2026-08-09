@@ -8,11 +8,27 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
 import time
 import uuid
+
+
+_CORRELATION_ENV = {
+    "SMTBATCH_PREDICATE_ROLE",
+    "SMTBATCH_PROPOSAL_ID",
+    "SMTBATCH_CANDIDATE_SEQUENCE",
+    "SMTBATCH_INCUMBENT_SEQUENCE",
+    "SMTBATCH_CANDIDATE_RAW_SHA256",
+    "SMTBATCH_STRATEGY",
+    "SMTBATCH_PASS",
+    "SMTBATCH_MUTATOR",
+    "SMTBATCH_TASK",
+}
+_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
 def _json_line(value: object) -> str:
@@ -149,8 +165,76 @@ def _append(path: Path, value: object) -> None:
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+def _internal_context(
+    environment: dict[str, str] | os._Environ[str] | None = None,
+) -> dict[str, object] | None:
+    """Read and strictly validate optional reducer-to-wrapper correlation."""
+
+    source = os.environ if environment is None else environment
+    call_id = source.get("SMTBATCH_PREDICATE_CALL_ID")
+    populated = sorted(name for name in _CORRELATION_ENV if source.get(name))
+    if not call_id:
+        if populated:
+            raise ValueError(
+                "predicate correlation metadata requires "
+                "SMTBATCH_PREDICATE_CALL_ID"
+            )
+        return None
+    if not _IDENTIFIER.fullmatch(call_id):
+        raise ValueError("invalid SMTBATCH_PREDICATE_CALL_ID")
+
+    role = source.get("SMTBATCH_PREDICATE_ROLE")
+    if role not in {"golden", "candidate", "cross-check", "cross-check-golden"}:
+        raise ValueError("invalid SMTBATCH_PREDICATE_ROLE")
+    proposal_id = source.get("SMTBATCH_PROPOSAL_ID")
+    if proposal_id is not None and not _IDENTIFIER.fullmatch(proposal_id):
+        raise ValueError("invalid SMTBATCH_PROPOSAL_ID")
+    if role == "candidate" and proposal_id is None:
+        raise ValueError("candidate correlation requires SMTBATCH_PROPOSAL_ID")
+
+    result: dict[str, object] = {
+        "source": "d3smt",
+        "predicate_call_id": call_id,
+        "role": role,
+        "proposal_id": proposal_id,
+    }
+    for environment_name, field in (
+        ("SMTBATCH_CANDIDATE_SEQUENCE", "candidate_sequence"),
+        ("SMTBATCH_INCUMBENT_SEQUENCE", "incumbent_sequence"),
+    ):
+        value = source.get(environment_name)
+        if value is None:
+            result[field] = None
+            continue
+        if not value.isascii() or not value.isdecimal():
+            raise ValueError(f"invalid {environment_name}")
+        result[field] = int(value)
+
+    raw_sha256 = source.get("SMTBATCH_CANDIDATE_RAW_SHA256")
+    if raw_sha256 is not None and not _SHA256.fullmatch(raw_sha256):
+        raise ValueError("invalid SMTBATCH_CANDIDATE_RAW_SHA256")
+    result["candidate_raw_sha256"] = raw_sha256
+    for environment_name, field in (
+        ("SMTBATCH_STRATEGY", "strategy"),
+        ("SMTBATCH_PASS", "pass"),
+        ("SMTBATCH_MUTATOR", "mutator"),
+        ("SMTBATCH_TASK", "task"),
+    ):
+        value = source.get(environment_name)
+        if value is not None:
+            if not value or len(value) > 256 or any(
+                ord(char) < 32 or ord(char) == 127 for char in value
+            ):
+                raise ValueError(f"invalid {environment_name}")
+            result[field] = value
+        else:
+            result[field] = None
+    return result
+
+
 def _append_start(
     path: Path, *, call_id: str, phase: str, candidate: Path,
+    internal: dict[str, object] | None = None,
 ) -> dict[str, object]:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+", encoding="utf-8") as handle:
@@ -161,6 +245,13 @@ def _append_start(
         role = phase
         if phase == "reducer":
             role = "golden" if not reducer_starts else "candidate"
+        if internal is not None:
+            internal_role = internal.get("role")
+            if internal_role in {"golden", "candidate"} and internal_role != role:
+                raise ValueError(
+                    f"internal predicate role {internal_role!r} does not match "
+                    f"external role {role!r}"
+                )
         call_seq = max(
             (
                 int(row["call_seq"])
@@ -170,8 +261,15 @@ def _append_start(
             ),
             default=0,
         ) + 1
+        candidate_record = _candidate_record(candidate)
+        if internal is not None:
+            internal_sha256 = internal.get("candidate_raw_sha256")
+            if internal_sha256 is not None and internal_sha256 != candidate_record["sha256"]:
+                raise ValueError(
+                    "internal candidate hash does not match wrapper candidate"
+                )
         event = {
-            "schema_version": 2,
+            "schema_version": 3,
             "event": "start",
             "call_id": call_id,
             "call_seq": call_seq,
@@ -186,7 +284,8 @@ def _append_start(
             "job_id": os.environ.get("SMTBATCH_JOB_ID"),
             "attempt": os.environ.get("SMTBATCH_ATTEMPT"),
             "reducer_id": os.environ.get("SMTBATCH_REDUCER_ID"),
-            "candidate": _candidate_record(candidate),
+            "candidate": candidate_record,
+            "internal": internal,
         }
         handle.seek(0, os.SEEK_END)
         handle.write(_json_line(event))
@@ -218,9 +317,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    call_id = uuid.uuid4().hex
+    internal = _internal_context()
+    call_id = (
+        str(internal["predicate_call_id"])
+        if internal is not None
+        else uuid.uuid4().hex
+    )
     candidate = Path(args.command[-1]).resolve()
-    _append_start(args.log, call_id=call_id, phase=args.phase, candidate=candidate)
+    _append_start(
+        args.log, call_id=call_id, phase=args.phase, candidate=candidate,
+        internal=internal,
+    )
     started = time.monotonic()
     returncode = 127
     stdout = b""
@@ -271,7 +378,7 @@ def main(argv: list[str] | None = None) -> int:
             error = f"predicate interrupted by signal {interrupted['signum']}"
 
     _append(args.log, {
-        "schema_version": 2,
+        "schema_version": 3,
         "event": "finish",
         "call_id": call_id,
         "finished_ns": time.time_ns(),
