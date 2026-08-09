@@ -350,6 +350,10 @@ class PlanTests(ReductionFixture):
         )
         self.assertEqual(correlated["schema_version"], 3)
         self.assertEqual(correlated["role"], "candidate")
+        self.assertEqual(
+            correlated["candidate"]["quality"]["byte_count"],
+            len(candidate.read_bytes()),
+        )
         self.assertEqual(correlated["internal"]["proposal_id"], proposal_id)
         self.assertEqual(correlated["internal"]["candidate_sequence"], 7)
         self.assertEqual(correlated["internal"]["incumbent_sequence"], 2)

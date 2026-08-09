@@ -134,7 +134,7 @@ def _candidate_record(path: Path) -> dict[str, object]:
             "quality": {
                 "expression_count": expressions,
                 "node_count": nodes,
-                "byte_count": len(canonical),
+                "byte_count": len(raw),
             },
         })
     except Exception as error:  # evidence retains parse failures explicitly
