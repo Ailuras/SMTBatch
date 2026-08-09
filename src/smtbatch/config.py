@@ -19,7 +19,8 @@ else:
 CONFIG_NAME = "smtbatch.toml"
 _PLACEHOLDER = re.compile(r"\{(\w+)\}")
 _REDUCER_PLACEHOLDERS = {
-    "input", "output", "workdir", "predicate_timeout", "predicate",
+    "input", "output", "workdir", "predicate_timeout",
+    "predicate_envelope_timeout", "predicate",
 }
 _CATEGORY_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 

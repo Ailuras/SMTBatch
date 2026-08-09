@@ -462,6 +462,9 @@ class ReductionManager:
         limits = {
             "trial_wall_sec": template_limits.get("trial_wall_sec", 120),
             "predicate_timeout_sec": template_limits.get("predicate_timeout_sec", 25),
+            "predicate_envelope_grace_sec": template_limits.get(
+                "predicate_envelope_grace_sec", 3
+            ),
             "memory_mb": template_limits.get("memory_mb", 8192),
             "preflight_repeats": template_limits.get("preflight_repeats", 1),
             "verification_repeats": template_limits.get(
@@ -530,6 +533,9 @@ class ReductionManager:
             "default_outer_jobs": study["execution"]["outer_jobs"],
             "default_repeats": study["repeats"],
             "predicate_timeout_seconds": study["limits"]["predicate_timeout_sec"],
+            "predicate_envelope_grace_seconds": study["limits"][
+                "predicate_envelope_grace_sec"
+            ],
             "preflight_repeats": study["limits"]["preflight_repeats"],
             "verification_repeats": study["limits"]["verification_repeats"],
             "termination_grace_seconds": study["limits"]["termination_grace_sec"],

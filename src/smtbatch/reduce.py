@@ -55,11 +55,12 @@ EXECUTION_FIELDS = {"outer_jobs", "schedule"}
 LIMIT_FIELDS = {
     "trial_wall_sec", "predicate_timeout_sec", "memory_mb",
     "preflight_repeats", "verification_repeats", "termination_grace_sec",
-    "analysis_horizon_sec",
+    "analysis_horizon_sec", "predicate_envelope_grace_sec",
 }
 TOOL_LIST_PLACEHOLDERS = {"{predicate}"}
 TOOL_SCALAR_PLACEHOLDERS = {
     "input", "output", "workdir", "predicate_timeout",
+    "predicate_envelope_timeout",
 }
 WRAPPER_LIST_PLACEHOLDERS = {"{command}", "{match_args}"}
 WRAPPER_SCALAR_PLACEHOLDERS = {
@@ -312,10 +313,15 @@ def _normalize_limits(value: object) -> dict[str, object]:
     raw = _mapping(value, "limits")
     _only_fields(raw, LIMIT_FIELDS, "limits")
     trial = _positive_number(raw.get("trial_wall_sec", 3600), "limits.trial_wall_sec")
+    predicate_timeout = _positive_number(
+        raw.get("predicate_timeout_sec", 25), "limits.predicate_timeout_sec"
+    )
     return {
         "trial_wall_sec": trial,
-        "predicate_timeout_sec": _positive_number(
-            raw.get("predicate_timeout_sec", 25), "limits.predicate_timeout_sec"
+        "predicate_timeout_sec": predicate_timeout,
+        "predicate_envelope_grace_sec": _positive_number(
+            raw.get("predicate_envelope_grace_sec", 3),
+            "limits.predicate_envelope_grace_sec",
         ),
         "memory_mb": _positive_int(raw.get("memory_mb", 0), "limits.memory_mb", allow_zero=True),
         "preflight_repeats": _positive_int(
@@ -997,11 +1003,16 @@ def _render_tool_command(
         job_id=str(job["job_id"]), attempt=int(job["attempt"]),
     )
     limits = plan["limits"]
+    predicate_envelope_timeout = (
+        float(limits["predicate_timeout_sec"])
+        + float(limits["predicate_envelope_grace_sec"])
+    )
     values = {
         "input": str(benchmark["input"]),
         "output": str(attempt_dir / "output.smt2"),
         "workdir": str(attempt_dir),
         "predicate_timeout": f"{float(limits['predicate_timeout_sec']):g}",
+        "predicate_envelope_timeout": f"{predicate_envelope_timeout:g}",
     }
     command: list[str] = []
     for token in reducer["command"]:
@@ -1166,6 +1177,9 @@ def trajectory_for_attempt(
         initial = (0, 0, int(benchmark.get("input_bytes", 0)))
     golden_finish = finishes.get(golden["call_id"]) if golden else None
     candidates = reducer_starts[1:]
+    final_replays = [
+        row for row in starts if row.get("phase") == "final-replay"
+    ]
     phase_boundaries = []
     exact = False
     best = initial
@@ -1227,12 +1241,66 @@ def trajectory_for_attempt(
         warnings.append(f"{len(journal['incomplete'])} predicate calls lack finish events")
     if journal["truncated_tail"] and not allow_partial:
         warnings.append("evidence has a truncated tail")
+    accepted_best = {
+        "expression_count": best[0],
+        "node_count": best[1],
+        "byte_count": best[2],
+    }
+    final_quality: dict[str, int] | None = accepted_best
+    if not allow_partial:
+        final_quality = None
+        if not final_replays:
+            warnings.append("final replay predicate call is missing")
+        else:
+            identities = []
+            final_complete = True
+            for replay in final_replays:
+                candidate = replay.get("candidate")
+                candidate = candidate if isinstance(candidate, dict) else {}
+                quality = _candidate_quality(replay)
+                identities.append((
+                    candidate.get("sha256"),
+                    candidate.get("canonical_sha256"),
+                    quality,
+                ))
+                if quality is None:
+                    warnings.append("final replay quality is unavailable")
+                    final_complete = False
+                call_id = replay.get("call_id")
+                if not isinstance(call_id, str) or call_id not in finishes:
+                    warnings.append("final replay predicate call is incomplete")
+                    final_complete = False
+            if len(set(identities)) != 1:
+                warnings.append("final replay candidate identities disagree")
+                final_complete = False
+            output_path = attempt_dir / "output.smt2"
+            if output_path.is_symlink() or not output_path.is_file():
+                warnings.append("final replay output is unavailable")
+                final_complete = False
+            elif identities:
+                raw_sha256, _canonical_sha256, quality = identities[0]
+                if raw_sha256 != _sha256_path(output_path):
+                    warnings.append("final replay candidate differs from reducer output")
+                    final_complete = False
+                if quality is not None and quality[2] != output_path.stat().st_size:
+                    warnings.append("final replay byte quality differs from reducer output")
+                    final_complete = False
+            if final_complete:
+                quality = identities[0][2]
+                assert quality is not None
+                final_quality = {
+                    "expression_count": quality[0],
+                    "node_count": quality[1],
+                    "byte_count": quality[2],
+                }
     last_accept = max((point["call_index"] for point in points if point["accepted"]), default=0)
     return {
         "provisional": allow_partial,
         "exact_acceptance": exact,
         "initial": {"expression_count": initial[0], "node_count": initial[1], "byte_count": initial[2]},
-        "final": {"expression_count": best[0], "node_count": best[1], "byte_count": best[2]},
+        "accepted_best": accepted_best,
+        "final": final_quality,
+        "final_replay_calls": len(final_replays),
         "candidate_calls": len(candidates),
         "preserving_calls": preserving_count,
         "accepted_moves": accepted_count,

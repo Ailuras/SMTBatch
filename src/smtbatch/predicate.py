@@ -349,28 +349,40 @@ def main(argv: list[str] | None = None) -> int:
 
         def _forward(signum: int, _frame: object) -> None:
             # SMTBatch terminates the whole process group on trial timeout.
-            # Forward the signal to the predicate child and stay alive long
-            # enough to close this journal entry with a finish event.
-            interrupted["signum"] = signum
-            try:
-                os.killpg(process.pid, signum)
-            except ProcessLookupError:
-                pass
-
-        signal.signal(signal.SIGTERM, _forward)
-        signal.signal(signal.SIGINT, _forward)
-        try:
-            stdout, stderr = process.communicate(timeout=args.solver_timeout + 1.0)
-            returncode = process.returncode
-        except subprocess.TimeoutExpired:
-            timed_out = True
+            # Kill the isolated solver group immediately and stay alive long
+            # enough to close this journal entry with a finish event.  A
+            # forwarded TERM can otherwise consume the reducer's entire hard
+            # kill grace and leave a start without a finish.
+            interrupted.setdefault("signum", signum)
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            stdout, stderr = process.communicate()
-            returncode = 124
-            error = "predicate wrapper timeout"
+
+        previous_handlers = {
+            signum: signal.getsignal(signum)
+            for signum in (signal.SIGTERM, signal.SIGINT)
+        }
+        for signum in previous_handlers:
+            signal.signal(signum, _forward)
+        try:
+            try:
+                stdout, stderr = process.communicate(
+                    timeout=args.solver_timeout + 1.0
+                )
+                returncode = process.returncode
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                stdout, stderr = process.communicate()
+                returncode = 124
+                error = "predicate wrapper timeout"
+        finally:
+            for signum, handler in previous_handlers.items():
+                signal.signal(signum, handler)
         if interrupted:
             killed = True
             timed_out = False

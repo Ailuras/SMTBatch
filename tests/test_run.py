@@ -2,8 +2,11 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -77,7 +80,8 @@ require_clean = true
                 "execution": {"outer_jobs": 2, "schedule": "strict-wave"},
                 "predicate_wrapper": {
                     "command": [
-                        "/bin/true", "{journal}", "{phase}", "{match_args}", "{command}"
+                        "/bin/true", "{journal}", "{phase}",
+                        "{predicate_timeout}", "{match_args}", "{command}"
                     ],
                     "env": {},
                 },
@@ -95,6 +99,7 @@ require_clean = true
                 "limits": {
                     "trial_wall_sec": 30,
                     "predicate_timeout_sec": 2,
+                    "predicate_envelope_grace_sec": 3,
                     "memory_mb": 128,
                     "preflight_repeats": 1,
                     "verification_repeats": 1,
@@ -305,6 +310,186 @@ class PlanTests(ReductionFixture):
         self.assertIsNotNone(result["returncode"])
         self.assertGreaterEqual(result["cleanup_wall_sec"], 0)
 
+    def test_reducer_timeout_envelope_exceeds_solver_budget(self) -> None:
+        study = reduce.load_study(self.study_path)
+        plan = reduce.build_plan(study, reducers=["r1"])
+        self.assertEqual(plan["limits"]["predicate_timeout_sec"], 2)
+        self.assertEqual(plan["limits"]["predicate_envelope_grace_sec"], 3)
+        benchmark = plan["benchmarks"][0]
+        job = {**plan["jobs"][0], "attempt": 1}
+        attempt = self.root / "render-attempt"
+        attempt.mkdir()
+        wrapper, _environment = reduce._render_wrapper(
+            plan, benchmark, journal=attempt / "predicate.jsonl",
+            phase="reducer", job_id=str(job["job_id"]), attempt=1,
+        )
+        self.assertEqual(wrapper[3], "2")
+        reducer = {
+            **plan["reducers"][0],
+            "command": [
+                "/bin/true", "{input}", "{output}", "--timeout",
+                "{predicate_envelope_timeout}", "{predicate}",
+            ],
+        }
+        command, _environment = reduce._render_tool_command(
+            plan, benchmark, reducer, job, attempt
+        )
+        self.assertEqual(command[3:5], ["--timeout", "5"])
+        self.assertEqual(command[5:], wrapper)
+
+    def test_predicate_signal_kills_child_and_closes_journal(self) -> None:
+        solver = self.root / "ignores-term.py"
+        ready = self.root / "solver-ready"
+        solver.write_text(
+            "import os, pathlib, signal, sys, time\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+            "time.sleep(30)\n",
+            encoding="utf-8",
+        )
+        journal = self.root / "signalled-predicate.jsonl"
+        candidate = self.root / "benchmarks" / "case.smt2"
+        process = subprocess.Popen(
+            [
+                sys.executable, str(Path(predicate.__file__).resolve()),
+                "--log", str(journal), "--phase", "reducer",
+                "--solver-timeout", "30", "--",
+                sys.executable, str(solver), str(ready), str(candidate),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        deadline = time.monotonic() + 5
+        while (
+            not ready.is_file()
+            and process.poll() is None
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+        self.assertTrue(ready.is_file(), "predicate child did not become ready")
+        started = time.monotonic()
+        process.send_signal(signal.SIGTERM)
+        process.communicate(timeout=3)
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertEqual(process.returncode, 128 + signal.SIGTERM)
+        rows = [json.loads(line) for line in journal.read_text().splitlines()]
+        starts = [row for row in rows if row.get("event") == "start"]
+        finishes = [row for row in rows if row.get("event") == "finish"]
+        self.assertEqual(len(starts), 1)
+        self.assertEqual(len(finishes), 1)
+        self.assertEqual(finishes[0]["call_id"], starts[0]["call_id"])
+        self.assertTrue(finishes[0]["killed"])
+        self.assertFalse(finishes[0]["timed_out"])
+
+    def test_sealed_trajectory_uses_final_replay_quality(self) -> None:
+        output = b"(check-sat)\n"
+        output_sha256 = hashlib.sha256(output).hexdigest()
+
+        def start(
+            call_id: str, sequence: int, phase: str,
+            raw_sha256: str, canonical_sha256: str,
+            quality: tuple[int, int, int],
+        ) -> dict[str, object]:
+            return {
+                "event": "start", "call_id": call_id,
+                "call_seq": sequence, "phase": phase,
+                "monotonic_ns": sequence * 1_000_000,
+                "candidate": {
+                    "sha256": raw_sha256,
+                    "canonical_sha256": canonical_sha256,
+                    "quality": {
+                        "expression_count": quality[0],
+                        "node_count": quality[1],
+                        "byte_count": quality[2],
+                    },
+                },
+            }
+
+        def finish(call_id: str, sequence: int) -> dict[str, object]:
+            return {
+                "event": "finish", "call_id": call_id,
+                "monotonic_ns": sequence * 1_000_000 + 500_000,
+                "returncode": 0, "timed_out": False, "killed": False,
+                "stdout_sha256": "1" * 64, "stderr_sha256": "2" * 64,
+            }
+
+        golden = start(
+            "golden", 1, "reducer", "a" * 64, "A" * 64, (4, 20, 80)
+        )
+        accepted = start(
+            "accepted", 2, "reducer", "b" * 64, "B" * 64, (1, 4, 8)
+        )
+        final = start(
+            "final", 3, "final-replay", output_sha256, "C" * 64,
+            (1, 5, len(output)),
+        )
+        rows = [
+            golden, finish("golden", 1),
+            accepted, finish("accepted", 2),
+            final, finish("final", 3),
+        ]
+        attempt = self.root / "final-replay-attempt"
+        attempt.mkdir()
+        (attempt / "output.smt2").write_bytes(output)
+        (attempt / "predicate.jsonl").write_text(
+            "".join(json.dumps(row) + "\n" for row in rows),
+            encoding="utf-8",
+        )
+        benchmark = {
+            "input_bytes": 80,
+            "predicate": {
+                "match": {"ignore_stdout": True, "ignore_stderr": True},
+            },
+        }
+        trajectory = reduce.trajectory_for_attempt(
+            attempt, benchmark, {}, allow_partial=False
+        )
+        self.assertEqual(trajectory["accepted_best"]["byte_count"], 8)
+        self.assertEqual(trajectory["points"][-1]["byte_count"], 8)
+        self.assertEqual(trajectory["final"]["byte_count"], len(output))
+        self.assertTrue(trajectory["evidence_ok"])
+
+        missing = self.root / "missing-final-replay"
+        missing.mkdir()
+        (missing / "output.smt2").write_bytes(output)
+        (missing / "predicate.jsonl").write_text(
+            "".join(json.dumps(row) + "\n" for row in rows[:4]),
+            encoding="utf-8",
+        )
+        missing_health = reduce._evidence_health(
+            missing, benchmark, {}, allow_partial=False
+        )
+        self.assertFalse(missing_health["ok"])
+        self.assertIsNone(missing_health["trajectory"]["final"])
+        self.assertIn(
+            "final replay predicate call is missing",
+            missing_health["warnings"],
+        )
+
+        inconsistent = self.root / "inconsistent-final-replay"
+        inconsistent.mkdir()
+        (inconsistent / "output.smt2").write_bytes(output)
+        second_final = start(
+            "final-2", 4, "final-replay", "d" * 64, "D" * 64,
+            (2, 6, len(output)),
+        )
+        inconsistent_rows = [
+            *rows, second_final, finish("final-2", 4),
+        ]
+        (inconsistent / "predicate.jsonl").write_text(
+            "".join(json.dumps(row) + "\n" for row in inconsistent_rows),
+            encoding="utf-8",
+        )
+        inconsistent_health = reduce._evidence_health(
+            inconsistent, benchmark, {}, allow_partial=False
+        )
+        self.assertFalse(inconsistent_health["ok"])
+        self.assertIsNone(inconsistent_health["trajectory"]["final"])
+        self.assertIn(
+            "final replay candidate identities disagree",
+            inconsistent_health["warnings"],
+        )
+
     def test_jsonl_reader_reports_unfinished_tail_without_crashing(self) -> None:
         path = self.root / "journal.jsonl"
         path.write_text('{"event":"start","call_id":"one"}\n{"event":', encoding="utf-8")
@@ -316,6 +501,10 @@ class PlanTests(ReductionFixture):
     def test_predicate_journal_joins_validated_internal_correlation(self) -> None:
         journal = self.root / "predicate.jsonl"
         candidate = self.root / "benchmarks" / "case.smt2"
+        original_handlers = {
+            signum: signal.getsignal(signum)
+            for signum in (signal.SIGTERM, signal.SIGINT)
+        }
         arguments = [
             "--log", str(journal), "--phase", "reducer",
             "--solver-timeout", "1", "--ignore-stdout", "--ignore-stderr",
@@ -368,6 +557,13 @@ class PlanTests(ReductionFixture):
                 for row in rows
             ),
             1,
+        )
+        self.assertEqual(
+            {
+                signum: signal.getsignal(signum)
+                for signum in (signal.SIGTERM, signal.SIGINT)
+            },
+            original_handlers,
         )
 
     def test_predicate_rejects_partial_or_inconsistent_correlation(self) -> None:
