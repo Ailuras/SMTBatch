@@ -637,6 +637,25 @@ class ExperimentManager:
             raise ValueError("run process has already exited") from None
         return {"run_id": run_id, "status": "interrupting"}
 
+    def delete_run(self, run_id: str) -> dict[str, object]:
+        """Delete one experiment directory after confirming that it is not active."""
+        run_dir = self._run_dir(run_id)
+        if not run_dir.is_dir():
+            raise ValueError("experiment not found")
+        if self._run_is_live(run_id):
+            raise ValueError("experiment is still running; cancel it before deleting")
+
+        try:
+            shutil.rmtree(run_dir)
+        except FileNotFoundError:
+            raise ValueError("experiment not found") from None
+
+        self._progress_cache.pop(run_id, None)
+        with self._metrics_lock:
+            self._metrics_cache.pop(run_id, None)
+        _RUN_CACHE.pop(run_dir / "progress.json", None)
+        return {"run_id": run_id, "status": "deleted"}
+
     def resume(self, run_id: str, request: object) -> dict[str, object]:
         """Relaunch an interrupted or failed run, rerunning only its missing jobs."""
         if not isinstance(request, dict):
@@ -1317,6 +1336,18 @@ def handler_factory(manager: ExperimentManager) -> type[BaseHTTPRequestHandler]:
                     self._send_json({"error": f"unable to start resume: {exc}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
                     return
                 self._send_json(response, HTTPStatus.ACCEPTED)
+                return
+            match = re.fullmatch(r"/api/runs/(.+)/delete", request_path)
+            if match:
+                try:
+                    response = manager.delete_run(match.group(1))
+                except ValueError as exc:
+                    self._send_json({"error": str(exc)}, HTTPStatus.CONFLICT)
+                    return
+                except OSError as exc:
+                    self._send_json({"error": f"unable to delete experiment: {exc}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+                    return
+                self._send_json(response)
                 return
             match = re.fullmatch(r"/api/runs/(.+)/export", request_path)
             if match:

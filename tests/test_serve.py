@@ -384,6 +384,38 @@ command = ["{binary}", "{input}"]
         with self.assertRaisesRegex(ValueError, "no active run process"):
             self.manager.cancel_run("sample-run")
 
+    def test_delete_run_removes_only_the_selected_results_directory(self) -> None:
+        sibling = self.results / "keep-run"
+        sibling.mkdir()
+        (sibling / "marker.txt").write_text("keep\n", encoding="utf-8")
+
+        response = self.manager.delete_run("sample-run")
+
+        self.assertEqual(response, {"run_id": "sample-run", "status": "deleted"})
+        self.assertFalse((self.results / "sample-run").exists())
+        self.assertTrue((sibling / "marker.txt").is_file())
+
+    def test_delete_run_rejects_active_experiment(self) -> None:
+        run_dir = self._interrupted_run("active-run")
+        (run_dir / "progress.json").write_text(
+            json.dumps({"status": "running", "updated_at": "2026-01-01T00:00:00+00:00"}),
+            encoding="utf-8",
+        )
+        lock = _RunLock(run_dir)
+        lock.acquire()
+        try:
+            with self.assertRaisesRegex(ValueError, "still running"):
+                self.manager.delete_run("active-run")
+            self.assertTrue(run_dir.is_dir())
+        finally:
+            lock.release()
+
+    def test_delete_run_rejects_missing_or_escaping_directory(self) -> None:
+        with self.assertRaisesRegex(ValueError, "not found"):
+            self.manager.delete_run("missing-run")
+        with self.assertRaisesRegex(ValueError, "invalid experiment name"):
+            self.manager.delete_run("../outside")
+
     def test_config_port_defaults_to_8000_and_reads_toml(self) -> None:
         from smtbatch.config import load_config
 
