@@ -515,6 +515,11 @@ class ExperimentManager:
         selected_file_count = len(files)
         pairs = len(files) * len(solvers)
         batches = math.ceil(pairs / jobs) if pairs else 0
+        # A job in this run can never outlast the watchdog deadline, so cap
+        # historical durations (which may have been recorded under a larger
+        # timeout) at it; otherwise the LPT estimate can exceed the worst-case
+        # bound, which is derived from the current timeout budget.
+        watchdog_seconds = timeout + max(15.0, timeout * 0.5)
         history = self._historical_durations()
         predicted: list[float] = []
         historical_pairs = 0
@@ -527,9 +532,8 @@ class ExperimentManager:
                     predicted.append(timeout)
                 else:
                     historical_pairs += 1
-                    predicted.append(duration)
+                    predicted.append(min(duration, watchdog_seconds))
         estimated_seconds = self._scheduled_duration(predicted, jobs)
-        watchdog_seconds = timeout + max(15.0, timeout * 0.5)
         return {
             "input": str(input_dir),
             # Keep the total benchmark-set size separate from the limit-bounded
