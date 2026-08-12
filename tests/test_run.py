@@ -25,6 +25,8 @@ from smtbatch.run import (
     parse_args,
     main,
     run_queue,
+    solver_artifacts,
+    solver_bundle_hash,
 )
 from smtbatch.task import JobSpec, load_jobs
 
@@ -71,6 +73,9 @@ class ResumeLogicTests(unittest.TestCase):
         for job_id in range(1, completed + 1):
             rows.append(f"{job_id}\talpha\t{self.formulas[job_id - 1]}\tsat\t0.5\t0\t")
         (run_dir / "results.tsv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+        artifacts = solver_artifacts(self.binary)
+        artifacts_json = json.dumps(artifacts, separators=(",", ":"), sort_keys=True)
+        bundle_hash = solver_bundle_hash(artifacts)
         (run_dir / "metadata.txt").write_text(
             "format=pair-queue-v1\n"
             "solvers=alpha\n"
@@ -80,6 +85,9 @@ class ResumeLogicTests(unittest.TestCase):
             f"solver_config={self.config_path}\n"
             f"alpha_solver_binary={self.binary}\n"
             f"alpha_solver_binary_sha256={hashlib.sha256(self.binary.read_bytes()).hexdigest()}\n"
+            f"alpha_solver_artifacts_json={artifacts_json}\n"
+            f"alpha_solver_bundle_sha256={bundle_hash}\n"
+            "alpha_solver_bundle_schema=linked-artifacts-v1\n"
             'alpha_solver_command_json=["{binary}","{input}"]\n',
             encoding="utf-8",
         )
@@ -164,6 +172,40 @@ class ResumeLogicTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "solver command changed"):
             _prepare_resume(parse_args(["--resume", "--output", str(command_run)]))
+
+    def test_prepare_resume_rejects_linked_artifact_bundle_drift(self) -> None:
+        run_dir = self._make_run("bundle-drift", completed=1)
+        changed_artifacts = {
+            **solver_artifacts(self.binary),
+            "libchanged.so": {"path": "/libchanged.so", "sha256": "changed"},
+        }
+        with mock.patch("smtbatch.run.solver_artifacts", return_value=changed_artifacts):
+            with self.assertRaisesRegex(ValueError, "linked-artifact bundle changed"):
+                _prepare_resume(parse_args(["--resume", "--output", str(run_dir)]))
+
+    def test_prepare_fresh_records_linked_artifact_bundle(self) -> None:
+        output = self.root / "results" / "fresh-provenance"
+        plan = _prepare_fresh(
+            parse_args(
+                [
+                    "--solver",
+                    "alpha",
+                    "--input",
+                    str(self.root / "inputs"),
+                    "--output",
+                    str(output),
+                ]
+            )
+        )
+        metadata = (output / "metadata.txt").read_text(encoding="utf-8")
+        artifacts = solver_artifacts(self.binary)
+        self.assertIn(
+            f"alpha_solver_bundle_sha256={solver_bundle_hash(artifacts)}\n",
+            metadata,
+        )
+        self.assertIn("alpha_solver_artifacts_json=", metadata)
+        self.assertIn("alpha_solver_bundle_schema=linked-artifacts-v1\n", metadata)
+        self.assertEqual(plan.pair_count, 4)
 
     def test_prepare_resume_preserves_initial_metadata_and_appends_history(self) -> None:
         run_dir = self._make_run("history", completed=1)

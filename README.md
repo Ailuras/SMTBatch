@@ -74,9 +74,12 @@ Options: `--host`, `--port`, `--inputs-root`, `--results`. An explicit `--port`
 overrides `[defaults] port`.
 
 Resume treats `jobs.tsv` as immutable and accepts only complete result rows that
-match it exactly. It also verifies the recorded solver binary hash and, for new
-runs, the command template before appending results. A per-run OS lock prevents
-concurrent controllers from writing the same result stream.
+match it exactly. It verifies the recorded solver binary, command template, and,
+for new runs, a content hash over every file-backed dependency reported by
+`ldd` before appending results. This linked-artifact bundle prevents an
+unchanged launcher from resuming against silently rebuilt shared libraries. A
+per-run OS lock prevents concurrent controllers from writing the same result
+stream.
 
 Select a run from the history to load its separate report page. The report
 loads its summary first; scatter data and server-paginated formula rows load
@@ -87,4 +90,7 @@ Every run directory contains `jobs.tsv` (immutable queue), `results.tsv`
 (immutable initial provenance), and `logs/` (one output file per job, kept for
 debugging). Resumed runs additionally contain append-only
 `resume_history.jsonl`, preserving each resume attempt and its worker count.
-The Excel export contains only log paths.
+Solver provenance in `metadata.txt` includes the resolved artifact inventory
+and a path-independent bundle hash. It also records the commit and dirty state
+of both the project being measured and the SMTBatch runner repository. The
+Excel export contains only log paths.

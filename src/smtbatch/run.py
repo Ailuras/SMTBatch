@@ -19,6 +19,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import signal
 import socket
@@ -37,6 +38,7 @@ from .task import RESULT_FIELDS, JobSpec, load_jobs, summarize_performance, writ
 
 
 RESULT_ORDER = ("sat", "unsat", "unknown", "timeout", "error")
+SOLVER_BUNDLE_SCHEMA = "linked-artifacts-v1"
 
 
 @contextmanager
@@ -239,7 +241,61 @@ def sha256_path(path: Path) -> str:
     return digest.hexdigest()
 
 
-def solver_provenance(spec: SolverSpec) -> dict[str, str]:
+def solver_artifacts(binary: Path) -> dict[str, dict[str, str]]:
+    """Hash an executable and every file-backed dependency reported by ldd."""
+    artifacts = {
+        "binary": {
+            "path": str(binary.resolve()),
+            "sha256": sha256_path(binary),
+        }
+    }
+    try:
+        completed = subprocess.run(
+            ["ldd", str(binary)],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return artifacts
+    indirect = re.compile(r"^\s*(\S+)\s+=>\s+(\S+)")
+    direct = re.compile(r"^\s*(/\S+)\s+\(")
+    for line in completed.stdout.splitlines():
+        match = indirect.match(line)
+        if match is not None:
+            name, raw_path = match.groups()
+        else:
+            match = direct.match(line)
+            if match is None:
+                continue
+            raw_path = match.group(1)
+            name = Path(raw_path).name
+        dependency = Path(raw_path)
+        if dependency.is_file():
+            artifacts[name] = {
+                "path": str(dependency.resolve()),
+                "sha256": sha256_path(dependency),
+            }
+    return dict(sorted(artifacts.items()))
+
+
+def solver_bundle_hash(artifacts: dict[str, dict[str, str]]) -> str:
+    """Hash artifact identities and contents, independently of host paths."""
+    digest = hashlib.sha256()
+    for name, artifact in sorted(artifacts.items()):
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(artifact["sha256"].encode("ascii"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def solver_provenance(
+    spec: SolverSpec,
+    artifact_cache: dict[Path, dict[str, dict[str, str]]] | None = None,
+) -> dict[str, str]:
     completed = subprocess.run(
         [str(spec.binary), *spec.version_args],
         text=True,
@@ -251,16 +307,23 @@ def solver_provenance(spec: SolverSpec) -> dict[str, str]:
     if completed.returncode != 0:
         raise RuntimeError(f"solver version query failed for {spec.name}: {completed.stdout.strip()}")
     version = completed.stdout.splitlines()[0].strip() if completed.stdout.splitlines() else ""
+    artifacts = None if artifact_cache is None else artifact_cache.get(spec.binary)
+    if artifacts is None:
+        artifacts = solver_artifacts(spec.binary)
+        if artifact_cache is not None:
+            artifact_cache[spec.binary] = artifacts
     return {
         "solver_binary": str(spec.binary),
         "solver_binary_sha256": sha256_path(spec.binary),
+        "solver_artifacts_json": json.dumps(artifacts, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+        "solver_bundle_schema": SOLVER_BUNDLE_SCHEMA,
+        "solver_bundle_sha256": solver_bundle_hash(artifacts),
         "solver_version": version,
         "solver_command_json": json.dumps(list(spec.command), ensure_ascii=False, separators=(",", ":")),
     }
 
 
-def repository_provenance() -> dict[str, str]:
-    root = Path.cwd()
+def _git_provenance(root: Path) -> dict[str, str]:
     commit = subprocess.run(
         ["git", "-C", str(root), "rev-parse", "HEAD"],
         text=True,
@@ -276,8 +339,19 @@ def repository_provenance() -> dict[str, str]:
         check=False,
     )
     return {
-        "repository_commit": commit.stdout.strip() if commit.returncode == 0 else "",
-        "repository_dirty": "yes" if status.returncode != 0 or status.stdout.strip() else "no",
+        "commit": commit.stdout.strip() if commit.returncode == 0 else "",
+        "dirty": "yes" if status.returncode != 0 or status.stdout.strip() else "no",
+    }
+
+
+def repository_provenance() -> dict[str, str]:
+    project = _git_provenance(Path.cwd())
+    runner = _git_provenance(Path(__file__).resolve().parent)
+    return {
+        "repository_commit": project["commit"],
+        "repository_dirty": project["dirty"],
+        "runner_repository_commit": runner["commit"],
+        "runner_repository_dirty": runner["dirty"],
     }
 
 
@@ -557,6 +631,7 @@ def _verify_solver_provenance(
     spec: SolverSpec,
     metadata: dict[str, str],
     binary_hashes: dict[Path, str],
+    artifact_cache: dict[Path, dict[str, dict[str, str]]],
 ) -> None:
     """Reject a resume when an executable or recorded command has drifted."""
     prefix = f"{name}_"
@@ -572,6 +647,16 @@ def _verify_solver_provenance(
         binary_hashes[spec.binary] = current_sha256
     if current_sha256 != recorded_sha256:
         raise ValueError(f"solver binary hash changed since the run started: {name}")
+    recorded_bundle = metadata.get(prefix + "solver_bundle_sha256")
+    if recorded_bundle:
+        if metadata.get(prefix + "solver_bundle_schema") != SOLVER_BUNDLE_SCHEMA:
+            raise ValueError(f"unsupported solver bundle schema for {name}")
+        artifacts = artifact_cache.get(spec.binary)
+        if artifacts is None:
+            artifacts = solver_artifacts(spec.binary)
+            artifact_cache[spec.binary] = artifacts
+        if solver_bundle_hash(artifacts) != recorded_bundle:
+            raise ValueError(f"solver linked-artifact bundle changed since the run started: {name}")
     recorded_command = metadata.get(prefix + "solver_command_json")
     if recorded_command:
         try:
@@ -632,7 +717,10 @@ def _prepare_fresh(args: argparse.Namespace) -> _RunPlan:
     config = load_config()
     solvers = normalize_solvers(args.solver, config)
     specs = {name: config.solvers[name] for name in solvers}
-    provenance = {name: solver_provenance(spec) for name, spec in specs.items()}
+    artifact_cache: dict[Path, dict[str, dict[str, str]]] = {}
+    provenance = {
+        name: solver_provenance(spec, artifact_cache) for name, spec in specs.items()
+    }
     files = discover_files(args.input, args.limit)
     if not files:
         raise ValueError("no .smt2 files selected")
@@ -701,8 +789,11 @@ def _prepare_resume(args: argparse.Namespace) -> _RunPlan:
         raise ValueError(f"resume needs solver definitions missing from {config.path}: {', '.join(missing)}")
     specs = {name: config.solvers[name] for name in solvers}
     binary_hashes: dict[Path, str] = {}
+    artifact_cache: dict[Path, dict[str, dict[str, str]]] = {}
     for name, spec in specs.items():
-        _verify_solver_provenance(name, spec, metadata, binary_hashes)
+        _verify_solver_provenance(
+            name, spec, metadata, binary_hashes, artifact_cache
+        )
     try:
         timeout = float(metadata.get("timeout") or "")
     except ValueError:
