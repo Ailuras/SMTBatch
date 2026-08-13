@@ -1,6 +1,7 @@
 import http.client
 import json
 from http.server import ThreadingHTTPServer
+from pathlib import Path
 import subprocess
 import threading
 import unittest
@@ -26,6 +27,11 @@ class ManagerTests(ReductionFixture):
         self.assertEqual(catalog["default_repeats"], 2)
         self.assertEqual(catalog["total_benchmarks"], 1)
         self.assertEqual(catalog["identity"]["stdout"], "fixture-identity-v1\n")
+        identity_paths = [Path(item["path"]).resolve() for item in catalog["identity"]["assets"]]
+        self.assertTrue(identity_paths)
+        for path in identity_paths:
+            path.relative_to(self.root.resolve())
+        self.assertTrue(any(path.name == "identity.sh" for path in identity_paths))
 
     def test_catalog_identity_failure_blocks_launch(self) -> None:
         self.config_path.write_text(
@@ -187,6 +193,10 @@ class HttpTests(ReductionFixture):
         self.assertIn('id="reducers"', html)
         self.assertIn("FREEZE RUN PLAN", html)
         self.assertIn("run-card", html)
+        self.assertIn("run-card-body", html)
+        self.assertIn("branch_error", html)
+        self.assertIn("Launch gated", html)
+        self.assertNotIn('<a class="run-card"', html)
         self.assertIn("/report", html)
         self.assertNotIn("Open report", html)
         self.assertIn("calculated workload", html)

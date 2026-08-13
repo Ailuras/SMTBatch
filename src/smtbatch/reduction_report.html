@@ -5,13 +5,13 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>SMTBatch Reduce · Results</title>
   <style>
-    :root{--page:#07111b;--panel:#0f1d2b;--panel2:#142636;--soft:#0c1926;--line:#263b4e;--text:#e9f1f7;--muted:#8fa5b8;--accent:#47d7a1;--blue:#80bcff;--red:#ff827a;--yellow:#f0c96c}
+    :root{--page:#07111b;--panel:#0f1d2b;--panel2:#142636;--soft:#0c1926;--line:#263b4e;--text:#e9f1f7;--muted:#8fa5b8;--accent:#47d7a1;--blue:#80bcff;--red:#ff827a;--yellow:#f0c96c;--page-max:1320px;--page-gutter:max(22px,calc((100% - var(--page-max)) / 2))}
     *{box-sizing:border-box}
     body{margin:0;background:var(--page);color:var(--text);font:14px/1.45 Inter,ui-sans-serif,system-ui,sans-serif}
-    .top{background:var(--panel);color:var(--text);border-bottom:1px solid var(--line);padding:22px max(22px,calc((100vw - 1320px)/2));display:flex;align-items:center;gap:18px}
+    .top{background:var(--panel);color:var(--text);border-bottom:1px solid var(--line);padding:22px var(--page-gutter);display:flex;align-items:center;gap:18px}
     .top h1{font-size:20px;margin:0;overflow-wrap:anywhere}
     .top a{color:var(--blue);text-decoration:none}
-    .wrap{max-width:1320px;margin:20px auto;padding:0 20px 50px}
+    .wrap{margin:20px 0 0;padding:0 var(--page-gutter) 50px}
     .panel{background:linear-gradient(145deg,rgba(15,29,43,.98),rgba(11,23,35,.98));border:1px solid var(--line);border-radius:13px;padding:18px;margin-bottom:16px}
     .muted{color:var(--muted)}
     .badge{display:inline-block;border-radius:99px;padding:2px 7px;background:rgba(143,165,184,.12);color:var(--muted);font-size:10px;text-transform:uppercase}
@@ -22,8 +22,7 @@
     button{border:1px solid rgba(71,215,161,.6);border-radius:8px;padding:9px 12px;background:var(--accent);color:#061a17;font-weight:700;cursor:pointer;text-decoration:none}
     button.secondary{background:var(--soft);color:var(--text);border-color:var(--line)}
     button:disabled{opacity:.45}
-    .toolbar{display:flex;gap:8px;align-items:end;flex-wrap:wrap}
-    .toolbar{margin:13px 0}
+    .toolbar{display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin:13px 0}
     .toolbar label{font-size:11px;color:var(--muted);text-transform:uppercase}
     .toolbar input,.toolbar select{display:block;margin-top:4px;border:1px solid var(--line);border-radius:7px;padding:8px;background:var(--soft);color:var(--text)}
     .case-list .toolbar{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:0 0 4px;padding-bottom:10px;border-bottom:1px solid var(--line)}
@@ -155,7 +154,9 @@
         const sizeText=v.truncated_avg_bytes==null?'—':fmt(v.truncated_avg_bytes);
         return `<tr><td>${esc(v.label)}</td><td class="num">${fmt(b.completed)}</td><td class="num">${boldIf(winners.time.has(v.id),timeText)}</td><td class="num">${boldIf(winners.truncated.has(v.id),fmt(b.truncated))}</td><td class="num">${boldIf(winners.size.has(v.id),sizeText)}</td><td class="num">${fmt(b.invalid)}</td><td class="num">${fmt(v.predicate_calls)}</td><td class="num">${fmt(v.accepted_moves)}</td></tr>`;
       }).join('')||'<tr><td class="muted">No reducers in this run.</td></tr>';
+      const selectedReducer=$('reducer').value;
       $('reducer').innerHTML='<option value="">All</option>'+Object.values(r.by_reducer||{}).map(v=>`<option value="${esc(v.id)}">${esc(v.label)}</option>`).join('');
+      if([...$('reducer').options].some(option=>option.value===selectedReducer))$('reducer').value=selectedReducer;
     }
 
     async function loadCases(){
@@ -182,7 +183,7 @@
       $('pageLabel').textContent=`${state.page}/${pages}`;
     }
 
-    function axisBox(svg,W,H,maxX,maxY,ylabel){
+    function axisBox(svg,W,H,maxX,maxY){
       const L=52,R=12,T=12,B=30;
       svg.innerHTML='';
       for(let i=0;i<=4;i++){
@@ -200,7 +201,7 @@
       return state.repeatFilter?trials.filter(t=>String(t.repeat)===String(state.repeatFilter)):trials;
     }
     function drawCharts(){
-      const d=state.trajectory,trials=filteredTrials().filter((_,i)=>!state.hidden.has(i));
+      const trials=filteredTrials().filter((_,i)=>!state.hidden.has(i));
       // size chart: step-down of serialized bytes over wall time, one curve per trial
       let series=trials.map(t=>{const pts=(t.trajectory?.points||[]).slice().sort((a,b)=>Number(a.elapsed_sec||0)-Number(b.elapsed_sec||0));return{t,pts}});
       const maxT=Math.max(1,...series.flatMap(s=>s.pts.map(p=>Number(p.elapsed_sec||0))));
@@ -251,11 +252,11 @@
     }
     function toggle(i){state.hidden.has(i)?state.hidden.delete(i):state.hidden.add(i);drawCharts()}
 
-    async function refresh(all=true){
+    async function refresh(){
       try{
         state.summary=await api(summaryUrl());
         renderSummary();
-        if(all)await loadCases();
+        await loadCases();
         if(state.trajectory){state.trajectory=await api(`/api/runs/${encodeURIComponent(runId)}/cases/${encodeURIComponent(state.trajectory.case.id)}/trajectory`);renderTrajectory()}
         $('error').textContent='';
       }catch(e){$('error').textContent=e.message}
@@ -289,11 +290,11 @@
       state.page=1;state.autoOpened=false;loadCases();
     }));
     $('repeatSel').addEventListener('change',()=>{state.repeatFilter=$('repeatSel').value;state.hidden.clear();renderTrajectory()});
-    $('summaryRepeat').addEventListener('change',()=>{state.summaryRepeat=$('summaryRepeat').value;refresh(false)});
+    $('summaryRepeat').addEventListener('change',()=>{state.summaryRepeat=$('summaryRepeat').value;refresh()});
     $('cases').addEventListener('click',event=>{const row=event.target.closest('.case-row');if(row)openCase(row.dataset.case)});
     window.toggle=toggle;
     refresh();
-    setInterval(()=>refresh(false),2500);
+    setInterval(()=>{if(!document.hidden)refresh()},2500);
   </script>
 </body>
 </html>

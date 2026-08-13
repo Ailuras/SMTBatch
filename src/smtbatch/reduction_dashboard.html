@@ -4,23 +4,24 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>SMTBatch Reduction Console</title>
   <style>
-    :root { --page:#07111b; --panel:#0f1d2b; --panel2:#142636; --soft:#0c1926; --line:#263b4e; --text:#e9f1f7; --muted:#8fa5b8; --accent:#47d7a1; --blue:#80bcff; --red:#ff827a; --yellow:#f0c96c; }
+    :root { --page:#07111b; --panel:#0f1d2b; --panel2:#142636; --soft:#0c1926; --line:#263b4e; --text:#e9f1f7; --muted:#8fa5b8; --accent:#47d7a1; --blue:#80bcff; --red:#ff827a; --yellow:#f0c96c; --page-max:1440px; --page-gutter:max(28px,calc((100% - var(--page-max)) / 2)); }
     * { box-sizing:border-box; }
     body { margin:0; background:var(--page); color:var(--text); font:14px/1.45 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
     button,input { font:inherit; }
     button { cursor:pointer; }
     button:disabled { cursor:not-allowed; opacity:.55; }
-    .reduction-topbar{max-width:none;min-height:142px;padding:28px max(28px,calc((100vw - 1440px)/2));display:grid;grid-template-columns:minmax(0,1fr) auto;gap:32px;align-items:center}
+    .reduction-topbar{min-height:142px;padding:28px var(--page-gutter);display:grid;grid-template-columns:minmax(0,1fr) auto;gap:32px;align-items:center}
     .reduction-topbar .brand-kicker{color:var(--accent);font-size:11px;font-weight:800;letter-spacing:.16em}
     .reduction-topbar h1{margin:6px 0 4px;font-size:32px;letter-spacing:-.03em}
     .status-dot{width:10px;height:10px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 4px rgba(71,215,161,.12);flex:none}
+    .status-dot.pending{background:var(--yellow);box-shadow:0 0 0 4px rgba(240,201,108,.12)}
     .status-dot.bad{background:var(--red);box-shadow:0 0 0 4px rgba(255,130,122,.12)}
     .topbar-card{display:grid;gap:8px;padding:9px 16px;border:1px solid var(--line);border-radius:11px;background:linear-gradient(145deg,rgba(15,29,43,.98),rgba(11,23,35,.98));box-shadow:0 12px 40px rgba(0,0,0,.18)}
     .card-metrics{display:flex;gap:24px}
     .card-metrics span{display:block;text-align:center;color:var(--muted);font-size:9px;text-transform:uppercase;letter-spacing:.12em}
     .card-metrics strong{display:block;margin-top:3px;font-size:17px;color:var(--text);text-align:center}
     .card-status{display:flex;gap:6px;align-items:center;justify-content:center;color:var(--text);font-size:11px;font-weight:700;white-space:nowrap}
-    .reduction-shell{max-width:1440px;margin:0 auto;padding:28px max(28px,calc((100vw - 1440px)/2)) 70px}
+    .reduction-shell{padding:28px var(--page-gutter) 70px}
     .reduction-panel{background:linear-gradient(145deg,rgba(15,29,43,.98),rgba(11,23,35,.98));border:1px solid var(--line);border-radius:16px;box-shadow:0 18px 55px rgba(0,0,0,.18);padding:25px;margin-bottom:22px}
     .section-heading{display:flex;gap:20px;justify-content:space-between;align-items:flex-start;margin-bottom:21px}
     .section-heading h2{margin:4px 0 5px;font-size:21px;letter-spacing:-.02em}
@@ -66,9 +67,6 @@
     .field input{width:100%;margin-top:7px;padding:10px 11px;border:1px solid var(--line);border-radius:8px;background:var(--soft);color:var(--text);font:inherit}
     .field input:focus{outline:2px solid rgba(71,215,161,.28);border-color:var(--accent)}
     .field-note{display:block;margin-top:5px;color:var(--muted);font-size:10px;font-weight:400}
-    .plan-card{margin-top:19px;padding:15px;border:1px solid var(--line);border-radius:12px;background:rgba(7,17,27,.58)}
-    .plan-card h3{margin:0 0 11px;font-size:13px}
-    .plan-metrics{display:grid;grid-template-columns:1fr 1fr;gap:8px}
     .plan-metric{padding:9px;border-radius:8px;background:rgba(20,38,54,.75)}
     .plan-metric span{display:block;color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.07em}
     .plan-metric strong{display:block;margin-top:3px;color:var(--text);font-size:13px}
@@ -78,8 +76,10 @@
     .history-heading{align-items:center}
     .history-heading .section-heading{margin-bottom:0}
     .runs{display:grid;grid-template-columns:1fr;gap:10px}
-    .run-card{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(330px,.9fr);overflow:hidden;border:1px solid var(--line);border-radius:10px;background:rgba(20,38,54,.55);color:var(--text);text-decoration:none;transition:border-color .15s,transform .15s}
+    .run-card{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(330px,.9fr);overflow:hidden;border:1px solid var(--line);border-radius:10px;background:rgba(20,38,54,.55);color:var(--text);transition:border-color .15s,transform .15s}
     .run-card:hover{border-color:#4d718c;transform:translateY(-1px)}
+    .run-card-body,.run-results{color:inherit;text-decoration:none}
+    .run-card-body{display:block;min-width:0}
     .run-execution,.run-results{min-width:0;padding:15px}
     .run-execution{border-right:1px solid var(--line)}
     .run-row{display:flex;justify-content:space-between;align-items:center;gap:10px}
@@ -125,7 +125,7 @@
     .confirm-item strong{display:block;margin-top:3px;color:var(--text);font-size:12px}
     .dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
     @media(max-width:1050px){.launch-layout{grid-template-columns:1fr}}
-    @media(max-width:650px){.reduction-topbar{padding:23px 18px}.reduction-shell{padding:18px 14px 45px}.reduction-panel{padding:18px}.section-heading{display:block}.section-heading button{margin-top:14px}.field-grid,.plan-metrics,.confirm-grid{grid-template-columns:1fr}.run-card{grid-template-columns:1fr}.run-execution{border-right:0;border-bottom:1px solid var(--line)}}
+    @media(max-width:650px){.reduction-topbar{padding:23px 18px}.reduction-shell{padding:18px 18px 45px}.reduction-panel{padding:18px}.section-heading{display:block}.section-heading button{margin-top:14px}.field-grid,.confirm-grid{grid-template-columns:1fr}.run-card{grid-template-columns:1fr}.run-execution{border-right:0;border-bottom:1px solid var(--line)}}
 
   </style>
 </head>
@@ -143,7 +143,7 @@
         <div><span>Done</span><strong id="doneCount">0</strong></div>
       </div>
       <div class="card-status">
-        <i id="controllerDot" class="status-dot"></i>
+        <i id="controllerDot" class="status-dot pending"></i>
         <strong id="controllerText">Connecting…</strong>
       </div>
     </div>
@@ -219,12 +219,26 @@
     async function api(url,options){const response=await fetch(url,options);let data={};try{data=await response.json()}catch(_){data={}}if(!response.ok)throw new Error(data.error||response.statusText);return data}
     function updateHeader(){
       const catalog=state.catalog||{},config=state.config||{},ready=Boolean(config.can_launch&&catalog.valid);
-      $('controllerDot').className='status-dot'+(ready?'':' bad');
-      $('controllerText').textContent=ready?'Controller connected':'Launch gated';
+      if(!state.config){
+        $('controllerDot').className='status-dot pending';
+        $('controllerText').textContent='Connecting…';
+        $('controllerText').removeAttribute('title');
+      }else{
+        $('controllerDot').className='status-dot'+(ready?'':' bad');
+        $('controllerText').textContent=ready?'Controller connected':'Launch gated';
+        const reason=gateMessage();
+        if(reason)$('controllerText').title=reason;else $('controllerText').removeAttribute('title');
+      }
       $('runCount').textContent=fmt(state.runs.length);
       $('activeCount').textContent=fmt(state.runs.filter(function(run){return Boolean(run.live)}).length);
       $('doneCount').textContent=fmt(state.runs.filter(function(run){return !Boolean(run.live)}).length);
       $('start').disabled=!ready;
+    }
+    function gateMessage(){
+      const catalog=state.catalog||{},config=state.config||{};
+      if(config.can_launch===false&&config.branch_error)return config.branch_error;
+      if(catalog.valid===false)return catalog.error||'Benchmark catalog unavailable';
+      return '';
     }
     function updateSelectionSummary(){
       const catalog=state.catalog;
@@ -282,22 +296,22 @@
         const reducers=Object.values(run.by_reducer||{}).map(function(item){return item.label||item.id}).join(' · ')||'—';
         const created=run.created_at?new Date(run.created_at).toLocaleString():'unknown';
         const buttons=live?'<button class="run-action" data-action="stop" data-mode="graceful" data-run-id="'+esc(run.run_id)+'">Stop scheduling</button><button class="run-action danger" data-action="stop" data-mode="immediate" data-run-id="'+esc(run.run_id)+'">Abort</button>':(['interrupted','failed'].includes(status)&&state.config&&state.config.can_launch?'<button class="run-action resume" data-action="resume" data-run-id="'+esc(run.run_id)+'">Resume</button>':'');
-        return '<a class="run-card" href="'+url+'"><div class="run-execution">'+
+        return '<article class="run-card"><div class="run-execution"><a class="run-card-body" href="'+url+'">'+
           '<div class="run-row"><span class="run-name">'+esc(run.run_id)+'</span></div>'+
           '<div class="run-summary">'+esc(reducers)+' · '+esc(created)+'</div>'+
           '<div class="run-progress"><i style="width:'+percent+'%"></i></div>'+
           '<div class="run-parameters">'+
             stat('queue',fmt(total)+' total · '+fmt(run.active_trials)+' active · '+fmt(run.pending_trials)+' pending','Total = sampled files × reducers × repeats; active = currently running; pending = still queued',true)+
-          '</div>'+
+          '</div></a>'+
           '<div class="run-status-actions"><span class="run-status '+statusClass(status)+'">'+esc(status)+'</span>'+buttons+'</div></div>'+
-          '<div class="run-results"><div class="run-results-head">Trial outcomes</div><div class="result-grid">'+
+          '<a class="run-results" href="'+url+'"><div class="run-results-head">Trial outcomes</div><div class="result-grid">'+
             resultMetric('completed',fmt(buckets.completed),buckets.completed?'ok':'','Sealed trials that reached a verified fixpoint')+
             resultMetric('truncated',fmt(buckets.truncated),buckets.truncated?'warn':'','Sealed trials cut off before finishing, with a verified partial result')+
             resultMetric('invalid',fmt(buckets.invalid),buckets.invalid?'bad':'','Sealed trials that produced nothing usable')+
           '</div><div class="performance-grid">'+
             perfMetric('Predicate calls',fmt(calls),'Predicate (oracle) invocations — totals across sealed and live trials')+
             perfMetric('Accepted moves',fmt(accepted),'Reduction moves that kept the predicate true — totals across sealed and live trials')+
-          '</div></div></a>';
+          '</div></a></article>';
       }).join('');
       updateHeader();
     }
@@ -346,11 +360,9 @@
     }
     $('runs').addEventListener('click',function(event){
       const button=event.target.closest('[data-action]');if(!button)return;
-      event.preventDefault();
       const id=button.getAttribute('data-run-id');
       if(button.getAttribute('data-action')==='stop')stopRun(id,button.getAttribute('data-mode'));else if(button.getAttribute('data-action')==='resume')resumeRun(id);
     });
-    document.addEventListener('input',function(event){if(['timeout','jobs','maxFiles','repeats'].includes(event.target.id))updateSelectionSummary()});
     $('toggleGroups').onclick=function(){
       const inputs=Array.from(document.querySelectorAll('#categories input'));
       const all=inputs.length>0&&inputs.every(function(input){return input.checked});
@@ -364,23 +376,25 @@
       }
       updateSelectionSummary();
     };
-    $('refresh').onclick=refresh;
+    $('refresh').onclick=function(){refresh(true)};
     $('start').onclick=startRun;
-    async function refresh(){
+    async function refresh(forceCatalog){
       if(state.refreshing)return;
       state.refreshing=true;
       try{
         const catalogResponse=await api('/api/catalog');
         state.config=catalogResponse.config;state.catalog=catalogResponse.catalog;
-        renderCatalog();
+        if(forceCatalog||!state.catalogInitialized)renderCatalog();
         state.runs=(await api('/api/runs')).runs||[];
         renderRuns();updateHeader();
-        if(state.catalog&&state.catalog.valid)setMessage('');
+        const gated=gateMessage();
+        if(gated)setMessage(gated,true);
+        else setMessage('');
       }catch(error){setMessage(error.message||String(error),true);updateHeader()}
       finally{state.refreshing=false}
     }
-    refresh();
-    setInterval(function(){if(!document.hidden)refresh()},3000);
+    refresh(true);
+    setInterval(function(){if(!document.hidden)refresh(false)},3000);
   </script>
 </body>
 

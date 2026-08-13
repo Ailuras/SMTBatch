@@ -10,7 +10,7 @@ import time
 import unittest
 from unittest import mock
 
-from smtbatch import cli, predicate, reduce
+from smtbatch import cli, predicate, provenance, reduce
 from smtbatch.config import load_config, validate_target_branch
 from smtbatch.reduction_serve import ReductionManager
 
@@ -153,6 +153,24 @@ class ConfigTests(ReductionFixture):
         self.assertEqual(config.benchmark_identity_command, ("./identity.sh",))
         self.assertEqual(validate_target_branch(config), "feat/reduction")
 
+    def test_command_snapshot_hashes_project_files_not_the_interpreter(self) -> None:
+        script = self.root / "oracle.py"
+        script.write_text("print('ok')\n", encoding="utf-8")
+        record = provenance.snapshot_command(
+            [sys.executable, str(script)], cwd=self.root, execute=True
+        )
+        paths = [Path(item["path"]).resolve() for item in record["assets"]]
+        self.assertEqual(paths, [script.resolve()])
+        frozen = json.loads(json.dumps(record))
+        frozen["assets"] = list(frozen["assets"]) + [{
+            "path": "/usr/bin/python3",
+            "kind": "file",
+            "file_count": 1,
+            "files": [],
+            "tree_sha256": "not-a-project-file",
+        }]
+        self.assertTrue(provenance.same_snapshot(frozen, record))
+
     def test_legacy_solver_and_project_fields_are_rejected(self) -> None:
         self.config_path.write_text("[defaults]\nmode='reduction'\n[solvers.x]\nbinary='/bin/true'\n", encoding="utf-8")
         with self.assertRaisesRegex(RuntimeError, "unknown top-level config tables"):
@@ -209,6 +227,10 @@ class PlanTests(ReductionFixture):
         self.assertEqual(loaded["format"], "reduction-v3")
         self.assertIn("provenance", loaded["reducers"][0])
         self.assertIn("harness_provenance", loaded)
+        self.assertEqual(
+            [item["path"] for item in loaded["reducers"][0]["provenance"]["assets"]],
+            [str((self.root / "reducer-source.py").resolve())],
+        )
         self.assertEqual(len((output / "jobs.tsv").read_text().splitlines()), 3)
         self.assertNotIn("repository", plan)
 
