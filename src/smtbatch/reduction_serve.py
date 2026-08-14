@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from collections import OrderedDict, Counter
 from datetime import datetime, timezone
+import csv
 import fcntl
 import hashlib
 import json
@@ -139,6 +140,31 @@ def _stat_signature(path: Path) -> tuple[int, int] | None:
     return stat.st_ino, stat.st_size ^ stat.st_mtime_ns
 
 
+def _parse_iso(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _elapsed_seconds(start: object, end: object, *, live: bool) -> float | None:
+    started = _parse_iso(start)
+    if started is None:
+        return None
+    finished = datetime.now(timezone.utc) if live else _parse_iso(end)
+    if finished is None:
+        return None
+    return max(0.0, (finished - started).total_seconds())
+
+
 def _benchmark_features(path: Path) -> set[str]:
     try:
         text = path.read_bytes()
@@ -168,6 +194,9 @@ class ReductionManager:
         self._catalog_cache: tuple[tuple[object, ...], dict[str, object]] | None = None
         self._trajectory_cache: OrderedDict[tuple[str, str], tuple[object, dict[str, object]]] = OrderedDict()
         self._trajectory_lock = threading.Lock()
+        self._plan_cache: OrderedDict[str, tuple[object, dict[str, object]]] = OrderedDict()
+        self._results_cache: OrderedDict[str, tuple[object, list[dict[str, object]]]] = OrderedDict()
+        self._cache_lock = threading.Lock()
 
     def _refresh_config(self) -> None:
         try:
@@ -194,6 +223,10 @@ class ReductionManager:
         if hasattr(self, "_trajectory_lock"):
             with self._trajectory_lock:
                 self._trajectory_cache.clear()
+        if hasattr(self, "_cache_lock"):
+            with self._cache_lock:
+                self._plan_cache.clear()
+                self._results_cache.clear()
 
     def _last_run_path(self) -> Path:
         return self.results_root / ".last-run.json"
@@ -716,11 +749,89 @@ class ReductionManager:
         run_dir = self._run_dir(run_id)
         if not run_dir.is_dir():
             raise ValueError(f"unknown run: {run_id}")
+        signature = (
+            _stat_signature(run_dir / "plan.json"),
+            _stat_signature(run_dir / "plan.complete.json"),
+        )
+        with self._cache_lock:
+            cached = self._plan_cache.get(run_id)
+            if cached is not None and cached[0] == signature:
+                self._plan_cache.move_to_end(run_id)
+                return run_dir, cached[1]
         try:
             plan = reduction.load_plan(run_dir)
         except (OSError, reduction.ReductionError) as exc:
             raise ValueError(str(exc)) from None
+        with self._cache_lock:
+            self._plan_cache[run_id] = (signature, plan)
+            self._plan_cache.move_to_end(run_id)
+            while len(self._plan_cache) > 32:
+                self._plan_cache.popitem(last=False)
         return run_dir, plan
+
+    def _results_from_tsv(self, path: Path) -> list[dict[str, object]] | None:
+        try:
+            with path.open(encoding="utf-8", newline="") as handle:
+                rows = []
+                for row in csv.DictReader(handle, delimiter="\t"):
+                    def opt_int(name: str) -> int | None:
+                        raw = row.get(name, "")
+                        if raw in ("", None):
+                            return None
+                        return int(float(raw))
+                    output_bytes = opt_int("output_bytes")
+                    rows.append({
+                        "job_id": row["job_id"],
+                        "benchmark_id": row["benchmark"],
+                        "reducer_id": row["reducer"],
+                        "repeat": int(row["repeat"]),
+                        "wave": int(row.get("wave") or 0),
+                        "status": row["status"],
+                        "verified": str(row.get("verified", "")).lower() == "true",
+                        "evidence_ok": str(row.get("evidence_ok", "")).lower() == "true",
+                        "predicate_calls": int(row.get("predicate_calls") or 0),
+                        "accepted_moves": int(row.get("accepted_moves") or 0),
+                        "trial_wall_sec": float(row.get("trial_wall_sec") or 0),
+                        "output_quality": None if output_bytes is None else {
+                            "expression_count": opt_int("output_expressions"),
+                            "node_count": opt_int("output_nodes"),
+                            "byte_count": output_bytes,
+                        },
+                    })
+                return rows
+        except (OSError, csv.Error, KeyError, ValueError, TypeError):
+            return None
+
+    def _completed_results(
+        self, run_dir: Path, plan: dict[str, object]
+    ) -> list[dict[str, object]]:
+        signature = (
+            _stat_signature(run_dir / "progress.json"),
+            _stat_signature(run_dir / "plan.json"),
+            _stat_signature(run_dir / "results.tsv"),
+        )
+        key = str(run_dir)
+        with self._cache_lock:
+            cached = self._results_cache.get(key)
+            if cached is not None and cached[0] == signature:
+                self._results_cache.move_to_end(key)
+                return cached[1]
+        indexed = self._results_from_tsv(run_dir / "results.tsv")
+        progress = self._progress(run_dir)
+        try:
+            completed = int(progress.get("completed_jobs", -1))
+        except (TypeError, ValueError):
+            completed = -1
+        if indexed is not None and completed == len(indexed):
+            results = indexed
+        else:
+            results = reduction.completed_results(run_dir, plan, verify_markers=False)
+        with self._cache_lock:
+            self._results_cache[key] = (signature, results)
+            self._results_cache.move_to_end(key)
+            while len(self._results_cache) > 32:
+                self._results_cache.popitem(last=False)
+        return results
 
     def stop(self, run_id: str, body: object) -> dict[str, object]:
         if not isinstance(body, dict) or set(body) != {"mode"}:
@@ -763,58 +874,72 @@ class ReductionManager:
             raise ValueError("run is still active")
         return self._launch(run_id, run_dir) | {"status": "resuming"}
 
+    @staticmethod
+    def _chart_points(points: list[object]) -> list[dict[str, object]]:
+        if not points:
+            return []
+        keep = {0, len(points) - 1}
+        keep.update(
+            index for index, point in enumerate(points)
+            if isinstance(point, dict) and point.get("accepted")
+        )
+        selected = []
+        for index in sorted(keep):
+            point = points[index]
+            if not isinstance(point, dict):
+                continue
+            selected.append({
+                "call_index": point.get("call_index"),
+                "elapsed_sec": point.get("elapsed_sec"),
+                "byte_count": point.get("byte_count"),
+                "accepted": point.get("accepted"),
+                "mutator": point.get("mutator"),
+            })
+        if len(selected) > MAX_TRAJECTORY_POINTS:
+            stride = max(1, len(selected) // (MAX_TRAJECTORY_POINTS - 2))
+            selected = [selected[0], *selected[1:-1:stride], selected[-1]]
+        return selected
+
+    def _case_artifact_signature(
+        self, run_dir: Path, plan: dict[str, object], case_id: str
+    ) -> tuple[object, ...]:
+        parts: list[object] = []
+        for job in plan.get("jobs", []):
+            if not isinstance(job, dict) or job.get("benchmark_id") != case_id:
+                continue
+            job_dir = run_dir / "jobs" / str(job.get("job_id", ""))
+            parts.append(_stat_signature(job_dir / "job.complete.json"))
+            parts.append(_stat_signature(job_dir / "result.json"))
+            attempts = job_dir / "attempts"
+            if not attempts.is_dir():
+                continue
+            for attempt in sorted(attempts.iterdir()):
+                if not attempt.is_dir() or not attempt.name.isdigit():
+                    continue
+                parts.append(_stat_signature(attempt / "predicate.jsonl"))
+                parts.append(_stat_signature(attempt / "attempt.complete.json"))
+        return tuple(parts)
+
     def _trajectory(self, run_id: str, case_id: str) -> dict[str, object]:
         key = (run_id, case_id)
-        run_dir, _ = self._load_run(run_id)
-        signature: list[object] = []
-        jobs_dir = run_dir / "jobs"
-        if jobs_dir.is_dir():
-            for path in sorted(jobs_dir.glob("*/attempts/*/predicate.jsonl")):
-                value = _stat_signature(path)
-                if value is not None:
-                    signature.append((str(path), value))
-                if len(signature) >= 256:
-                    break
-            for path in sorted(jobs_dir.glob("*/attempts/*/reducer.stdout")):
-                value = _stat_signature(path)
-                if value is not None:
-                    signature.append((str(path), value))
-                if len(signature) >= 768:
-                    break
-            for path in sorted(jobs_dir.glob("*/attempts/*/reducer.stderr")):
-                value = _stat_signature(path)
-                if value is not None:
-                    signature.append((str(path), value))
-                if len(signature) >= 1024:
-                    break
-        marker = tuple(signature)
+        run_dir, plan = self._load_run(run_id)
+        marker = self._case_artifact_signature(run_dir, plan, case_id)
         with self._trajectory_lock:
             cached = self._trajectory_cache.get(key)
             if cached is not None and cached[0] == marker:
                 self._trajectory_cache.move_to_end(key)
                 return cached[1]
-        value = reduction.trajectory_for_case(run_dir, case_id)
-        # Keep the HTTP payload bounded while retaining every accepted move,
-        # the endpoints, and an even frontier for large journals.  Formal
-        # report files remain complete and are generated by reduce.report.
+        value = reduction.trajectory_for_case(
+            run_dir, case_id, plan=plan, include_logs=False, verify_artifacts=False,
+        )
+        # Dashboard charts only need the step endpoints: initial, accepted
+        # moves, and the last sample.  Formal report files remain complete.
         bounded = {**value, "trials": []}
         for trial in value.get("trials", []):
             item = dict(trial)
-            trajectory = dict(item.get("trajectory", {}))
-            points = list(trajectory.get("points", []))
-            if len(points) > MAX_TRAJECTORY_POINTS:
-                stride = max(1, len(points) // (MAX_TRAJECTORY_POINTS - 2))
-                keep = {0, len(points) - 1}
-                keep.update(index for index in range(0, len(points), stride))
-                keep.update(
-                    index for index, point in enumerate(points)
-                    if isinstance(point, dict) and point.get("accepted")
-                )
-                selected = [points[index] for index in sorted(keep)]
-                trajectory["points"] = selected
-                warnings = list(trajectory.get("warnings", []))
-                warnings.append("trajectory response was bounded; formal report retains all points")
-                trajectory["warnings"] = list(dict.fromkeys(warnings))
+            item.pop("logs", None)
+            trajectory = dict(item.get("trajectory") or {})
+            trajectory["points"] = self._chart_points(list(trajectory.get("points") or []))
             item["trajectory"] = trajectory
             bounded["trials"].append(item)
         value = bounded
@@ -835,9 +960,130 @@ class ReductionManager:
             return "running"
         return "pending"
 
+    @staticmethod
+    def _normalize_list_status(value: str) -> str:
+        return "completed" if value == "complete" else value
+
+    @staticmethod
+    def _derive_case_status(
+        *, running: bool, planned: int, sealed: int, statuses: dict[str, object]
+    ) -> str:
+        if running:
+            return "running"
+        if planned <= 0 or sealed <= 0 or sealed < planned:
+            return "pending"
+        completed = int(statuses.get("completed", 0) or 0)
+        truncated = int(statuses.get("truncated", 0) or 0)
+        invalid = int(statuses.get("invalid", 0) or 0)
+        if completed == sealed:
+            return "completed"
+        if truncated:
+            return "truncated"
+        if invalid:
+            return "invalid"
+        return "completed"
+
+    @staticmethod
+    def _quality_bytes(qualities: object) -> int | None:
+        values: list[int] = []
+        if not isinstance(qualities, list):
+            return None
+        for item in qualities:
+            if not isinstance(item, dict):
+                continue
+            size = item.get("byte_count")
+            if isinstance(size, bool) or not isinstance(size, (int, float)):
+                continue
+            values.append(int(size))
+        if not values:
+            return None
+        values.sort()
+        return values[(len(values) - 1) // 2]
+
+    @staticmethod
+    def _reducer_outcome(statuses: object) -> str:
+        if not isinstance(statuses, dict):
+            return ""
+        completed = int(statuses.get("completed", 0) or 0)
+        truncated = int(statuses.get("truncated", 0) or 0)
+        invalid = int(statuses.get("invalid", 0) or 0)
+        if truncated:
+            return "truncated"
+        if invalid and not completed:
+            return "invalid"
+        if completed:
+            return "completed"
+        return ""
+
+    def _case_list_view(
+        self, row: dict[str, object], requested_reducer: str, running: bool
+    ) -> dict[str, object]:
+        by_reducer = row.get("by_reducer")
+        if not isinstance(by_reducer, dict):
+            by_reducer = {}
+        selected = (
+            {requested_reducer: by_reducer.get(requested_reducer, {})}
+            if requested_reducer else by_reducer
+        )
+        try:
+            input_bytes = int(row["input_bytes"]) if row.get("input_bytes") is not None else None
+        except (TypeError, ValueError):
+            input_bytes = None
+        reducers = []
+        best_bytes: int | None = None
+        winner_ids: list[str] = []
+        for reducer_id, info in selected.items():
+            if not isinstance(info, dict):
+                continue
+            bytes_value = self._quality_bytes(info.get("final_quality"))
+            ratio = (
+                bytes_value / input_bytes
+                if bytes_value is not None and input_bytes
+                else None
+            )
+            outcome = self._reducer_outcome(info.get("statuses"))
+            reducers.append({
+                "id": reducer_id,
+                "label": info.get("label") or reducer_id,
+                "bytes": bytes_value,
+                "ratio": ratio,
+                "outcome": outcome,
+            })
+            if bytes_value is None:
+                continue
+            if best_bytes is None or bytes_value < best_bytes:
+                best_bytes = bytes_value
+                winner_ids = [str(reducer_id)]
+            elif bytes_value == best_bytes:
+                winner_ids.append(str(reducer_id))
+        for item in reducers:
+            item["winner"] = best_bytes is not None and item.get("bytes") == best_bytes
+        selected_status = (
+            by_reducer.get(requested_reducer) if requested_reducer else row
+        )
+        if not isinstance(selected_status, dict):
+            selected_status = {}
+        planned = int(selected_status.get("planned", 0) or 0)
+        sealed = int(selected_status.get("completed", 0) or 0)
+        statuses = selected_status.get("statuses", {})
+        if not isinstance(statuses, dict):
+            statuses = {}
+        derived = self._derive_case_status(
+            running=running, planned=planned, sealed=sealed, statuses=statuses,
+        )
+        return {
+            **row,
+            "status": derived,
+            "best_bytes": best_bytes,
+            "winner_ids": winner_ids,
+            "reducers": reducers,
+        }
+
     def _case_rows(self, run_id: str, query: dict[str, list[str]]) -> dict[str, object]:
         run_dir, plan = self._load_run(run_id)
-        rows = reduction.case_rows(run_dir)
+        rows = reduction.case_rows(
+            run_dir, plan=plan, results=self._completed_results(run_dir, plan),
+        )
         requested_status = (query.get("status") or [""])[0]
         requested_reducer = (query.get("reducer") or [""])[0]
         requested_family = (query.get("family") or [""])[0]
@@ -862,24 +1108,16 @@ class ReductionManager:
                 continue
             if requested_reducer and requested_reducer not in row.get("by_reducer", {}):
                 continue
-            selected_status = (
-                row["by_reducer"][requested_reducer] if requested_reducer
-                else row
-            )
-            planned = int(selected_status.get("planned", 0) or 0)
-            completed = int(selected_status.get("completed", 0) or 0)
             case_id = str(row["case_id"])
             running = any(
                 benchmark == case_id and (not requested_reducer or reducer == requested_reducer)
                 for benchmark, reducer in active_pairs
             )
-            derived_status = "running" if running else ("complete" if planned and completed >= planned else "pending")
-            sealed_statuses = selected_status.get("statuses", {})
-            if not isinstance(sealed_statuses, dict):
-                sealed_statuses = {}
-            if requested_status and requested_status not in sealed_statuses and requested_status != derived_status:
+            view = self._case_list_view(row, requested_reducer, running)
+            wanted = self._normalize_list_status(requested_status) if requested_status else ""
+            if wanted and wanted != view["status"]:
                 continue
-            filtered.append({**row, "status": derived_status})
+            filtered.append(view)
         sort_key = (query.get("sort") or [""])[0]
         sort_dir = (query.get("sort_dir") or ["asc"])[0]
         reverse = sort_dir == "desc"
@@ -887,6 +1125,11 @@ class ReductionManager:
             filtered.sort(key=lambda r: str(r["case_id"]), reverse=reverse)
         elif sort_key == "status":
             filtered.sort(key=lambda r: str(r.get("status", "")), reverse=reverse)
+        elif sort_key == "bytes":
+            filtered.sort(
+                key=lambda r: (r.get("best_bytes") is None, r.get("best_bytes") or 0),
+                reverse=reverse,
+            )
         try:
             page = max(1, int((query.get("page") or ["1"])[0]))
             page_size = min(MAX_PAGE_SIZE, max(1, int((query.get("page_size") or [str(DEFAULT_PAGE_SIZE)])[0])))
@@ -894,20 +1137,28 @@ class ReductionManager:
             raise ValueError("page and page_size must be integers") from None
         total = len(filtered)
         start = (page - 1) * page_size
+        # List rows already carry sealed call/quality counts. Parsing full
+        # trajectories here made /cases hang on real journals, so the report
+        # left the table empty. Live curves stay on the per-case trajectory API.
         enriched = []
         for row in filtered[start:start + page_size]:
-            trajectory = self._trajectory(run_id, str(row["case_id"]))
+            by_reducer = row.get("by_reducer")
+            if not isinstance(by_reducer, dict):
+                by_reducer = {}
+            selected_items = (
+                {requested_reducer: by_reducer.get(requested_reducer, {})}
+                if requested_reducer else by_reducer
+            )
             calls = accepted = 0
-            current_quality = {}
-            for trial in trajectory.get("trials", []):
-                if requested_reducer and trial.get("reducer_id") != requested_reducer:
+            current_quality: dict[str, object] = {}
+            for reducer_id, info in selected_items.items():
+                if not isinstance(info, dict):
                     continue
-                value = trial.get("trajectory", {})
-                if not isinstance(value, dict):
-                    continue
-                calls += int(value.get("candidate_calls", 0) or 0)
-                accepted += int(value.get("accepted_moves", 0) or 0)
-                current_quality[str(trial.get("reducer_id"))] = value.get("final")
+                calls += int(info.get("predicate_calls", 0) or 0)
+                accepted += int(info.get("accepted_moves", 0) or 0)
+                qualities = info.get("final_quality")
+                if isinstance(qualities, list) and qualities:
+                    current_quality[str(reducer_id)] = qualities[-1]
             enriched.append({
                 **row, "realtime_calls": calls, "realtime_accepted": accepted,
                 "current_quality": current_quality,
@@ -929,7 +1180,7 @@ class ReductionManager:
             state = "interrupted"
         else:
             stale_status = None
-        results = reduction.completed_results(run_dir, plan)
+        results = self._completed_results(run_dir, plan)
         repeat = ((query or {}).get("repeat") or [""])[0]
         by_reducer: dict[str, dict[str, object]] = {}
         for reducer in plan["reducers"]:
@@ -947,14 +1198,37 @@ class ReductionManager:
                 size = quality.get("byte_count")
                 if size is not None:
                     truncated_sizes.append(int(size))
+            completed_sizes = []
+            for item in completed_items:
+                quality = item.get("output_quality") or {}
+                size = quality.get("byte_count")
+                if size is not None:
+                    completed_sizes.append(int(size))
             by_reducer[str(reducer["id"])] = {
                 "id": reducer["id"], "label": reducer["label"],
                 "completed_avg_sec": (sum(completed_times) / len(completed_times)) if completed_times else None,
+                "completed_avg_bytes": (sum(completed_sizes) / len(completed_sizes)) if completed_sizes else None,
                 "truncated_avg_bytes": (sum(truncated_sizes) / len(truncated_sizes)) if truncated_sizes else None,
                 "predicate_calls": sum(int(item.get("predicate_calls", 0) or 0) for item in selected),
                 "accepted_moves": sum(int(item.get("accepted_moves", 0) or 0) for item in selected),
                 "statuses": dict(Counter(str(item.get("status")) for item in selected)),
             }
+        compare_plan = dict(plan)
+        compare_results = results
+        if repeat:
+            compare_results = [
+                item for item in results if str(item.get("repeat")) == repeat
+            ]
+            compare_plan["repeats"] = 1
+        labels = {str(item["id"]): item["label"] for item in plan["reducers"]}
+        comparisons = [
+            {
+                **row,
+                "left_label": labels.get(str(row["left"]), row["left"]),
+                "right_label": labels.get(str(row["right"]), row["right"]),
+            }
+            for row in reduction.comparison_rows(compare_plan, compare_results)
+        ]
         sealed_calls = sum(int(item.get("predicate_calls", 0) or 0) for item in results)
         sealed_accepted = sum(int(item.get("accepted_moves", 0) or 0) for item in results)
         active = progress.get("active", [])
@@ -990,6 +1264,10 @@ class ReductionManager:
                 })
         return {
             "run_id": run_id, "study_id": plan["study_id"], "created_at": plan.get("created_at"),
+            "updated_at": progress.get("updated_at"),
+            "elapsed_sec": _elapsed_seconds(
+                plan.get("created_at"), progress.get("updated_at"), live=live
+            ),
             "status": state,
             "stale_status": stale_status, "live": live,
             "total_trials": len(plan["jobs"]), "completed_trials": len(results),
@@ -1007,6 +1285,7 @@ class ReductionManager:
             "source_sha256": plan["source"]["sha256"],
             "plan_sha256": plan.get("plan_sha256"),
             "by_reducer": by_reducer,
+            "comparisons": comparisons,
             "repeats": sorted({int(item.get("repeat", 0)) for item in results}),
             "realtime_calls": realtime_calls,
             "realtime_accepted": realtime_accepted,

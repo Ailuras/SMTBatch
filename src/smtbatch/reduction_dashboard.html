@@ -109,7 +109,7 @@
     .result-metric.ok strong{color:var(--accent)}
     .result-metric.warn strong{color:var(--yellow)}
     .result-metric.bad strong{color:var(--red)}
-    .performance-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;margin-top:7px}
+    .performance-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px;margin-top:7px}
     .performance-metric{min-width:0;padding:7px 9px;border:1px solid var(--line);border-radius:7px;background:rgba(12,25,38,.7);text-align:center}
     .performance-metric span{display:block;color:var(--muted);font-size:9px;letter-spacing:.07em;text-transform:uppercase}
     .performance-metric strong{display:block;margin-top:3px;color:var(--blue);font:700 14px/1.1 ui-monospace,monospace}
@@ -295,13 +295,15 @@
         const calls=run.calls||0,accepted=run.accepted||0;
         const reducers=Object.values(run.by_reducer||{}).map(function(item){return item.label||item.id}).join(' · ')||'—';
         const created=run.created_at?new Date(run.created_at).toLocaleString():'unknown';
+        const elapsed=run.elapsed_sec==null?'—':duration(run.elapsed_sec);
         const buttons=live?'<button class="run-action" data-action="stop" data-mode="graceful" data-run-id="'+esc(run.run_id)+'">Stop scheduling</button><button class="run-action danger" data-action="stop" data-mode="immediate" data-run-id="'+esc(run.run_id)+'">Abort</button>':(['interrupted','failed'].includes(status)&&state.config&&state.config.can_launch?'<button class="run-action resume" data-action="resume" data-run-id="'+esc(run.run_id)+'">Resume</button>':'');
         return '<article class="run-card"><div class="run-execution"><a class="run-card-body" href="'+url+'">'+
           '<div class="run-row"><span class="run-name">'+esc(run.run_id)+'</span></div>'+
-          '<div class="run-summary">'+esc(reducers)+' · '+esc(created)+'</div>'+
+          '<div class="run-summary">'+esc(reducers)+' · '+esc(created)+' · '+esc(elapsed)+'</div>'+
           '<div class="run-progress"><i style="width:'+percent+'%"></i></div>'+
           '<div class="run-parameters">'+
             stat('queue',fmt(total)+' total · '+fmt(run.active_trials)+' active · '+fmt(run.pending_trials)+' pending','Total = sampled files × reducers × repeats; active = currently running; pending = still queued',true)+
+            stat('runtime',elapsed,'Wall-clock time from plan freeze to last progress update; live runs count up to now')+
           '</div></a>'+
           '<div class="run-status-actions"><span class="run-status '+statusClass(status)+'">'+esc(status)+'</span>'+buttons+'</div></div>'+
           '<a class="run-results" href="'+url+'"><div class="run-results-head">Trial outcomes</div><div class="result-grid">'+
@@ -309,6 +311,7 @@
             resultMetric('truncated',fmt(buckets.truncated),buckets.truncated?'warn':'','Sealed trials cut off before finishing, with a verified partial result')+
             resultMetric('invalid',fmt(buckets.invalid),buckets.invalid?'bad':'','Sealed trials that produced nothing usable')+
           '</div><div class="performance-grid">'+
+            perfMetric('Runtime',elapsed,'Wall-clock duration of this run')+
             perfMetric('Predicate calls',fmt(calls),'Predicate (oracle) invocations — totals across sealed and live trials')+
             perfMetric('Accepted moves',fmt(accepted),'Reduction moves that kept the predicate true — totals across sealed and live trials')+
           '</div></a></article>';

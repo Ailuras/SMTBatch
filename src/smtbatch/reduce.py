@@ -1132,7 +1132,6 @@ def _journal_events(path: Path, *, allow_partial: bool) -> dict[str, object]:
             finishes[call_id] = row
     incomplete = [row["call_id"] for row in starts if row["call_id"] not in finishes]
     return {
-        "rows": rows,
         "starts": starts,
         "finishes": finishes,
         "truncated_tail": truncated,
@@ -1165,7 +1164,7 @@ def _candidate_hash(start: Mapping[str, object]) -> str:
 
 def trajectory_for_attempt(
     attempt_dir: Path, benchmark: Mapping[str, object], reducer: Mapping[str, object],
-    *, allow_partial: bool,
+    *, allow_partial: bool, verify_artifacts: bool = True,
 ) -> dict[str, object]:
     journal = _journal_events(attempt_dir / "predicate.jsonl", allow_partial=allow_partial)
     starts = list(journal["starts"])
@@ -1273,18 +1272,19 @@ def trajectory_for_attempt(
             if len(set(identities)) != 1:
                 warnings.append("final replay candidate identities disagree")
                 final_complete = False
-            output_path = attempt_dir / "output.smt2"
-            if output_path.is_symlink() or not output_path.is_file():
-                warnings.append("final replay output is unavailable")
-                final_complete = False
-            elif identities:
-                raw_sha256, _canonical_sha256, quality = identities[0]
-                if raw_sha256 != _sha256_path(output_path):
-                    warnings.append("final replay candidate differs from reducer output")
+            if verify_artifacts:
+                output_path = attempt_dir / "output.smt2"
+                if output_path.is_symlink() or not output_path.is_file():
+                    warnings.append("final replay output is unavailable")
                     final_complete = False
-                if quality is not None and quality[2] != output_path.stat().st_size:
-                    warnings.append("final replay byte quality differs from reducer output")
-                    final_complete = False
+                elif identities:
+                    raw_sha256, _canonical_sha256, quality = identities[0]
+                    if raw_sha256 != _sha256_path(output_path):
+                        warnings.append("final replay candidate differs from reducer output")
+                        final_complete = False
+                    if quality is not None and quality[2] != output_path.stat().st_size:
+                        warnings.append("final replay byte quality differs from reducer output")
+                        final_complete = False
             if final_complete:
                 quality = identities[0][2]
                 assert quality is not None
@@ -1620,11 +1620,17 @@ def _execute_job(output: Path, plan: Mapping[str, object], job: Mapping[str, obj
             pass
 
 
-def completed_results(output: Path, plan: Mapping[str, object]) -> list[dict[str, object]]:
+def completed_results(
+    output: Path, plan: Mapping[str, object], *, verify_markers: bool = True
+) -> list[dict[str, object]]:
     results = []
     for job in plan["jobs"]:
         job_dir = output / "jobs" / str(job["job_id"])
-        if _marker_valid(job_dir):
+        sealed = (
+            _marker_valid(job_dir) if verify_markers
+            else (job_dir / "job.complete.json").is_file() and (job_dir / "result.json").is_file()
+        )
+        if sealed:
             results.append(_mapping(_read_json(job_dir / "result.json", "job result"), "job result"))
     return results
 
@@ -1891,16 +1897,81 @@ def _attempt_log(attempt_dir: Path, name: str) -> dict[str, object]:
     }
 
 
-def trajectory_for_case(output: Path, case_id: str) -> dict[str, object]:
+def _compact_chart_trajectory(trajectory: Mapping[str, object]) -> dict[str, object]:
+    points = list(trajectory.get("points") or [])
+    keep = {0, len(points) - 1} if points else set()
+    keep.update(
+        index for index, point in enumerate(points)
+        if isinstance(point, dict) and point.get("accepted")
+    )
+    compact_points = []
+    for index in sorted(keep):
+        point = points[index]
+        if not isinstance(point, dict):
+            continue
+        compact_points.append({
+            "call_index": point.get("call_index"),
+            "elapsed_sec": point.get("elapsed_sec"),
+            "byte_count": point.get("byte_count"),
+            "accepted": point.get("accepted"),
+            "mutator": point.get("mutator"),
+        })
+    value = dict(trajectory)
+    value["points"] = compact_points
+    return value
+
+
+def _dashboard_attempt_trajectory(
+    attempt_dir: Path, benchmark: Mapping[str, object], reducer: Mapping[str, object],
+    *, allow_partial: bool, verify_artifacts: bool,
+) -> dict[str, object]:
+    jsonl = attempt_dir / "predicate.jsonl"
+    cache = attempt_dir / "dashboard.chart.json"
+    try:
+        jsonl_mtime = jsonl.stat().st_mtime_ns if jsonl.is_file() else 0
+        if cache.is_file() and cache.stat().st_mtime_ns >= jsonl_mtime:
+            value = json.loads(cache.read_text(encoding="utf-8"))
+            if isinstance(value, dict) and "points" in value:
+                return value
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        pass
+    compact = _compact_chart_trajectory(
+        trajectory_for_attempt(
+            attempt_dir, benchmark, reducer,
+            allow_partial=allow_partial, verify_artifacts=verify_artifacts,
+        )
+    )
+    if not allow_partial:
+        try:
+            cache.write_text(
+                json.dumps(compact, ensure_ascii=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+    return compact
+
+
+def trajectory_for_case(
+    output: Path,
+    case_id: str,
+    *,
+    plan: Mapping[str, object] | None = None,
+    include_logs: bool = True,
+    verify_artifacts: bool = True,
+) -> dict[str, object]:
     output = output.expanduser().resolve()
-    plan = load_plan(output)
+    plan = dict(plan) if plan is not None else load_plan(output)
     benchmark = _lookup(plan, "benchmarks", case_id)
     trials = []
     for job in plan["jobs"]:
         if job["benchmark_id"] != case_id:
             continue
         job_dir = output / "jobs" / str(job["job_id"])
-        sealed = _marker_valid(job_dir)
+        if verify_artifacts:
+            sealed = _marker_valid(job_dir)
+        else:
+            sealed = (job_dir / "job.complete.json").is_file() and (job_dir / "result.json").is_file()
         result = (
             _mapping(_read_json(job_dir / "result.json", "job result"), "job result")
             if sealed else {}
@@ -1917,26 +1988,37 @@ def trajectory_for_case(output: Path, case_id: str) -> dict[str, object]:
                 "evidence_ok": False,
             }
         else:
-            trajectory = trajectory_for_attempt(
-                attempt_dir, benchmark, reducer, allow_partial=not sealed
-            )
-        logs = {
-            "stdout": _attempt_log(attempt_dir, "reducer.stdout")
-            if attempt_dir and attempt_dir.is_dir()
-            else {"text": "", "truncated": False, "error": None},
-            "stderr": _attempt_log(attempt_dir, "reducer.stderr")
-            if attempt_dir and attempt_dir.is_dir()
-            else {"text": "", "truncated": False, "error": None},
-        }
-        trials.append({
+            if include_logs:
+                trajectory = trajectory_for_attempt(
+                    attempt_dir, benchmark, reducer,
+                    allow_partial=not sealed, verify_artifacts=verify_artifacts,
+                )
+            else:
+                trajectory = _dashboard_attempt_trajectory(
+                    attempt_dir, benchmark, reducer,
+                    allow_partial=not sealed, verify_artifacts=verify_artifacts,
+                )
+        logs = None
+        if include_logs:
+            logs = {
+                "stdout": _attempt_log(attempt_dir, "reducer.stdout")
+                if attempt_dir and attempt_dir.is_dir()
+                else {"text": "", "truncated": False, "error": None},
+                "stderr": _attempt_log(attempt_dir, "reducer.stderr")
+                if attempt_dir and attempt_dir.is_dir()
+                else {"text": "", "truncated": False, "error": None},
+            }
+        trial = {
             "job_id": job["job_id"], "reducer_id": reducer["id"],
             "reducer_label": reducer["label"], "repeat": job["repeat"],
             "wave": job["wave"], "status": result.get("status", "running" if attempt_dir else "pending"),
             "verified": result.get("verified"), "evidence_ok": result.get("evidence_ok"),
             "attempt": result.get("attempt", int(attempt_dir.name) if attempt_dir and attempt_dir.name.isdigit() else None),
-            "logs": logs,
             "trajectory": trajectory,
-        })
+        }
+        if logs is not None:
+            trial["logs"] = logs
+        trials.append(trial)
     return {
         "schema_version": plan["schema_version"], "format": plan["format"],
         "study_id": plan["study_id"],
@@ -1949,10 +2031,17 @@ def trajectory_for_case(output: Path, case_id: str) -> dict[str, object]:
     }
 
 
-def case_rows(output: Path) -> list[dict[str, object]]:
+def case_rows(
+    output: Path,
+    *,
+    plan: Mapping[str, object] | None = None,
+    results: Sequence[Mapping[str, object]] | None = None,
+) -> list[dict[str, object]]:
     output = output.expanduser().resolve()
-    plan = load_plan(output)
-    results = {str(item["job_id"]): item for item in completed_results(output, plan)}
+    plan = dict(plan) if plan is not None else load_plan(output)
+    results = {str(item["job_id"]): item for item in (
+        results if results is not None else completed_results(output, plan)
+    )}
     rows = []
     for benchmark in plan["benchmarks"]:
         jobs = [job for job in plan["jobs"] if job["benchmark_id"] == benchmark["id"]]
@@ -1974,6 +2063,7 @@ def case_rows(output: Path) -> list[dict[str, object]]:
             "case_id": benchmark["id"], "family": benchmark["family"],
             "theory": benchmark["theory"], "predicate_mode": benchmark["predicate_mode"],
             "solver": benchmark["solver"], "input": benchmark["input"],
+            "input_bytes": benchmark.get("input_bytes"),
             "planned": len(jobs), "completed": len(selected),
             "verified": sum(bool(item.get("verified")) for item in selected),
             "evidence_ok": sum(bool(item.get("evidence_ok")) for item in selected),

@@ -119,6 +119,9 @@ class ManagerTests(ReductionFixture):
         summary = self.manager.summary("prepared")
         self.assertEqual(summary["status"], "prepared")
         self.assertIsNotNone(summary["created_at"])
+        self.assertIsNotNone(summary["updated_at"])
+        self.assertIsInstance(summary["elapsed_sec"], float)
+        self.assertGreaterEqual(summary["elapsed_sec"], 0)
         self.assertEqual(summary["total_trials"], 2)
         self.assertEqual(set(summary["by_reducer"]), {"r1"})
         self.assertNotIn("reducers", summary)
@@ -129,30 +132,151 @@ class ManagerTests(ReductionFixture):
         cases = self.manager._case_rows("prepared", {"page": ["1"], "page_size": ["25"]})
         self.assertEqual(cases["total"], 1)
         self.assertEqual(cases["cases"][0]["status"], "pending")
+        self.assertEqual(summary["comparisons"], [])
+        self.assertIsNone(summary["by_reducer"]["r1"]["completed_avg_bytes"])
 
     def test_path_traversal_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             self.manager._run_dir("../outside")
 
-    def test_case_pagination_reads_trajectories_only_for_returned_page(self) -> None:
+    def test_case_pagination_does_not_parse_trajectories(self) -> None:
         rows = [{
             "case_id": f"case-{index}", "family": "f", "theory": "t",
             "predicate_mode": "exit", "planned": 1, "completed": 0,
             "verified": 0, "statuses": {}, "by_reducer": {"r1": {
                 "planned": 1, "completed": 0, "verified": 0, "statuses": {},
+                "predicate_calls": index, "accepted_moves": 1,
+                "final_quality": [{"byte_count": index}],
             }},
         } for index in range(200)]
-        trajectory = {"trials": []}
         with (
-            mock.patch.object(self.manager, "_load_run", return_value=(self.root, {"study_id": "fixture"})),
+            mock.patch.object(self.manager, "_load_run", return_value=(self.root, {"study_id": "fixture", "jobs": []})),
             mock.patch.object(self.manager, "_progress", return_value={}),
             mock.patch("smtbatch.reduction_serve.reduction.case_rows", return_value=rows),
-            mock.patch.object(self.manager, "_trajectory", return_value=trajectory) as parse,
+            mock.patch.object(self.manager, "_trajectory") as parse,
         ):
             result = self.manager._case_rows("fixture", {"page": ["2"], "page_size": ["5"]})
         self.assertEqual(result["total"], 200)
         self.assertEqual(len(result["cases"]), 5)
-        self.assertEqual(parse.call_count, 5)
+        self.assertEqual([row["case_id"] for row in result["cases"]], [f"case-{index}" for index in range(5, 10)])
+        self.assertEqual(result["cases"][0]["realtime_calls"], 5)
+        self.assertEqual(result["cases"][0]["current_quality"]["r1"]["byte_count"], 5)
+        parse.assert_not_called()
+
+    def test_summary_exposes_paired_comparisons_and_completed_size(self) -> None:
+        output = self.root / "results" / "paired"
+        reduce.prepare(
+            self.study_path, output, reducers=["r1", "r2"], timeout_seconds=70, outer_jobs=1,
+        )
+        summary = self.manager.summary("paired")
+        self.assertEqual(len(summary["comparisons"]), 1)
+        pair = summary["comparisons"][0]
+        self.assertEqual((pair["left"], pair["right"]), ("r1", "r2"))
+        self.assertEqual(pair["left_label"], "Reducer one")
+        self.assertEqual(pair["paired_cases"], 0)
+        self.assertIsNone(summary["by_reducer"]["r1"]["completed_avg_bytes"])
+        self.assertIn("completed_avg_bytes", summary["by_reducer"]["r1"])
+
+    def test_case_list_status_and_winner_bytes(self) -> None:
+        rows = [
+            {
+                "case_id": "done", "family": "f", "theory": "t", "predicate_mode": "exit",
+                "input_bytes": 100, "planned": 2, "completed": 2,
+                "statuses": {"completed": 2},
+                "by_reducer": {
+                    "r1": {
+                        "label": "One", "planned": 1, "completed": 1,
+                        "statuses": {"completed": 1},
+                        "final_quality": [{"byte_count": 10}],
+                    },
+                    "r2": {
+                        "label": "Two", "planned": 1, "completed": 1,
+                        "statuses": {"completed": 1},
+                        "final_quality": [{"byte_count": 40}],
+                    },
+                },
+            },
+            {
+                "case_id": "cut", "family": "f", "theory": "t", "predicate_mode": "exit",
+                "input_bytes": 100, "planned": 2, "completed": 2,
+                "statuses": {"truncated": 2},
+                "by_reducer": {
+                    "r1": {
+                        "label": "One", "planned": 1, "completed": 1,
+                        "statuses": {"truncated": 1},
+                        "final_quality": [{"byte_count": 80}],
+                    },
+                    "r2": {
+                        "label": "Two", "planned": 1, "completed": 1,
+                        "statuses": {"truncated": 1},
+                        "final_quality": [{"byte_count": 90}],
+                    },
+                },
+            },
+        ]
+        with (
+            mock.patch.object(
+                self.manager, "_load_run",
+                return_value=(self.root, {"study_id": "fixture", "jobs": []}),
+            ),
+            mock.patch.object(self.manager, "_progress", return_value={}),
+            mock.patch("smtbatch.reduction_serve.reduction.case_rows", return_value=rows),
+        ):
+            completed = self.manager._case_rows(
+                "fixture", {"page": ["1"], "page_size": ["10"], "status": ["completed"]},
+            )
+            alias = self.manager._case_rows(
+                "fixture", {"page": ["1"], "page_size": ["10"], "status": ["complete"]},
+            )
+            truncated = self.manager._case_rows(
+                "fixture", {"page": ["1"], "page_size": ["10"], "status": ["truncated"]},
+            )
+            by_bytes = self.manager._case_rows(
+                "fixture", {"page": ["1"], "page_size": ["10"], "sort": ["bytes"], "sort_dir": ["asc"]},
+            )
+        self.assertEqual([row["case_id"] for row in completed["cases"]], ["done"])
+        self.assertEqual([row["case_id"] for row in alias["cases"]], ["done"])
+        self.assertEqual(completed["cases"][0]["status"], "completed")
+        self.assertEqual(completed["cases"][0]["best_bytes"], 10)
+        self.assertEqual(completed["cases"][0]["winner_ids"], ["r1"])
+        self.assertTrue(completed["cases"][0]["reducers"][0]["winner"])
+        self.assertEqual([row["case_id"] for row in truncated["cases"]], ["cut"])
+        self.assertEqual([row["case_id"] for row in by_bytes["cases"]], ["done", "cut"])
+
+    def test_http_trajectory_keeps_a_light_chart_payload(self) -> None:
+        plan = {
+            "jobs": [{"job_id": "j1", "benchmark_id": "case-a"}],
+            "study_id": "fixture",
+        }
+        payload = {
+            "case": {"id": "case-a"},
+            "trials": [{
+                "logs": {"stdout": {"text": "noise"}},
+                "trajectory": {"points": [
+                    {"call_index": 0, "elapsed_sec": 0, "byte_count": 10, "accepted": True, "extra": 1},
+                    {"call_index": 1, "elapsed_sec": 1, "byte_count": 10, "accepted": False},
+                    {"call_index": 2, "elapsed_sec": 2, "byte_count": 4, "accepted": True, "mutator": "foo"},
+                ]},
+            }],
+        }
+        with (
+            mock.patch.object(self.manager, "_load_run", return_value=(self.root, plan)),
+            mock.patch(
+                "smtbatch.reduction_serve.reduction.trajectory_for_case",
+                return_value=payload,
+            ) as parse,
+        ):
+            result = self.manager._trajectory("fixture", "case-a")
+        self.assertEqual(parse.call_args.kwargs.get("include_logs"), False)
+        self.assertEqual(parse.call_args.kwargs.get("verify_artifacts"), False)
+        self.assertIs(parse.call_args.kwargs.get("plan"), plan)
+        trial = result["trials"][0]
+        self.assertNotIn("logs", trial)
+        self.assertEqual(
+            [point["call_index"] for point in trial["trajectory"]["points"]],
+            [0, 2],
+        )
+        self.assertNotIn("extra", trial["trajectory"]["points"][0])
 
 
 class HttpTests(ReductionFixture):
@@ -205,6 +329,7 @@ class HttpTests(ReductionFixture):
         self.assertIn("/api/catalog", html)
         self.assertNotIn("/api/studies", html)
         self.assertIn("run.created_at", html)
+        self.assertIn("run.elapsed_sec", html)
         self.assertIn("run.by_reducer", html)
         self.assertNotIn("run.started_at", html)
         self.assertNotIn("run.reducers", html)
@@ -224,6 +349,12 @@ class HttpTests(ReductionFixture):
         self.assertIn("Size over time", html)
         self.assertIn("Accepted moves over time", html)
         self.assertIn("case-layout", html)
+        self.assertIn("trajSeq", html)
+        self.assertIn("state.summary.live", html)
+        self.assertIn("Paired comparisons", html)
+        self.assertIn("completed_avg_bytes", html)
+        self.assertIn('data-sort="bytes"', html)
+        self.assertIn("case-reducers", html)
         self.assertIn("truncated", html)
         self.assertIn("invalid", html)
         self.assertNotIn("TRIAL_BUCKET", html)
