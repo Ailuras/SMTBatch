@@ -95,14 +95,16 @@ class ResumeLogicTests(unittest.TestCase):
 
     def test_load_existing_results_counts_partial_results(self) -> None:
         run_dir = self._make_run("partial", completed=2)
-        completed, outcomes, by_solver, solved_seconds, par2_seconds = _load_existing_results(
-            run_dir / "results.tsv", load_jobs(run_dir / "jobs.tsv"), 10
+        completed, outcomes, by_solver, solved_seconds, par2_seconds, incremental, by_solver_incremental = (
+            _load_existing_results(run_dir / "results.tsv", load_jobs(run_dir / "jobs.tsv"), 10)
         )
         self.assertEqual(completed, {1, 2})
         self.assertEqual(outcomes, Counter({"sat": 2}))
         self.assertEqual(dict(by_solver["alpha"]), {"sat": 2})
         self.assertEqual(solved_seconds, {"alpha": 1.0})
         self.assertEqual(par2_seconds, {"alpha": 1.0})
+        self.assertEqual(incremental.file_complete, 2)
+        self.assertEqual(by_solver_incremental["alpha"].file_complete, 2)
 
     def test_load_existing_results_rejects_truncated_or_mismatched_rows(self) -> None:
         run_dir = self._make_run("corrupt", completed=0)

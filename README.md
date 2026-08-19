@@ -94,3 +94,26 @@ Solver provenance in `metadata.txt` includes the resolved artifact inventory
 and a path-independent bundle hash. It also records the commit and dirty state
 of both the project being measured and the SMTBatch runner repository. The
 Excel export contains only log paths.
+
+## Incremental SMT-LIB files
+
+This branch scores incremental files (many `push` / `check-sat` / `pop` in one
+`.smt2`) at **file** granularity:
+
+- The solver process must finish the whole file (`complete=yes`, exit 0).
+  Timeout, SIGKILL, or a non-zero exit is not a file success, even if stdout
+  already contains `sat` or `unsat`.
+- Only the **last** `check-sat` answer is the file result. Intermediate
+  `unknown` is allowed and does not fail the file.
+- `result` in `results.tsv` stays process-level: exit 0 uses that last answer;
+  a kill is still `timeout`.
+
+New runs append these columns after the original seven:
+
+`queries  sat  unsat  unknown  first  last  expected  complete`
+
+`expected` is the number of top-level `check-sat` / `check-sat-assuming`
+commands in the source file. `queries` is how many answers were printed.
+`complete=yes` means the process exited 0. Dashboard and Excel report the same
+fields, including `partial_timeout` (timed out after printing at least one
+answer). Resume still accepts the original 7-column `results.tsv`.

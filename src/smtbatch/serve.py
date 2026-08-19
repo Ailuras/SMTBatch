@@ -35,11 +35,14 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from .config import Config, find_config_path, load_config
 from .task import (
-    RESULT_FIELDS,
+    RESULT_INCREMENTAL_FIELDS,
     VALID_TASK_RESULTS,
     classify_consistency,
     load_jobs,
+    optional_nonneg_int,
     result_label,
+    results_header_ok,
+    row_complete,
     summarize_performance,
 )
 
@@ -156,6 +159,7 @@ class _MetricsState:
     invalid: bool = False
     completed_ids: set[int] = field(default_factory=set)
     by_solver: dict[str, _PerformanceTotals] = field(default_factory=dict)
+    fields: list[str] = field(default_factory=list)
 
     def payload(self) -> dict[str, object]:
         aggregate = _PerformanceTotals()
@@ -316,13 +320,15 @@ class ExperimentManager:
             return
         if not state.header_seen:
             state.header_seen = True
-            if row != RESULT_FIELDS:
+            if not results_header_ok(row):
                 state.invalid = True
+                return
+            state.fields = list(row)
             return
-        if len(row) != len(RESULT_FIELDS):
+        if not state.fields or len(row) != len(state.fields):
             state.invalid = True
             return
-        values = dict(zip(RESULT_FIELDS, row, strict=True))
+        values = dict(zip(state.fields, row, strict=True))
         try:
             job_id = int(values["job_id"])
             duration = float(values["time"])
@@ -760,7 +766,7 @@ class ExperimentManager:
                     jobs = {job.job_id: job for job in load_jobs(run_dir / "jobs.tsv")}
                     with (run_dir / "results.tsv").open("r", encoding="utf-8", newline="") as handle:
                         reader = csv.DictReader(handle, delimiter="\t")
-                        if reader.fieldnames != RESULT_FIELDS:
+                        if not results_header_ok(reader.fieldnames):
                             continue
                         for row in reader:
                             job = jobs.get(int(row.get("job_id") or ""))
@@ -807,15 +813,30 @@ class ExperimentManager:
             try:
                 with results_path.open("r", encoding="utf-8", newline="") as handle:
                     reader = csv.DictReader(handle, delimiter="\t")
-                    if reader.fieldnames != RESULT_FIELDS:
+                    if not results_header_ok(reader.fieldnames):
                         raise ValueError("invalid results header")
+                    has_incremental = bool(set(reader.fieldnames or []) & set(RESULT_INCREMENTAL_FIELDS))
                     for row in reader:
                         job_id = int(row.get("job_id") or "")
-                        results[job_id] = {
+                        record: dict[str, object] = {
                             "result": row.get("result") or "error",
                             "time": float(row.get("time") or ""),
                             "log_url": _data_url(row.get("output_path"), self.results_root),
                         }
+                        if has_incremental:
+                            record.update(
+                                {
+                                    "queries": optional_nonneg_int(row.get("queries")),
+                                    "sat": optional_nonneg_int(row.get("sat")),
+                                    "unsat": optional_nonneg_int(row.get("unsat")),
+                                    "unknown": optional_nonneg_int(row.get("unknown")),
+                                    "first": row.get("first") or "",
+                                    "last": row.get("last") or "",
+                                    "expected": optional_nonneg_int(row.get("expected")),
+                                    "complete": "yes" if row_complete(row) else "no",
+                                }
+                            )
+                        results[job_id] = record
             except (OSError, ValueError, csv.Error) as exc:
                 raise ValueError(f"unable to read experiment results: {exc}") from None
 
@@ -895,6 +916,10 @@ class ExperimentManager:
                 "unique_solved": 0,
                 "outcomes": {result: 0 for result in ("sat", "unsat", "unknown", "timeout", "error")},
                 "cactus": [],
+                "file_complete": 0,
+                "partial_timeout": 0,
+                "answers": 0,
+                "expected": 0,
             }
             for solver in solvers
         }
@@ -915,6 +940,15 @@ class ExperimentManager:
                 assert isinstance(outcomes, dict)
                 summary["completed"] += 1
                 outcomes[label] += 1
+                summary["file_complete"] += int(str(result.get("complete") or "") == "yes")
+                queries = result.get("queries")
+                expected = result.get("expected")
+                query_count = queries if isinstance(queries, int) else 0
+                expected_count = expected if isinstance(expected, int) else 0
+                summary["answers"] += query_count
+                summary["expected"] += expected_count
+                if label == "timeout" and query_count > 0:
+                    summary["partial_timeout"] += 1
                 value = result.get("time")
                 if isinstance(value, (int, float)) and math.isfinite(value) and value >= 0:
                     if label == "sat":

@@ -5,6 +5,11 @@ one independently scheduled job. Results are streamed to ``results.tsv`` as
 jobs complete; ``jobs.tsv`` is the immutable queue manifest. ``progress.json``
 is refreshed while the queue runs for the dashboard UI.
 
+Incremental SMT-LIB files (many ``check-sat`` commands in one file) are scored
+at file granularity: the process must finish the whole file, and only the last
+answer counts as sat/unsat. Intermediate ``unknown`` is allowed. A timeout or
+kill is never a file success, even if a sat/unsat line was already printed.
+
 Solver names and commands come from the nearest project ``smtbatch.toml``;
 see smtbatch.config for the schema.
 """
@@ -34,7 +39,19 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 from .config import Config, SolverSpec, load_config
-from .task import RESULT_FIELDS, JobSpec, load_jobs, summarize_performance, write_jobs
+from .task import (
+    RESULT_FIELDS,
+    JobSpec,
+    count_check_sat,
+    incremental_from_answers,
+    load_jobs,
+    optional_nonneg_int,
+    parse_answers,
+    results_header_ok,
+    row_complete,
+    summarize_performance,
+    write_jobs,
+)
 
 
 RESULT_ORDER = ("sat", "unsat", "unknown", "timeout", "error")
@@ -51,6 +68,35 @@ def _defer_sigint():
         signal.pthread_sigmask(signal.SIG_SETMASK, previous)
 
 
+@dataclass
+class IncrementalCounts:
+    file_complete: int = 0
+    partial_timeout: int = 0
+    answers: int = 0
+    expected: int = 0
+
+    def add(
+        self,
+        *,
+        result: str,
+        queries: int,
+        expected: int,
+        complete: bool,
+    ) -> None:
+        self.file_complete += int(complete)
+        self.partial_timeout += int(result == "timeout" and queries > 0)
+        self.answers += queries
+        self.expected += expected
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "file_complete": self.file_complete,
+            "partial_timeout": self.partial_timeout,
+            "answers": self.answers,
+            "expected": self.expected,
+        }
+
+
 @dataclass(frozen=True)
 class JobResult:
     job: JobSpec
@@ -58,6 +104,14 @@ class JobResult:
     result: str
     code: int | None
     output: str
+    queries: int = 0
+    sat: int = 0
+    unsat: int = 0
+    unknown: int = 0
+    first: str = ""
+    last: str = ""
+    expected: int = 0
+    complete: bool = False
 
 
 @dataclass
@@ -78,12 +132,15 @@ class ProgressTracker:
     solved_seconds: dict[str, float] = field(default_factory=dict)
     par2_seconds: dict[str, float] = field(default_factory=dict)
     recent_errors: deque[dict[str, object]] = field(default_factory=deque)
+    incremental: IncrementalCounts = field(default_factory=IncrementalCounts)
+    by_solver_incremental: dict[str, IncrementalCounts] = field(default_factory=dict)
     _last_render: float = 0.0
 
     def __post_init__(self) -> None:
         self.by_solver = {solver: Counter() for solver in self.solvers}
         self.solved_seconds = {solver: 0.0 for solver in self.solvers}
         self.par2_seconds = {solver: 0.0 for solver in self.solvers}
+        self.by_solver_incremental = {solver: IncrementalCounts() for solver in self.solvers}
         self.recent_errors = deque(maxlen=self.recent_limit)
 
     @property
@@ -98,6 +155,18 @@ class ProgressTracker:
         self.completed_jobs += 1
         self.outcomes[result.result] += 1
         self.by_solver[result.job.solver][result.result] += 1
+        self.incremental.add(
+            result=result.result,
+            queries=result.queries,
+            expected=result.expected,
+            complete=result.complete,
+        )
+        self.by_solver_incremental.setdefault(result.job.solver, IncrementalCounts()).add(
+            result=result.result,
+            queries=result.queries,
+            expected=result.expected,
+            complete=result.complete,
+        )
         if result.result in {"sat", "unsat"}:
             self.solved_seconds[result.job.solver] += result.duration_sec
             self.par2_seconds[result.job.solver] += result.duration_sec
@@ -110,6 +179,10 @@ class ProgressTracker:
             "result": result.result,
             "time": round(result.duration_sec, 3),
             "code": result.code,
+            "queries": result.queries,
+            "last": result.last,
+            "expected": result.expected,
+            "complete": "yes" if result.complete else "no",
             "log_path": str(log_path) if log_path else "",
         }
         if result.result in {"timeout", "error"}:
@@ -148,6 +221,13 @@ class ProgressTracker:
                 sum(self.par2_seconds.values()),
             ),
             "by_solver_performance": by_solver_performance,
+            "incremental": {
+                **self.incremental.as_dict(),
+                "file_solved": solved_jobs,
+                "by_solver": {
+                    solver: counts.as_dict() for solver, counts in self.by_solver_incremental.items()
+                },
+            },
             "recent_errors": list(self.recent_errors),
         }
 
@@ -375,12 +455,56 @@ def write_input_hashes(path: Path, files: Sequence[Path]) -> None:
 
 
 def classify_output(output: str) -> str:
-    result = "error"
-    for line in output.splitlines():
-        parts = line.strip().split(maxsplit=1)
-        if parts and parts[0] in {"sat", "unsat", "unknown"}:
-            result = parts[0]
-    return result
+    answers = parse_answers(output)
+    return answers[-1] if answers else "error"
+
+
+def _job_result_from_output(
+    job: JobSpec,
+    duration_sec: float,
+    result: str,
+    code: int | None,
+    output: str,
+) -> JobResult:
+    answers = parse_answers(output)
+    expected = count_check_sat(job.file_path)
+    complete = code == 0
+    stats = incremental_from_answers(answers, expected, complete=complete)
+    return JobResult(
+        job,
+        duration_sec,
+        result,
+        code,
+        output,
+        queries=int(stats["queries"]),
+        sat=int(stats["sat"]),
+        unsat=int(stats["unsat"]),
+        unknown=int(stats["unknown"]),
+        first=stats["first"],
+        last=stats["last"],
+        expected=expected,
+        complete=complete,
+    )
+
+
+def _result_row(item: JobResult, log_path: Path | None) -> dict[str, str]:
+    return {
+        "job_id": str(item.job.job_id),
+        "solver": item.job.solver,
+        "file": str(item.job.file_path),
+        "result": item.result,
+        "time": f"{item.duration_sec:.3f}",
+        "code": "" if item.code is None else str(item.code),
+        "output_path": str(log_path) if log_path else "",
+        "queries": str(item.queries),
+        "sat": str(item.sat),
+        "unsat": str(item.unsat),
+        "unknown": str(item.unknown),
+        "first": item.first,
+        "last": item.last,
+        "expected": str(item.expected),
+        "complete": "yes" if item.complete else "no",
+    }
 
 
 def discover_files(input_dirs: Sequence[Path], limit: int) -> list[Path]:
@@ -441,7 +565,7 @@ def run_job(spec: SolverSpec, job: JobSpec, timeout: float, outer_timeout: float
     except Exception as exc:  # noqa: BLE001 - preserve launcher failures in the result stream.
         output = f"{type(exc).__name__}: {exc}\n"
         result = "error"
-    return JobResult(job, time.perf_counter() - start, result, code, output)
+    return _job_result_from_output(job, time.perf_counter() - start, result, code, output)
 
 
 def write_job_output(logs_dir: Path, policy: str, item: JobResult) -> Path | None:
@@ -554,20 +678,32 @@ def _load_existing_results(
     dict[str, Counter[str]],
     dict[str, float],
     dict[str, float],
+    IncrementalCounts,
+    dict[str, IncrementalCounts],
 ]:
     """Validate and tally a streaming results file against its immutable queue."""
     outcomes: Counter[str] = Counter()
     by_solver: dict[str, Counter[str]] = {}
     solved_seconds: dict[str, float] = {}
     par2_seconds: dict[str, float] = {}
+    incremental = IncrementalCounts()
+    by_solver_incremental: dict[str, IncrementalCounts] = {}
     completed: set[int] = set()
     if not results_path.is_file():
-        return completed, outcomes, by_solver, solved_seconds, par2_seconds
+        return (
+            completed,
+            outcomes,
+            by_solver,
+            solved_seconds,
+            par2_seconds,
+            incremental,
+            by_solver_incremental,
+        )
     expected = {job.job_id: job for job in jobs}
     try:
         with results_path.open("r", encoding="utf-8", newline="") as handle:
             reader = csv.DictReader(handle, delimiter="\t")
-            if reader.fieldnames != RESULT_FIELDS:
+            if not results_header_ok(reader.fieldnames):
                 raise ValueError(f"invalid results header: {reader.fieldnames}")
             for row_number, row in enumerate(reader, start=2):
                 if None in row or any(value is None for value in row.values()):
@@ -597,11 +733,26 @@ def _load_existing_results(
                         int(code)
                     except ValueError:
                         raise ValueError(f"invalid code at {results_path}:{row_number}") from None
+                queries = optional_nonneg_int(row.get("queries"))
+                expected_queries = optional_nonneg_int(row.get("expected"))
+                complete = row_complete(row)
                 completed.add(job_id)
                 outcomes[result] += 1
                 by_solver.setdefault(solver, Counter())[result] += 1
                 solved_seconds.setdefault(solver, 0.0)
                 par2_seconds.setdefault(solver, 0.0)
+                incremental.add(
+                    result=result,
+                    queries=queries,
+                    expected=expected_queries,
+                    complete=complete,
+                )
+                by_solver_incremental.setdefault(solver, IncrementalCounts()).add(
+                    result=result,
+                    queries=queries,
+                    expected=expected_queries,
+                    complete=complete,
+                )
                 if result in {"sat", "unsat"}:
                     solved_seconds[solver] += duration
                     par2_seconds[solver] += duration
@@ -609,7 +760,26 @@ def _load_existing_results(
                     par2_seconds[solver] += 2 * timeout
     except csv.Error as exc:
         raise ValueError(f"invalid results TSV {results_path}: {exc}") from None
-    return completed, outcomes, by_solver, solved_seconds, par2_seconds
+    return (
+        completed,
+        outcomes,
+        by_solver,
+        solved_seconds,
+        par2_seconds,
+        incremental,
+        by_solver_incremental,
+    )
+
+
+def _results_writer_fields(results_path: Path, append_results: bool) -> list[str]:
+    """Keep appending to an existing header; new runs write the incremental columns."""
+    if append_results and results_path.is_file() and results_path.stat().st_size:
+        with results_path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle, delimiter="\t")
+            if not results_header_ok(reader.fieldnames):
+                raise ValueError(f"invalid results header: {reader.fieldnames}")
+            return list(reader.fieldnames or RESULT_FIELDS)
+    return list(RESULT_FIELDS)
 
 
 def _resume_config(metadata: dict[str, str]) -> Config:
@@ -708,6 +878,8 @@ class _RunPlan:
     by_solver_before: dict[str, Counter[str]]
     solved_seconds_before: dict[str, float]
     par2_seconds_before: dict[str, float]
+    incremental_before: IncrementalCounts
+    by_solver_incremental_before: dict[str, IncrementalCounts]
     append_results: bool
 
 
@@ -743,6 +915,7 @@ def _prepare_fresh(args: argparse.Namespace) -> _RunPlan:
         "log": args.log,
         "input_hashes": "input_hashes.tsv" if args.hash_inputs else "",
         "solver_config": str(config.path),
+        "incremental": "yes",
     }
     for solver, values in provenance.items():
         for key, value in values.items():
@@ -765,6 +938,8 @@ def _prepare_fresh(args: argparse.Namespace) -> _RunPlan:
         by_solver_before={},
         solved_seconds_before={},
         par2_seconds_before={},
+        incremental_before=IncrementalCounts(),
+        by_solver_incremental_before={},
         append_results=False,
     )
 
@@ -806,6 +981,8 @@ def _prepare_resume(args: argparse.Namespace) -> _RunPlan:
         by_solver_before,
         solved_seconds_before,
         par2_seconds_before,
+        incremental_before,
+        by_solver_incremental_before,
     ) = _load_existing_results(output_dir / "results.tsv", jobs, timeout)
     remaining = [job for job in jobs if job.job_id not in completed_ids]
     resumed_at = datetime.now(timezone.utc).isoformat()
@@ -837,6 +1014,8 @@ def _prepare_resume(args: argparse.Namespace) -> _RunPlan:
         by_solver_before=by_solver_before,
         solved_seconds_before=solved_seconds_before,
         par2_seconds_before=par2_seconds_before,
+        incremental_before=incremental_before,
+        by_solver_incremental_before=by_solver_incremental_before,
         append_results=(output_dir / "results.tsv").is_file(),
     )
 
@@ -862,8 +1041,9 @@ def run_queue(
 
     if append_results:
         _ensure_append_boundary(results_path)
+    fieldnames = _results_writer_fields(results_path, append_results)
     with results_path.open("a" if append_results else "w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=RESULT_FIELDS, delimiter="\t")
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t", extrasaction="ignore")
         if not append_results:
             writer.writeheader()
         handle.flush()
@@ -888,19 +1068,11 @@ def run_queue(
                     try:
                         item = future.result()
                     except Exception as exc:  # noqa: BLE001 - persist an unexpected worker failure.
-                        item = JobResult(job, 0.0, "error", None, f"{type(exc).__name__}: {exc}\n")
+                        item = _job_result_from_output(
+                            job, 0.0, "error", None, f"{type(exc).__name__}: {exc}\n"
+                        )
                     log_path = write_job_output(logs_dir, log_policy, item)
-                    writer.writerow(
-                        {
-                            "job_id": item.job.job_id,
-                            "solver": item.job.solver,
-                            "file": str(item.job.file_path),
-                            "result": item.result,
-                            "time": f"{item.duration_sec:.3f}",
-                            "code": "" if item.code is None else str(item.code),
-                            "output_path": str(log_path) if log_path else "",
-                        }
-                    )
+                    writer.writerow(_result_row(item, log_path))
                     # Keep the per-example dashboard view current without forcing an fsync per job.
                     handle.flush()
                     completed += 1
@@ -975,6 +1147,21 @@ def _main_locked(args: argparse.Namespace) -> int:
     tracker.by_solver = {solver: Counter(plan.by_solver_before.get(solver, ())) for solver in plan.solvers}
     tracker.solved_seconds = {solver: plan.solved_seconds_before.get(solver, 0.0) for solver in plan.solvers}
     tracker.par2_seconds = {solver: plan.par2_seconds_before.get(solver, 0.0) for solver in plan.solvers}
+    tracker.incremental = IncrementalCounts(
+        file_complete=plan.incremental_before.file_complete,
+        partial_timeout=plan.incremental_before.partial_timeout,
+        answers=plan.incremental_before.answers,
+        expected=plan.incremental_before.expected,
+    )
+    tracker.by_solver_incremental = {
+        solver: IncrementalCounts(
+            file_complete=plan.by_solver_incremental_before.get(solver, IncrementalCounts()).file_complete,
+            partial_timeout=plan.by_solver_incremental_before.get(solver, IncrementalCounts()).partial_timeout,
+            answers=plan.by_solver_incremental_before.get(solver, IncrementalCounts()).answers,
+            expected=plan.by_solver_incremental_before.get(solver, IncrementalCounts()).expected,
+        )
+        for solver in plan.solvers
+    }
 
     print(f"[batch] output={output_dir}")
     print(
@@ -1043,6 +1230,13 @@ def _main_locked(args: argparse.Namespace) -> int:
     total_outcomes.update(outcomes)
     summary = " ".join(f"{result}={total_outcomes[result]}" for result in RESULT_ORDER)
     print(f"[batch] complete pairs={plan.pair_count} {summary}")
+    print(
+        "[batch] incremental "
+        f"file_complete={tracker.incremental.file_complete} "
+        f"file_solved={tracker.outcomes['sat'] + tracker.outcomes['unsat']} "
+        f"partial_timeout={tracker.incremental.partial_timeout} "
+        f"answers={tracker.incremental.answers}/{tracker.incremental.expected}"
+    )
     print(f"[batch] export with: smtbatch export {output_dir}")
     return 0
 

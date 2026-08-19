@@ -8,13 +8,18 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence, TextIO
+from typing import Iterable, Mapping, Sequence, TextIO
 
 MANIFEST_FIELDS = ["task_id", "case_index", "file"]
 TASK_FIELDS = ["solver", "file", "result", "time", "code", "output_path"]
 JOB_FIELDS = ["job_id", "solver", "file"]
-RESULT_FIELDS = ["job_id", *TASK_FIELDS]
+RESULT_CORE_FIELDS = ["job_id", *TASK_FIELDS]
+RESULT_INCREMENTAL_FIELDS = ["queries", "sat", "unsat", "unknown", "first", "last", "expected", "complete"]
+RESULT_FIELDS = [*RESULT_CORE_FIELDS, *RESULT_INCREMENTAL_FIELDS]
 VALID_TASK_RESULTS = {"sat", "unsat", "unknown", "timeout", "error"}
+VALID_ANSWERS = {"sat", "unsat", "unknown"}
+VALID_COMPLETE = {"yes", "no"}
+_CHECK_SAT_COMMANDS = frozenset({"check-sat", "check-sat-assuming"})
 _TASK_NAME_RE = re.compile(r"^task_(\d+)\.tsv$")
 
 # Result labels as recorded by smtbatch run in the task TSV (lowercase) and the
@@ -34,6 +39,148 @@ CONSISTENCY_TYPES = {
     "error": "Error",
     "other": "Other",
 }
+
+
+def results_header_ok(fieldnames: Sequence[str] | None) -> bool:
+    """Accept the original 7-column results header or the incremental extension."""
+    if not fieldnames:
+        return False
+    fields = list(fieldnames)
+    if fields[: len(RESULT_CORE_FIELDS)] != RESULT_CORE_FIELDS:
+        return False
+    extra = fields[len(RESULT_CORE_FIELDS) :]
+    if not extra:
+        return True
+    return len(extra) == len(set(extra)) and set(extra) <= set(RESULT_INCREMENTAL_FIELDS)
+
+
+def parse_answers(output: str) -> list[str]:
+    """Collect every SMT-LIB sat/unsat/unknown printed as the first token of a line."""
+    answers: list[str] = []
+    for line in output.splitlines():
+        parts = line.strip().split(maxsplit=1)
+        if parts and parts[0] in VALID_ANSWERS:
+            answers.append(parts[0])
+    return answers
+
+
+def count_check_sat(path: Path) -> int:
+    """Count top-level check-sat / check-sat-assuming commands in one SMT-LIB file."""
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            return _count_top_level_commands(handle, _CHECK_SAT_COMMANDS)
+    except OSError:
+        return 0
+
+
+def _count_top_level_commands(handle: TextIO, names: frozenset[str]) -> int:
+    depth = 0
+    in_comment = False
+    in_string = False
+    string_quote_pending = False
+    in_quoted_symbol = False
+    token: list[str] = []
+    command_name = ""
+    count = 0
+
+    def flush_token() -> None:
+        nonlocal command_name
+        if not token:
+            return
+        if depth == 1 and not command_name:
+            command_name = "".join(token)
+        token.clear()
+
+    while True:
+        chunk = handle.read(64 * 1024)
+        if not chunk:
+            break
+        for char in chunk:
+            if in_comment:
+                if char == "\n":
+                    in_comment = False
+                continue
+            if in_string:
+                if string_quote_pending:
+                    if char == '"':
+                        string_quote_pending = False
+                        continue
+                    in_string = False
+                    string_quote_pending = False
+                else:
+                    if char == '"':
+                        string_quote_pending = True
+                    continue
+            if in_quoted_symbol:
+                if char == "|":
+                    in_quoted_symbol = False
+                elif depth == 1 and not command_name:
+                    token.append(char)
+                continue
+            if char == ";":
+                flush_token()
+                in_comment = True
+            elif char == '"':
+                flush_token()
+                in_string = True
+            elif char == "|":
+                flush_token()
+                in_quoted_symbol = True
+            elif char == "(":
+                flush_token()
+                if depth == 0:
+                    command_name = ""
+                depth += 1
+            elif char == ")":
+                flush_token()
+                if depth == 1:
+                    if command_name.lower() in names:
+                        count += 1
+                    command_name = ""
+                if depth > 0:
+                    depth -= 1
+            elif char.isspace():
+                flush_token()
+            elif depth == 1 and not command_name:
+                token.append(char)
+    return count
+
+
+def incremental_from_answers(
+    answers: Sequence[str],
+    expected: int,
+    *,
+    complete: bool,
+) -> dict[str, str]:
+    """Serialize per-query incremental columns for one results.tsv row."""
+    return {
+        "queries": str(len(answers)),
+        "sat": str(sum(1 for answer in answers if answer == "sat")),
+        "unsat": str(sum(1 for answer in answers if answer == "unsat")),
+        "unknown": str(sum(1 for answer in answers if answer == "unknown")),
+        "first": answers[0] if answers else "",
+        "last": answers[-1] if answers else "",
+        "expected": str(expected),
+        "complete": "yes" if complete else "no",
+    }
+
+
+def row_complete(row: Mapping[str, str]) -> bool:
+    """Whether the solver process finished the whole incremental file."""
+    raw = (row.get("complete") or "").strip().lower()
+    if raw in VALID_COMPLETE:
+        return raw == "yes"
+    return (row.get("result") or "").strip().lower() in VALID_ANSWERS
+
+
+def optional_nonneg_int(value: str | None, default: int = 0) -> int:
+    if value is None or value == "":
+        return default
+    try:
+        parsed = int(value)
+    except ValueError:
+        return default
+    return parsed if parsed >= 0 else default
 
 
 def summarize_performance(
@@ -195,7 +342,7 @@ def audit_results(jobs: Sequence[JobSpec], results_path: Path) -> JobAudit:
     try:
         with results_path.open("r", encoding="utf-8", newline="") as handle:
             reader = csv.DictReader(handle, delimiter="\t")
-            if reader.fieldnames != RESULT_FIELDS:
+            if not results_header_ok(reader.fieldnames):
                 return JobAudit("corrupt", len(jobs), 0, f"invalid header: {reader.fieldnames}")
             for row_number, row in enumerate(reader, start=2):
                 if None in row:
@@ -287,6 +434,32 @@ def _validate_task_row(row: dict[str, str], expected_file: str, expected_solver:
             int(code)
         except ValueError:
             return f"invalid code {code!r}"
+    return _validate_incremental_row(row)
+
+
+def _validate_incremental_row(row: Mapping[str, str]) -> str:
+    for key in ("queries", "sat", "unsat", "unknown", "expected"):
+        if key not in row:
+            continue
+        raw = row.get(key) or ""
+        if raw == "":
+            continue
+        try:
+            value = int(raw)
+        except ValueError:
+            return f"invalid {key} {raw!r}"
+        if value < 0:
+            return f"invalid {key} {raw!r}"
+    for key in ("first", "last"):
+        if key not in row:
+            continue
+        raw = (row.get(key) or "").strip().lower()
+        if raw and raw not in VALID_ANSWERS:
+            return f"invalid {key} {raw!r}"
+    if "complete" in row:
+        raw = (row.get("complete") or "").strip().lower()
+        if raw and raw not in VALID_COMPLETE:
+            return f"invalid complete {raw!r}"
     return ""
 
 

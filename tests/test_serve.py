@@ -58,13 +58,49 @@ command = ["{binary}", "{input}"]
         with (self.run / "results.tsv").open("w", encoding="utf-8", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=RESULT_FIELDS, delimiter="\t")
             writer.writeheader()
-            writer.writerow({"job_id": 1, "solver": "alpha", "file": str(self.formula), "result": "sat", "time": "2.0", "code": "0", "output_path": ""})
-            writer.writerow({"job_id": 2, "solver": "beta", "file": str(self.formula), "result": "error", "time": "4.0", "code": "1", "output_path": ""})
+            writer.writerow(
+                {
+                    "job_id": 1,
+                    "solver": "alpha",
+                    "file": str(self.formula),
+                    "result": "sat",
+                    "time": "2.0",
+                    "code": "0",
+                    "output_path": "",
+                    "queries": "1",
+                    "sat": "1",
+                    "unsat": "0",
+                    "unknown": "0",
+                    "first": "sat",
+                    "last": "sat",
+                    "expected": "1",
+                    "complete": "yes",
+                }
+            )
+            writer.writerow(
+                {
+                    "job_id": 2,
+                    "solver": "beta",
+                    "file": str(self.formula),
+                    "result": "error",
+                    "time": "4.0",
+                    "code": "1",
+                    "output_path": "",
+                    "queries": "0",
+                    "sat": "0",
+                    "unsat": "0",
+                    "unknown": "0",
+                    "first": "",
+                    "last": "",
+                    "expected": "1",
+                    "complete": "no",
+                }
+            )
         (self.run / "progress.json").write_text(
             json.dumps({"status": "complete", "updated_at": "2026-01-01T00:00:00+00:00", "total_jobs": 2, "completed_jobs": 2}),
             encoding="utf-8",
         )
-        (self.run / "metadata.txt").write_text("solvers=alpha,beta\n", encoding="utf-8")
+        (self.run / "metadata.txt").write_text("solvers=alpha,beta\ntimeout=30\n", encoding="utf-8")
         self.manager = ExperimentManager(self.results, self.inputs, root)
 
     def tearDown(self) -> None:
@@ -184,6 +220,15 @@ command = ["{binary}", "{input}"]
         scatter = self.manager.report_scatter("sample-run", "alpha", "beta", "all")
         self.assertEqual(scatter["total_points"], 1)
         self.assertFalse(scatter["sampled"])
+        page = self.manager.report_formulas("sample-run", "sample", "all", 1, 1)
+        alpha = page["cases"][0]["results"]["alpha"]
+        self.assertEqual(alpha["queries"], 1)
+        self.assertEqual(alpha["last"], "sat")
+        self.assertEqual(alpha["complete"], "yes")
+        summary = self.manager.report_summary("sample-run", "all")
+        self.assertEqual(summary["by_solver"]["alpha"]["file_complete"], 1)
+        self.assertEqual(summary["by_solver"]["alpha"]["answers"], 1)
+        self.assertEqual(summary["by_solver"]["alpha"]["partial_timeout"], 0)
 
     def test_historical_duration_estimate_uses_matching_jobs(self) -> None:
         history = self.manager._historical_durations()

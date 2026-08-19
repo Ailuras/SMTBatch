@@ -9,7 +9,8 @@ solvers come from different ``<output>`` directories; cross-solver consistency i
 classified and a styled workbook is written.
 
 The ``Results`` sheet uses ``path | filename | logic | file_size | consistency`` followed by
-``<solver>_result | <solver>_time | <solver>_log`` and, with ``--load-output``,
+``<solver>_result | <solver>_time | <solver>_log | <solver>_queries | <solver>_last |
+<solver>_expected | <solver>_complete`` and, with ``--load-output``,
 ``<solver>_output``. SMT-LIB details such as ``logic`` are read from the source
 file during aggregation rather than copied through task TSVs.
 """
@@ -33,6 +34,7 @@ from openpyxl.utils import get_column_letter
 from .task import (
     classify_consistency,
     iter_task_tsvs,
+    optional_nonneg_int,
     read_file_details,
 )
 
@@ -59,6 +61,10 @@ class LogEntry:
     exit_code: int | None
     raw_output: str
     result: str
+    queries: int | None = None
+    last: str = ""
+    expected: int | None = None
+    complete: str = ""
 
     @property
     def success(self) -> bool:
@@ -121,6 +127,10 @@ def load_entries(task_files: list[Path], load_output: bool) -> list[LogEntry]:
                         exit_code=exit_code,
                         raw_output=raw_output,
                         result=result,
+                        queries=optional_nonneg_int(row.get("queries")) if row.get("queries") not in (None, "") else None,
+                        last=(row.get("last") or "").strip(),
+                        expected=optional_nonneg_int(row.get("expected")) if row.get("expected") not in (None, "") else None,
+                        complete=(row.get("complete") or "").strip().lower(),
                     )
                 )
     return entries
@@ -176,6 +186,10 @@ def build_rows(
         record[f"{solver_prefix}_result"] = result_value
         record[f"{solver_prefix}_time"] = entry.duration_sec
         record[f"{solver_prefix}_log"] = str(entry.log_path)
+        record[f"{solver_prefix}_queries"] = entry.queries
+        record[f"{solver_prefix}_last"] = entry.last
+        record[f"{solver_prefix}_expected"] = entry.expected
+        record[f"{solver_prefix}_complete"] = entry.complete
         if include_output:
             record[f"{solver_prefix}_output"] = entry.raw_output
 
@@ -188,7 +202,17 @@ def build_rows(
         "consistency",
     ]
     for solver in solvers:
-        fieldnames.extend([f"{solver}_result", f"{solver}_time", f"{solver}_log"])
+        fieldnames.extend(
+            [
+                f"{solver}_result",
+                f"{solver}_time",
+                f"{solver}_log",
+                f"{solver}_queries",
+                f"{solver}_last",
+                f"{solver}_expected",
+                f"{solver}_complete",
+            ]
+        )
         if include_output:
             fieldnames.append(f"{solver}_output")
 
@@ -199,6 +223,10 @@ def build_rows(
             record.setdefault(f"{solver}_result", "")
             record.setdefault(f"{solver}_time", None)
             record.setdefault(f"{solver}_log", "")
+            record.setdefault(f"{solver}_queries", None)
+            record.setdefault(f"{solver}_last", "")
+            record.setdefault(f"{solver}_expected", None)
+            record.setdefault(f"{solver}_complete", "")
             if include_output:
                 record.setdefault(f"{solver}_output", "")
         results = [str(record.get(f"{solver}_result", "")).upper().strip() for solver in solvers]
