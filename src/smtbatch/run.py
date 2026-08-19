@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Sequence
 
-from .config import Config, SolverSpec, load_config
+from .config import Config, SolverSpec, load_config, validate_target_branch
 from .task import (
     RESULT_FIELDS,
     JobSpec,
@@ -887,6 +887,7 @@ def _prepare_fresh(args: argparse.Namespace) -> _RunPlan:
     if not args.solver or not args.input:
         raise ValueError("--solver and --input are required unless --resume is used")
     config = load_config()
+    smtbatch_branch = validate_target_branch(config)
     solvers = normalize_solvers(args.solver, config)
     specs = {name: config.solvers[name] for name in solvers}
     artifact_cache: dict[Path, dict[str, dict[str, str]]] = {}
@@ -916,6 +917,8 @@ def _prepare_fresh(args: argparse.Namespace) -> _RunPlan:
         "input_hashes": "input_hashes.tsv" if args.hash_inputs else "",
         "solver_config": str(config.path),
         "incremental": "yes",
+        "target_branch": config.target_branch,
+        "smtbatch_branch": smtbatch_branch,
     }
     for solver, values in provenance.items():
         for key, value in values.items():
@@ -959,6 +962,7 @@ def _prepare_resume(args: argparse.Namespace) -> _RunPlan:
     solvers = tuple(dict.fromkeys(job.solver for job in jobs))
     metadata = _read_metadata(output_dir / "metadata.txt")
     config = _resume_config(metadata)
+    validate_target_branch(config)
     missing = [name for name in solvers if name not in config.solvers]
     if missing:
         raise ValueError(f"resume needs solver definitions missing from {config.path}: {', '.join(missing)}")

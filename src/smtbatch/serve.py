@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
-from .config import Config, find_config_path, load_config
+from .config import Config, branch_status, find_config_path, load_config
 from .task import (
     RESULT_INCREMENTAL_FIELDS,
     VALID_TASK_RESULTS,
@@ -217,16 +217,26 @@ class ExperimentManager:
         self._config_error = ""
         return config
 
+    def _require_matching_branch(self) -> None:
+        config = self._solver_config()
+        _, valid, error = branch_status(config)
+        if not valid:
+            raise ValueError(error)
+
     def config(self) -> dict[str, object]:
         try:
             config = self._solver_config()
             solvers = list(config.solvers)
             solver_options = list(config.solver_options)
             error = ""
+            branch, valid, branch_error = branch_status(config)
+            target_branch = config.target_branch
         except ValueError as exc:
             solvers = []
             solver_options = []
             error = str(exc)
+            branch, valid, branch_error = "", False, str(exc)
+            target_branch = ""
         return {
             "config_path": str(self._config.path) if self._config is not None else "",
             "config_revision": ":".join(str(value) for value in self._config_signature or ()),
@@ -235,6 +245,11 @@ class ExperimentManager:
             "solvers": solvers,
             "solver_options": solver_options,
             "config_error": error,
+            "target_branch": target_branch,
+            "smtbatch_branch": branch,
+            "branch_valid": valid,
+            "can_launch": valid,
+            "branch_error": branch_error,
             "browse_available": shutil.which("osascript") is not None,
             "defaults": {"timeout": 30, "jobs": max(1, (os.cpu_count() or 2) // 2)},
             "last_run": self._read_last_run(),
@@ -559,6 +574,7 @@ class ExperimentManager:
     def launch(self, request: object) -> dict[str, object]:
         if not isinstance(request, dict):
             raise ValueError("request body must be a JSON object")
+        self._require_matching_branch()
         requested_name = request.get("name", "")
         if not isinstance(requested_name, str):
             raise ValueError("name must be text")
@@ -670,6 +686,7 @@ class ExperimentManager:
         """Relaunch an interrupted or failed run, rerunning only its missing jobs."""
         if not isinstance(request, dict):
             raise ValueError("request body must be a JSON object")
+        self._require_matching_branch()
         run_dir = self._run_dir(run_id)
         try:
             initial_status = self._progress(run_id).get("status")

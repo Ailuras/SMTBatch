@@ -10,6 +10,8 @@ Config schema:
     inputs = "benchmarks"     # default benchmark root, relative to the config file
     results = "results"       # default results root, relative to the config file
     port = 8000               # optional dashboard port
+    target_branch = "Incremental"  # SMTBatch checkout at <project>/SMTBatch
+
 
     [solvers.my-solver]
     label = "My solver"             # optional label shown in the dashboard
@@ -71,7 +73,9 @@ class Config:
     solvers: dict[str, SolverSpec]
     inputs_root: Path
     results_root: Path
+    smtbatch_root: Path
     port: int = 8000
+    target_branch: str = "main"
 
     @property
     def solver_options(self) -> tuple[dict[str, str], ...]:
@@ -108,9 +112,66 @@ def load_config(start: Path | None = None) -> Config:
     defaults = data.get("defaults", {})
     if not isinstance(defaults, dict):
         raise RuntimeError(f"[defaults] must be a table in {path}")
+    target_branch = defaults.get("target_branch", "main")
+    if (
+        not isinstance(target_branch, str)
+        or not target_branch.strip()
+        or target_branch != target_branch.strip()
+        or any(char.isspace() for char in target_branch)
+    ):
+        raise RuntimeError(f"[defaults] target_branch must be a Git branch name in {path}")
     inputs_root = _resolve_root(defaults.get("inputs", "benchmarks"), path)
     results_root = _resolve_root(defaults.get("results", "results"), path)
-    return Config(path.resolve(), solvers, inputs_root, results_root, _parse_port(defaults.get("port", 8000), path))
+    return Config(
+        path=path.resolve(),
+        solvers=solvers,
+        inputs_root=inputs_root,
+        results_root=results_root,
+        smtbatch_root=(path.parent / "SMTBatch").resolve(),
+        port=_parse_port(defaults.get("port", 8000), path),
+        target_branch=target_branch,
+    )
+
+
+def current_git_branch(root: Path) -> str:
+    git_dir = root / ".git"
+    try:
+        if git_dir.is_file():
+            payload = git_dir.read_text(encoding="utf-8").strip()
+            marker = "gitdir:"
+            if payload.lower().startswith(marker):
+                git_dir = Path(payload[len(marker) :].strip())
+                if not git_dir.is_absolute():
+                    git_dir = (root / git_dir).resolve()
+        text = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise RuntimeError(f"unable to inspect Git branch in {root}: {exc}") from exc
+    prefix = "ref: refs/heads/"
+    if text.startswith(prefix):
+        branch = text[len(prefix) :]
+        if branch and not any(char.isspace() for char in branch):
+            return branch
+    raise RuntimeError(f"repository is not on a named Git branch: {root}")
+
+
+def branch_status(config: Config) -> tuple[str, bool, str]:
+    try:
+        branch = current_git_branch(config.smtbatch_root)
+    except RuntimeError as exc:
+        return "", False, str(exc)
+    if branch != config.target_branch:
+        return branch, False, (
+            f"wrong SMTBatch branch: expected {config.target_branch!r}, found {branch!r} "
+            f"in {config.smtbatch_root}"
+        )
+    return branch, True, ""
+
+
+def validate_target_branch(config: Config) -> str:
+    branch, valid, error = branch_status(config)
+    if not valid:
+        raise RuntimeError(error)
+    return branch
 
 
 def _parse_port(value: object, path: Path) -> int:

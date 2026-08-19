@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +13,27 @@ from unittest import mock
 from smtbatch.run import _RunLock
 from smtbatch.serve import ExperimentManager
 from smtbatch.task import RESULT_FIELDS
+
+
+def _init_smtbatch_checkout(root: Path, branch: str = "main") -> Path:
+    checkout = root / "SMTBatch"
+    checkout.mkdir()
+    (checkout / "marker").write_text(f"{branch}\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "init", "-b", branch],
+        cwd=checkout,
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    subprocess.run(["git", "add", "marker"], cwd=checkout, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "fixture"],
+        cwd=checkout,
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    return checkout
 
 
 class ExperimentManagerTests(unittest.TestCase):
@@ -49,6 +71,7 @@ command = ["{binary}", "{input}"]
         )
         self.formula = self.inputs / "sample.smt2"
         self.formula.write_text("(check-sat)\n", encoding="utf-8")
+        _init_smtbatch_checkout(root)
         self.run = self.results / "sample-run"
         self.run.mkdir()
         (self.run / "jobs.tsv").write_text(
@@ -270,7 +293,26 @@ command = ["{binary}", "{input}"]
             [{"name": "alpha", "label": "Alpha engine"}, {"name": "beta", "label": "beta"}],
         )
         self.assertEqual(config["config_path"], str(self.config_path))
+        self.assertEqual(config["target_branch"], "main")
+        self.assertEqual(config["smtbatch_branch"], "main")
+        self.assertTrue(config["can_launch"])
         self.assertIsInstance(config["browse_available"], bool)
+
+    def test_launch_rejects_wrong_smtbatch_branch(self) -> None:
+        self.config_path.write_text(
+            self.config_path.read_text(encoding="utf-8").replace(
+                '[defaults]\ninputs = "inputs"\nresults = "results"',
+                '[defaults]\ninputs = "inputs"\nresults = "results"\ntarget_branch = "Incremental"',
+            ),
+            encoding="utf-8",
+        )
+        config = self.manager.config()
+        self.assertFalse(config["can_launch"])
+        self.assertIn("expected 'Incremental'", config["branch_error"])
+        with self.assertRaisesRegex(ValueError, "wrong SMTBatch branch"):
+            self.manager.launch(
+                {"input": str(self.inputs), "solvers": ["alpha"], "timeout": 30, "jobs": 1, "limit": 0, "name": "bad-branch"}
+            )
 
     def test_config_api_reloads_solver_menu_after_toml_change(self) -> None:
         self.config_path.write_text(

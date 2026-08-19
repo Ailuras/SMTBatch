@@ -6,6 +6,7 @@ import io
 import json
 import os
 import signal
+import subprocess
 import tempfile
 import threading
 import time
@@ -14,6 +15,8 @@ from collections import Counter
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
+
+from smtbatch.config import load_config, validate_target_branch
 
 from smtbatch.run import (
     ProgressTracker,
@@ -29,6 +32,27 @@ from smtbatch.run import (
     solver_bundle_hash,
 )
 from smtbatch.task import JobSpec, load_jobs
+
+
+def _init_smtbatch_checkout(root: Path, branch: str = "main") -> Path:
+    checkout = root / "SMTBatch"
+    checkout.mkdir()
+    (checkout / "marker").write_text(f"{branch}\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "init", "-b", branch],
+        cwd=checkout,
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    subprocess.run(["git", "add", "marker"], cwd=checkout, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "fixture"],
+        cwd=checkout,
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    return checkout
 
 
 class ResumeLogicTests(unittest.TestCase):
@@ -52,6 +76,7 @@ class ResumeLogicTests(unittest.TestCase):
             '[solvers.alpha]\nbinary = "bin/alpha"\ncommand = ["{binary}", "{input}"]\n',
             encoding="utf-8",
         )
+        _init_smtbatch_checkout(root)
         self.formulas = []
         for index in range(4):
             formula = inputs / f"f{index}.smt2"
@@ -207,7 +232,35 @@ class ResumeLogicTests(unittest.TestCase):
         )
         self.assertIn("alpha_solver_artifacts_json=", metadata)
         self.assertIn("alpha_solver_bundle_schema=linked-artifacts-v1\n", metadata)
+        self.assertIn("target_branch=main\n", metadata)
+        self.assertIn("smtbatch_branch=main\n", metadata)
         self.assertEqual(plan.pair_count, 4)
+
+    def test_prepare_fresh_rejects_wrong_smtbatch_branch(self) -> None:
+        self.config_path.write_text(
+            self.config_path.read_text(encoding="utf-8").replace(
+                '[defaults]\ninputs = "inputs"\nresults = "results"\n',
+                '[defaults]\ninputs = "inputs"\nresults = "results"\ntarget_branch = "Incremental"\n',
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(RuntimeError, "wrong SMTBatch branch"):
+            _prepare_fresh(
+                parse_args(
+                    [
+                        "--solver",
+                        "alpha",
+                        "--input",
+                        str(self.root / "inputs"),
+                        "--output",
+                        str(self.root / "results" / "wrong-branch"),
+                    ]
+                )
+            )
+        config = load_config(self.root)
+        self.assertEqual(config.target_branch, "Incremental")
+        with self.assertRaisesRegex(RuntimeError, "expected 'Incremental'"):
+            validate_target_branch(config)
 
     def test_prepare_resume_preserves_initial_metadata_and_appends_history(self) -> None:
         run_dir = self._make_run("history", completed=1)

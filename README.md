@@ -26,6 +26,7 @@ wins, so no environment variable is ever needed.
 inputs = "benchmarks"    # default benchmark root, relative to the config file
 results = "results"      # default results root, relative to the config file
 port = 8000              # dashboard port (optional)
+target_branch = "Incremental"  # SMTBatch checkout at <project-root>/SMTBatch
 
 [solvers.my-solver]
 label = "My solver"             # optional label shown in the dashboard
@@ -47,6 +48,11 @@ The TOML table is the complete solver menu: the dashboard exposes every
 configured entry and refreshes the menu when the file changes. Solver labels
 are optional; when omitted, the table key is shown.
 See `smtbatch.toml`.
+
+The SMTBatch checkout at `<project-root>/SMTBatch` must match `[defaults] target_branch`
+to run, launch, or resume work. The consuming project branch is independent. A
+mismatched SMTBatch branch may still start the dashboard and inspect historical
+runs. `target_branch` defaults to `main` when omitted.
 
 ## Usage
 
