@@ -510,13 +510,13 @@ command = ["{binary}", "{input}"]
         self.config_path.write_text(
             self.config_path.read_text(encoding="utf-8").replace(
                 '[defaults]\ninputs = "inputs"\nresults = "results"',
-                '[defaults]\ninputs = "inputs"\nresults = "results"\ntarget_branch = "Incremental"',
+                '[defaults]\ninputs = "inputs"\nresults = "results"\ntarget_branch = "feat/incremental"',
             ),
             encoding="utf-8",
         )
         config = self.manager.config()
         self.assertFalse(config["can_launch"])
-        self.assertIn("expected 'Incremental'", config["branch_error"])
+        self.assertIn("expected 'feat/incremental'", config["branch_error"])
         with self.assertRaisesRegex(ValueError, "wrong SMTBatch branch"):
             self.manager.launch(
                 {"input": str(self.inputs), "solvers": ["alpha"], "timeout": 30, "jobs": 1, "limit": 0, "name": "bad-branch"}

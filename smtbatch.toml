@@ -5,7 +5,7 @@
 inputs = "benchmarks"
 results = "results"
 port = 8000
-target_branch = "Incremental"
+target_branch = "feat/incremental"
 
 [solvers.my-solver]
 label = "My solver"

@@ -26,7 +26,7 @@ wins, so no environment variable is ever needed.
 inputs = "benchmarks"    # default benchmark root, relative to the config file
 results = "results"      # default results root, relative to the config file
 port = 8000              # dashboard port (optional)
-target_branch = "Incremental"  # SMTBatch checkout at <project-root>/SMTBatch
+target_branch = "feat/incremental"  # SMTBatch checkout at <project-root>/SMTBatch
 
 [solvers.my-solver]
 label = "My solver"             # optional label shown in the dashboard

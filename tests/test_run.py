@@ -304,7 +304,7 @@ class ResumeLogicTests(unittest.TestCase):
         self.config_path.write_text(
             self.config_path.read_text(encoding="utf-8").replace(
                 '[defaults]\ninputs = "inputs"\nresults = "results"\n',
-                '[defaults]\ninputs = "inputs"\nresults = "results"\ntarget_branch = "Incremental"\n',
+                '[defaults]\ninputs = "inputs"\nresults = "results"\ntarget_branch = "feat/incremental"\n',
             ),
             encoding="utf-8",
         )
@@ -322,8 +322,8 @@ class ResumeLogicTests(unittest.TestCase):
                 )
             )
         config = load_config(self.root)
-        self.assertEqual(config.target_branch, "Incremental")
-        with self.assertRaisesRegex(RuntimeError, "expected 'Incremental'"):
+        self.assertEqual(config.target_branch, "feat/incremental")
+        with self.assertRaisesRegex(RuntimeError, "expected 'feat/incremental'"):
             validate_target_branch(config)
 
     def test_prepare_resume_preserves_initial_metadata_and_appends_history(self) -> None:
