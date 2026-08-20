@@ -5,12 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SMTBatch Report</title>
   <style>
-    :root { --page:#07111b; --panel:#10202e; --panel2:#142838; --line:#294154; --text:#edf5fb; --muted:#90a6b8; --accent:#56d5a7; --blue:#80bcff; --red:#ff8a86; --yellow:#f1c96d; } * { box-sizing:border-box; } body { margin:0; background:linear-gradient(150deg,#07111b,#0d1d2a 52%,#0a1723); color:var(--text); font:14px/1.45 Inter,ui-sans-serif,system-ui,sans-serif; } button,input,select { border:1px solid var(--line); border-radius:7px; background:var(--panel2); color:var(--text); font:inherit; } button { padding:8px 11px; cursor:pointer; } button:hover:not(:disabled) { border-color:var(--blue); } button:disabled { cursor:not-allowed; opacity:.5; } select,input { padding:7px 9px; } a { color:var(--blue); }
-    .page { width:min(1320px,calc(100% - 36px)); margin:0 auto; padding:28px 0 52px; } .top { display:flex; justify-content:space-between; gap:22px; align-items:start; margin-bottom:22px; } .back { display:inline-block; margin-bottom:14px; color:var(--muted); text-decoration:none; } .back:hover { color:var(--blue); } .eyebrow { margin:0 0 4px; color:var(--accent); font:700 10px/1 ui-monospace,monospace; letter-spacing:.16em; } h1,h2,p { margin-top:0; } h1 { margin-bottom:0; font-size:clamp(25px,4vw,42px); letter-spacing:-.04em; } h2 { margin-bottom:4px; font-size:17px; } p { margin-bottom:0; color:var(--muted); } .status { margin-top:8px; font:12px ui-monospace,monospace; } .error { color:var(--red); }
-    .summary,.grid { display:grid; gap:11px; } .summary { grid-template-columns:repeat(4,minmax(0,1fr)); margin-bottom:18px; } .grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .grid > .solver-summary-panel { grid-column:1/-1; } .panel,.metric { border:1px solid var(--line); border-radius:11px; background:rgba(16,32,46,.92); } .metric { padding:13px; } .metric span { display:block; color:var(--muted); font-size:10px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; } .metric strong { display:block; margin-top:5px; font:650 25px/1 ui-monospace,monospace; } .panel { min-width:0; padding:17px; } .panel-head { display:flex; justify-content:space-between; align-items:end; gap:12px; margin-bottom:11px; } .panel-head p { font-size:12px; } .filters { display:flex; gap:8px; flex-wrap:wrap; } .filters label { display:grid; gap:4px; color:var(--muted); font-size:10px; font-weight:700; letter-spacing:.07em; text-transform:uppercase; }
-    table { width:100%; border-collapse:collapse; font-size:12px; } th,td { padding:8px 7px; border-bottom:1px solid var(--line); text-align:center; } th { color:var(--muted); font-size:10px; letter-spacing:.06em; text-transform:uppercase; } tr:last-child td { border:0; } .best { font-weight:700; color:var(--accent); } .chart { display:block; width:100%; aspect-ratio:580/330; } .axis { stroke:#496176; stroke-width:1; } .gridline { stroke:#274255; stroke-width:1; stroke-dasharray:3 4; } .axis-label { fill:var(--muted); font-size:10px; } .line { fill:none; stroke-width:2.5; } .legend { display:flex; flex-wrap:wrap; gap:7px 13px; margin-top:5px; color:var(--muted); font-size:11px; } .legend span { display:inline-flex; align-items:center; gap:5px; } .legend i { width:9px; height:9px; border-radius:50%; } .empty { padding:45px 15px; color:var(--muted); text-align:center; } .hidden { display:none!important; }
-    .formula-panel { margin-top:11px; } .scatter { display:block; width:100%; aspect-ratio:580/330; border-radius:8px; background:#0b1825; } .formula-tools { display:flex; gap:8px; } .formula-tools input { width:min(300px,55vw); } .formula-wrap { overflow:auto; border:1px solid var(--line); border-radius:8px; } .formula-table { min-width:850px; } .formula-table th,.formula-table td { text-align:center; } .formula-table td { white-space:nowrap; } .formula-table th:first-child,.formula-table td:first-child { max-width:430px; overflow:hidden; text-align:left; text-overflow:ellipsis; } .formula-link { text-decoration:none; } .formula-link:hover { text-decoration:underline; } .formula-state,.formula-result { font-weight:700; text-transform:uppercase; } .formula-state { color:var(--blue); } .formula-result.sat { color:var(--accent); } .formula-result.unsat,.formula-result.error { color:var(--red); } .formula-result.unknown,.formula-result.timeout { color:var(--yellow); } .formula-time { color:var(--muted); font-size:10px; } .formula-detail { color:var(--muted); font-size:10px; } .open-log { margin-left:5px; color:var(--muted); font-size:11px; text-decoration:none; } .open-log:hover { color:var(--blue); } .formula-pager { display:flex; justify-content:flex-end; align-items:center; gap:9px; margin-top:10px; color:var(--muted); font-size:12px; } .formula-pager select { min-width:0; }
-    @media (max-width:800px) { .summary { grid-template-columns:repeat(2,minmax(0,1fr)); } .grid { grid-template-columns:1fr; } .top { display:block; } .top button { margin-top:14px; } } @media (max-width:560px) { .page { width:min(100% - 20px,1320px); padding-top:17px; } .panel { padding:13px; } .panel-head { align-items:start; flex-direction:column; } .filters { width:100%; } .filters input,.filters select { flex:1; min-width:0; } }
+    :root { --page:#07111b; --panel:#10202e; --panel2:#142838; --line:#294154; --text:#edf5fb; --muted:#90a6b8; --accent:#56d5a7; --blue:#80bcff; --red:#ff8a86; --yellow:#f1c96d; --orange:#e89a5c; --gray:#8b9aab; }
+    * { box-sizing:border-box; } body { margin:0; background:linear-gradient(150deg,#07111b,#0d1d2a 52%,#0a1723); color:var(--text); font:14px/1.45 Inter,ui-sans-serif,system-ui,sans-serif; } button,input,select { border:1px solid var(--line); border-radius:7px; background:var(--panel2); color:var(--text); font:inherit; } button { padding:8px 11px; cursor:pointer; } button:hover:not(:disabled) { border-color:var(--blue); } button:disabled { cursor:not-allowed; opacity:.5; } select,input { padding:7px 9px; } a { color:var(--blue); }
+    .page { width:min(1440px,calc(100% - 36px)); margin:0 auto; padding:28px 0 52px; } .top { display:flex; justify-content:space-between; gap:22px; align-items:start; margin-bottom:22px; } .back { display:inline-block; margin-bottom:14px; color:var(--muted); text-decoration:none; } .back:hover { color:var(--blue); } .eyebrow { margin:0 0 4px; color:var(--accent); font:700 10px/1 ui-monospace,monospace; letter-spacing:.16em; } h1,h2,p { margin-top:0; } h1 { margin-bottom:0; font-size:clamp(25px,4vw,42px); letter-spacing:-.04em; } h2 { margin-bottom:4px; font-size:17px; } p { margin-bottom:0; color:var(--muted); } .status { margin-top:8px; font:12px ui-monospace,monospace; } .error { color:var(--red); }
+    .summary,.grid { display:grid; gap:11px; } .summary { grid-template-columns:repeat(6,minmax(0,1fr)); margin-bottom:18px; } .grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .grid > .solver-summary-panel { grid-column:1/-1; } .panel,.metric { border:1px solid var(--line); border-radius:11px; background:rgba(16,32,46,.92); } .metric { padding:13px; } .metric span { display:block; color:var(--muted); font-size:10px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; } .metric strong { display:block; margin-top:5px; font:650 25px/1 ui-monospace,monospace; } .panel { min-width:0; padding:17px; } .panel-head { display:flex; justify-content:space-between; align-items:end; gap:12px; margin-bottom:11px; } .panel-head p { font-size:12px; } .filters { display:flex; gap:8px; flex-wrap:wrap; align-items:center; } .filters label { display:grid; gap:4px; color:var(--muted); font-size:10px; font-weight:700; letter-spacing:.07em; text-transform:uppercase; }
+    table { width:100%; border-collapse:collapse; font-size:12px; } th,td { padding:8px 7px; border-bottom:1px solid var(--line); text-align:center; } th { color:var(--muted); font-size:10px; letter-spacing:.06em; text-transform:uppercase; } tr:last-child td { border:0; } .best { font-weight:700; color:var(--accent); } .chart { display:block; width:100%; aspect-ratio:580/330; } .axis { stroke:#496176; stroke-width:1; } .gridline { stroke:#274255; stroke-width:1; stroke-dasharray:3 4; } .axis-label { fill:var(--muted); font-size:10px; } .line { fill:none; stroke-width:2.5; } .legend { display:flex; flex-wrap:wrap; gap:7px 13px; margin:8px 0 10px; color:var(--muted); font-size:11px; } .legend span { display:inline-flex; align-items:center; gap:5px; } .legend i { width:9px; height:9px; border-radius:50%; } .empty { padding:45px 15px; color:var(--muted); text-align:center; } .hidden { display:none!important; }
+    .table-title { margin:16px 0 6px; color:var(--muted); font:700 10px ui-monospace,monospace; letter-spacing:.08em; text-transform:uppercase; } .table-title:first-child { margin-top:0; }
+    .bar-row { display:grid; grid-template-columns:120px minmax(0,1fr) 78px; gap:8px; align-items:center; margin:7px 0; font:12px ui-monospace,monospace; } .bar-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .bar-track { display:flex; height:16px; overflow:hidden; border:1px solid var(--line); border-radius:99px; background:#0b1825; } .bar-track i { display:block; height:100%; min-width:0; } .bar-sat { background:#56d5a7; } .bar-unsat { background:#ff8a86; } .bar-unknown { background:#f1c96d; } .bar-error { background:#8b9aab; } .bar-timeout { background:#e89a5c; } .bar-unreached { background:#334556; } .bar-value { text-align:right; color:var(--muted); }
+    .formula-panel { margin-top:11px; } .scatter { display:block; width:100%; aspect-ratio:580/330; border-radius:8px; background:#0b1825; } .formula-wrap { overflow:auto; border:1px solid var(--line); border-radius:8px; } .formula-table { min-width:850px; } .formula-table th,.formula-table td { text-align:center; } .formula-table td { white-space:nowrap; } .formula-table thead tr:first-child th:first-child,.formula-table tbody td:first-child { max-width:430px; overflow:hidden; text-align:left; text-overflow:ellipsis; } .formula-link { text-decoration:none; } .formula-link:hover { text-decoration:underline; } .formula-state,.formula-result { font-weight:700; text-transform:uppercase; } .formula-result { display:block; } .formula-state { color:var(--blue); } .formula-result.sat,.formula-result.complete,.formula-result.solved { color:var(--accent); } .formula-result.unsat,.formula-result.error { color:var(--red); } .formula-result.unknown,.formula-result.timeout,.formula-result.partial,.formula-result.mixed { color:var(--yellow); } .formula-result.unreached,.formula-result.pending { color:var(--muted); } .formula-metric { display:block; margin-top:3px; color:var(--text); font:700 12px ui-monospace,monospace; white-space:nowrap; } .formula-time { color:var(--muted); font-size:10px; } .formula-detail { display:block; color:var(--muted); font-size:10px; } .open-log { margin-left:5px; color:var(--muted); font-size:11px; text-decoration:none; white-space:nowrap; } .open-log:hover { color:var(--blue); } .formula-pager { display:flex; justify-content:flex-end; align-items:center; gap:9px; margin-top:10px; color:var(--muted); font-size:12px; } .formula-pager select { min-width:0; }
+    @media (max-width:800px) { .summary { grid-template-columns:repeat(2,minmax(0,1fr)); } .grid { grid-template-columns:1fr; } .top { display:block; } .top button { margin-top:14px; } } @media (max-width:560px) { .page { width:min(100% - 20px,1440px); padding-top:17px; } .panel { padding:13px; } .panel-head { align-items:start; flex-direction:column; } .filters { width:100%; } .filters input,.filters select { flex:1; min-width:0; } }
   </style>
 </head>
 <body>
@@ -18,23 +21,585 @@
     <a class="back" href="/">&larr; Experiment console</a>
     <div class="top"><div><p class="eyebrow">RUN ANALYSIS</p><h1 id="title">Loading report...</h1><p class="status" id="status"></p></div><button id="refresh" type="button">Refresh analysis</button></div>
     <div class="summary" id="summary"></div>
-    <div class="grid"><section class="panel solver-summary-panel"><div class="panel-head"><div><h2>Solver summary</h2><p>File success is last sat/unsat after the process finishes every check-sat. Intermediate unknown is allowed.</p></div></div><div id="solver-summary"></div></section><section class="panel"><div class="panel-head"><div><h2>Cactus plot</h2><p>Solved instances within a time budget up to the timeout.</p></div></div><svg class="chart" id="cactus" viewBox="0 0 580 330" role="img" aria-label="Cactus plot"></svg><div class="empty hidden" id="cactus-empty">No SAT or UNSAT results match this filter.</div><div class="legend" id="cactus-legend"></div></section><section class="panel scatter-panel" id="scatter-panel"><div class="panel-head"><div><h2>Solver comparison</h2><p>Log-time scatter. The diagonal means equal time.</p></div></div><canvas class="scatter" id="scatter" width="580" height="330" role="img" aria-label="Solver comparison scatter plot"></canvas><div class="empty hidden" id="scatter-empty">Choose two solvers with completed timing data.</div><div class="filters"><select id="left-solver"></select><select id="right-solver"></select></div></section></div>
-    <section class="panel formula-panel"><div class="panel-head"><div><h2>Formula list</h2><p id="formula-count">Loading formulas...</p></div><div class="filters"><label>Search<input id="formula-search" type="search" placeholder="Formula path"></label><label>State<select id="formula-state"><option value="all">All states</option><option value="consistent">Consistent</option><option value="conflict">Conflict</option><option value="hard">Hard</option><option value="error">Error</option><option value="other">Other</option><option value="pending">Pending</option></select></label></div></div><div class="formula-wrap"><table class="formula-table"><thead id="formula-head"></thead><tbody id="formula-rows"></tbody></table></div><div class="formula-pager"><label for="formula-page-size">Per page</label><select id="formula-page-size"><option selected>20</option><option>50</option><option>100</option><option>200</option></select><button id="formula-prev" type="button">Prev</button><span id="formula-page-info"></span><button id="formula-next" type="button">Next</button></div></section>
+    <div class="grid">
+      <section class="panel solver-summary-panel">
+        <div class="panel-head"><div><h2>Solver summary</h2><p>check-sat outcomes are sat/unsat/unknown/error; leftover POs are unreached. File status is complete/partial/timeout/error — timeout is a process result, not a printed check-sat.</p></div></div>
+        <div id="query-bars"></div>
+        <div id="solver-summary"></div>
+      </section>
+      <section class="panel">
+        <div class="panel-head">
+          <div><h2>Cactus plot</h2><p id="cactus-caption">Cumulative solved check-sat answers vs file runtime, up to the timeout.</p></div>
+          <select id="cactus-metric" aria-label="Cactus metric"><option value="queries">check-sat</option><option value="files">files</option></select>
+        </div>
+        <svg class="chart" id="cactus" viewBox="0 0 580 330" role="img" aria-label="Cactus plot"></svg>
+        <div class="empty hidden" id="cactus-empty">No solved check-sat answers match this filter.</div>
+        <div class="legend" id="cactus-legend"></div>
+      </section>
+      <section class="panel scatter-panel" id="scatter-panel">
+        <div class="panel-head">
+          <div><h2>Solver comparison</h2><p id="scatter-caption">Coverage per file. The diagonal means equal coverage.</p></div>
+          <div class="filters">
+            <select id="scatter-metric" aria-label="Scatter metric"><option value="coverage">Coverage</option><option value="time">Time</option></select>
+            <select id="left-solver"></select>
+            <select id="right-solver"></select>
+          </div>
+        </div>
+        <canvas class="scatter" id="scatter" width="580" height="330" role="img" aria-label="Solver comparison scatter plot"></canvas>
+        <div class="empty hidden" id="scatter-empty">Choose two solvers with completed timing data.</div>
+        <div class="legend" id="scatter-legend"></div>
+      </section>
+    </div>
+    <section class="panel formula-panel">
+      <div class="panel-head">
+        <div><h2>Formula list</h2><p id="formula-count">Loading formulas...</p></div>
+        <div class="filters">
+          <label>Search<input id="formula-search" type="search" placeholder="Formula path"></label>
+          <label>State<select id="formula-state"><option value="all">All states</option><option value="consistent">Consistent</option><option value="conflict">Conflict</option><option value="hard">Hard</option><option value="error">Error</option><option value="other">Other</option><option value="pending">Pending</option></select></label>
+        </div>
+      </div>
+      <div class="formula-wrap"><table class="formula-table"><thead id="formula-head"></thead><tbody id="formula-rows"></tbody></table></div>
+      <div class="formula-pager">
+        <label for="formula-page-size">Per page</label>
+        <select id="formula-page-size"><option selected>20</option><option>50</option><option>100</option><option>200</option></select>
+        <button id="formula-prev" type="button">Prev</button>
+        <span id="formula-page-info"></span>
+        <button id="formula-next" type="button">Next</button>
+      </div>
+    </section>
   </main>
   <script>
-    const $=id=>document.getElementById(id), colors=["#56d5a7","#80bcff","#f1c96d","#d8a4ff","#ff8a86","#66d9e8"];let summary=null,formulaPage=1,formulaTimer=null,formulaController=null,scatterController=null;
-    const runId=(()=>{const match=location.pathname.match(/^\/runs\/(.+)\/report$/);return match?decodeURIComponent(match[1]):""})(); const seconds=value=>{const n=Number(value)||0;return n<60?`${n.toFixed(2)}s`:`${Math.floor(n/60)}m ${(n%60).toFixed(0)}s`}; const safeHref=value=>typeof value==="string"&&(value.startsWith("/api/")||value.startsWith("/data/"))?value:"";
-    function svg(node,name,attributes={},text=""){const element=document.createElementNS("http://www.w3.org/2000/svg",name);for(const [key,value] of Object.entries(attributes))element.setAttribute(key,String(value));if(text)element.textContent=text;node.append(element);return element} function resetSvg(id){const node=$(id);node.replaceChildren();return node}
-    function axis(svgNode,width,height,maxX,maxY){const left=48,top=18,plotWidth=width-left-16,plotHeight=height-top-38;for(let step=0;step<=4;step++){const x=left+plotWidth*step/4,y=top+plotHeight*(1-step/4);svg(svgNode,"line",{x1:x,y1:top,x2:x,y2:top+plotHeight,class:"gridline"});svg(svgNode,"line",{x1:left,y1:y,x2:left+plotWidth,y2:y,class:"gridline"});svg(svgNode,"text",{x,y:height-18,class:"axis-label","text-anchor":"middle"},seconds(maxX*step/4));svg(svgNode,"text",{x:left-8,y:y+3,class:"axis-label","text-anchor":"end"},String(Math.round(maxY*step/4)))}svg(svgNode,"line",{x1:left,y1:top+plotHeight,x2:left+plotWidth,y2:top+plotHeight,class:"axis"});svg(svgNode,"line",{x1:left,y1:top,x2:left,y2:top+plotHeight,class:"axis"});return {left,top,plotWidth,plotHeight}}
-    function renderSummary(){const solved=summary.solvers.reduce((total,solver)=>total+Number(summary.by_solver[solver].solved||0),0);const complete=summary.solvers.reduce((total,solver)=>total+Number(summary.by_solver[solver].file_complete||0),0);const cards=[["Formulas",summary.case_count],["Completed pairs",summary.completed_pairs],["Solved files",solved],["File complete",complete]];$("summary").replaceChildren(...cards.map(([label,value])=>{const node=document.createElement("div"),name=document.createElement("span"),number=document.createElement("strong");node.className="metric";name.textContent=label;number.textContent=String(value);node.append(name,number);return node}));const best={solved:Math.max(0,...summary.solvers.map(solver=>Number(summary.by_solver[solver].solved||0))),sat:Math.max(0,...summary.solvers.map(solver=>Number(summary.by_solver[solver].outcomes.sat||0))),unsat:Math.max(0,...summary.solvers.map(solver=>Number(summary.by_solver[solver].outcomes.unsat||0)))},table=document.createElement("table"),head=document.createElement("thead"),row=document.createElement("tr");for(const label of ["Solver","Completed","Solved","Complete","Partial","Answers","Avg solved","Unique solved","sat","Avg sat","unsat","Avg unsat","unknown","timeout","error"]){const th=document.createElement("th");th.textContent=label;row.append(th)}head.append(row);const body=document.createElement("tbody");for(const solver of summary.solvers){const values=summary.by_solver[solver],cells=[["solver",solver],["completed",values.completed],["solved",values.solved],["complete",values.file_complete||0],["partial",values.partial_timeout||0],["answers",`${values.answers||0}/${values.expected||0}`],["avg",values.avg_solved_seconds],["unique",values.unique_solved||0],["sat",values.outcomes.sat||0],["avg",values.avg_sat_seconds],["unsat",values.outcomes.unsat||0],["avg",values.avg_unsat_seconds],["unknown",values.outcomes.unknown||0],["timeout",values.outcomes.timeout||0],["error",values.outcomes.error||0]],tr=document.createElement("tr");for(const [kind,value] of cells){const td=document.createElement("td");td.textContent=kind==="avg"?(value===null||value===undefined?"—":`${value.toFixed(3)}s`):String(value);if((kind==="solved"||kind==="sat"||kind==="unsat")&&Number(value)===best[kind]&&Number(value)>0)td.className="best";tr.append(td)}body.append(tr)}table.append(head,body);$("solver-summary").replaceChildren(table)}
-    function renderCactus(){const chart=resetSvg("cactus"),series=summary.solvers.map((solver,index)=>({solver,color:colors[index%colors.length],points:summary.by_solver[solver].cactus||[]})),maxX=Math.max(1,Number(summary.timeout)),maxY=Math.max(1,...series.flatMap(item=>item.points.map(point=>point.solved))),box=axis(chart,580,330,maxX,maxY);let hasPoints=false;for(const item of series){if(!item.points.length)continue;hasPoints=true;let path=`M ${box.left} ${box.top+box.plotHeight}`;for(const point of item.points){path+=` L ${box.left+box.plotWidth*point.time/maxX} ${box.top+box.plotHeight*(1-point.solved/maxY)}`}svg(chart,"path",{d:path,stroke:item.color,class:"line"})}$("cactus").classList.toggle("hidden",!hasPoints);$("cactus-empty").classList.toggle("hidden",hasPoints);$("cactus-legend").replaceChildren(...series.map(item=>{const node=document.createElement("span"),dot=document.createElement("i");dot.style.background=item.color;node.append(dot,document.createTextNode(item.solver));return node}))}
-    function populateSolvers(){const left=$("left-solver"),right=$("right-solver"),oldLeft=left.value,oldRight=right.value;for(const select of [left,right]){select.replaceChildren(...summary.solvers.map(solver=>{const option=document.createElement("option");option.value=solver;option.textContent=solver;return option}))}left.value=summary.solvers.includes(oldLeft)?oldLeft:summary.solvers[0]||"";right.value=summary.solvers.includes(oldRight)&&oldRight!==left.value?oldRight:summary.solvers[1]||summary.solvers[0]||""}
-    function drawScatter(data){const canvas=$("scatter"),empty=$("scatter-empty"),context=canvas.getContext("2d"),width=canvas.width,height=canvas.height;if(!data.points.length){canvas.classList.add("hidden");empty.classList.remove("hidden");return}canvas.classList.remove("hidden");empty.classList.add("hidden");context.clearRect(0,0,width,height);const left=58,top=20,plotWidth=width-left-24,plotHeight=height-top-48,minimum=-3,maximum=Math.max(1,...data.points.flatMap(point=>[Math.log10(Math.max(point.x,.001)),Math.log10(Math.max(point.y,.001))]));context.strokeStyle="#274255";context.fillStyle="#90a6b8";context.font="10px system-ui";for(let step=0;step<=4;step++){const x=left+plotWidth*step/4,y=top+plotHeight*(1-step/4);context.setLineDash([3,4]);context.beginPath();context.moveTo(x,top);context.lineTo(x,top+plotHeight);context.moveTo(left,y);context.lineTo(left+plotWidth,y);context.stroke();context.setLineDash([]);const label=seconds(10**(minimum+(maximum-minimum)*step/4));context.fillText(label,x-14,height-20);context.fillText(label,4,y+3)}const scale=value=>left+plotWidth*(Math.log10(Math.max(value,.001))-minimum)/(maximum-minimum),scaleY=value=>top+plotHeight*(1-(Math.log10(Math.max(value,.001))-minimum)/(maximum-minimum));context.strokeStyle="rgba(240,201,108,.7)";context.beginPath();context.moveTo(scale(.001),scaleY(.001));context.lineTo(scale(10**maximum),scaleY(10**maximum));context.stroke();context.fillStyle="rgba(128,188,255,.6)";for(const point of data.points){context.beginPath();context.arc(scale(point.x),scaleY(point.y),2.4,0,Math.PI*2);context.fill()}}
-    async function loadScatter(){if(!summary)return;const left=$("left-solver").value,right=$("right-solver").value;if(!left||!right)return;if(scatterController)scatterController.abort();scatterController=new AbortController();try{const query=new URLSearchParams({left,right,state:$("formula-state").value}),response=await fetch(`/api/runs/${encodeURIComponent(runId)}/analysis/scatter?${query}`,{signal:scatterController.signal});if(!response.ok)throw new Error(await response.text());drawScatter(await response.json())}catch{}}
-    function resultCell(result){const td=document.createElement("td"),label=document.createElement("span"),time=document.createElement("span"),detail=document.createElement("span"),log=document.createElement("a");const outcome=String(result.result||"pending");label.className=`formula-result ${outcome}`;label.textContent=outcome;td.append(label);if(Number.isFinite(result.time)){time.className="formula-time";time.textContent=` ${seconds(result.time)}`;td.append(time)}if(Number.isFinite(result.queries)||result.last||result.complete){detail.className="formula-detail";const expected=Number.isFinite(result.expected)?result.expected:"?";detail.textContent=` ${Number.isFinite(result.queries)?result.queries:"?"}/${expected}${result.last?` last=${result.last}`:""}${result.complete==="no"?" incomplete":""}`;td.append(detail)}const href=safeHref(result.log_url);if(href){log.className="open-log";log.href=href;log.target="_blank";log.rel="noopener";log.title="Open solver log";log.textContent="↗";td.append(log)}return td}
-    async function loadFormulas(){if(!summary)return;if(formulaController)formulaController.abort();formulaController=new AbortController();const query=new URLSearchParams({page:String(formulaPage),page_size:$("formula-page-size").value,query:$("formula-search").value.trim(),state:$("formula-state").value});try{const response=await fetch(`/api/runs/${encodeURIComponent(runId)}/analysis/formulas?${query}`,{signal:formulaController.signal});if(!response.ok)throw new Error(await response.text());const data=await response.json(),pages=Math.max(1,Math.ceil(data.total/data.page_size));if(formulaPage>pages){formulaPage=pages;return loadFormulas()}$("formula-count").textContent=`Showing ${data.cases.length} of ${data.total} formulas`;const head=document.createElement("tr");for(const label of ["Formula","State","Done",...data.solvers]){const th=document.createElement("th");th.textContent=label;head.append(th)}$("formula-head").replaceChildren(head);const body=$("formula-rows");body.replaceChildren();for(const item of data.cases){const row=document.createElement("tr"),file=document.createElement("td"),link=document.createElement("a"),state=document.createElement("td"),done=document.createElement("td"),href=safeHref(item.file_url);file.title=item.file;if(href){link.className="formula-link";link.href=href;link.target="_blank";link.rel="noopener";link.textContent=item.file;file.append(link)}else file.textContent=item.file;state.className="formula-state";state.textContent=item.state;done.textContent=`${item.done}/${item.total}`;row.append(file,state,done);for(const solver of data.solvers)row.append(resultCell(item.results[solver]||{}));body.append(row)}if(!data.cases.length){const row=document.createElement("tr"),cell=document.createElement("td");cell.className="empty";cell.colSpan=data.solvers.length+3;cell.textContent="No formulas match the current filters.";row.append(cell);body.append(row)}$("formula-page-info").textContent=`Page ${formulaPage}/${pages}`;$("formula-prev").disabled=formulaPage<=1;$("formula-next").disabled=formulaPage>=pages}catch(error){if(error.name!=="AbortError")$("formula-count").textContent="Formula list unavailable."}}
-    async function loadSummary(){const response=await fetch(`/api/runs/${encodeURIComponent(runId)}/analysis/summary?state=${encodeURIComponent($("formula-state").value)}`,{cache:"no-store"});if(!response.ok)throw new Error(await response.text());summary=await response.json();$("title").textContent=summary.run_id;$("status").textContent=`${summary.status} · updated ${summary.updated_at||"unknown"}`;renderSummary();renderCactus();populateSolvers();await Promise.all([loadScatter(),loadFormulas()])}
-    async function refresh(){try{await loadSummary()}catch(error){$("title").textContent="Analysis unavailable";$("status").textContent=error.message||String(error);$("status").className="status error"}}const scheduleFormulas=()=>{clearTimeout(formulaTimer);formulaTimer=setTimeout(loadFormulas,250)};$("refresh").onclick=refresh;$("left-solver").onchange=loadScatter;$("right-solver").onchange=loadScatter;$("formula-search").oninput=()=>{formulaPage=1;scheduleFormulas()};$("formula-state").onchange=()=>{formulaPage=1;refresh()};$("formula-page-size").onchange=()=>{formulaPage=1;loadFormulas()};$("formula-prev").onclick=()=>{formulaPage=Math.max(1,formulaPage-1);loadFormulas()};$("formula-next").onclick=()=>{formulaPage+=1;loadFormulas()};refresh();
+    const $ = id => document.getElementById(id);
+    const colors = ["#56d5a7", "#80bcff", "#f1c96d", "#d8a4ff", "#ff8a86", "#66d9e8"];
+    const queryKeys = ["sat", "unsat", "unknown", "error", "unreached"];
+    const queryColors = {sat:"#56d5a7", unsat:"#ff8a86", unknown:"#f1c96d", error:"#8b9aab", unreached:"#334556"};
+    let summary = null, formulaPage = 1, formulaTimer = null, formulaController = null, scatterController = null, scatterData = null;
+    const runId = (() => {
+      const match = location.pathname.match(/^\/runs\/(.+)\/report$/);
+      return match ? decodeURIComponent(match[1]) : "";
+    })();
+    const seconds = value => {
+      const n = Number(value) || 0;
+      return n < 60 ? `${n.toFixed(2)}s` : `${Math.floor(n / 60)}m ${(n % 60).toFixed(0)}s`;
+    };
+    const percent = value => `${(100 * Number(value || 0)).toFixed(1)}%`;
+    const safeHref = value => typeof value === "string" && (value.startsWith("/api/") || value.startsWith("/data/")) ? value : "";
+    const coverage = (solved, expected) => {
+      const s = Number(solved) || 0, e = Number(expected) || 0;
+      return e ? percent(s / e) : "—";
+    };
+
+    function svg(node, name, attributes = {}, text = "") {
+      const element = document.createElementNS("http://www.w3.org/2000/svg", name);
+      for (const [key, value] of Object.entries(attributes)) element.setAttribute(key, String(value));
+      if (text) element.textContent = text;
+      node.append(element);
+      return element;
+    }
+    function resetSvg(id) {
+      const node = $(id);
+      node.replaceChildren();
+      return node;
+    }
+    function axis(svgNode, width, height, maxX, maxY, formatX = seconds) {
+      const left = 48, top = 18, plotWidth = width - left - 16, plotHeight = height - top - 38;
+      for (let step = 0; step <= 4; step++) {
+        const x = left + plotWidth * step / 4, y = top + plotHeight * (1 - step / 4);
+        svg(svgNode, "line", {x1:x, y1:top, x2:x, y2:top + plotHeight, class:"gridline"});
+        svg(svgNode, "line", {x1:left, y1:y, x2:left + plotWidth, y2:y, class:"gridline"});
+        svg(svgNode, "text", {x, y:height - 18, class:"axis-label", "text-anchor":"middle"}, formatX(maxX * step / 4));
+        svg(svgNode, "text", {x:left - 8, y:y + 3, class:"axis-label", "text-anchor":"end"}, String(Math.round(maxY * step / 4)));
+      }
+      svg(svgNode, "line", {x1:left, y1:top + plotHeight, x2:left + plotWidth, y2:top + plotHeight, class:"axis"});
+      svg(svgNode, "line", {x1:left, y1:top, x2:left, y2:top + plotHeight, class:"axis"});
+      return {left, top, plotWidth, plotHeight};
+    }
+    function queryCount(source, key) {
+      const raw = k => Number(source[`query_${k}`] ?? source[k] ?? 0);
+      if (key === "unreached") return raw("unreached") + raw("timeout");
+      return raw(key);
+    }
+    function querySolved(values) {
+      return Number(values.query_solved || 0);
+    }
+
+    function renderBars() {
+      const target = $("query-bars");
+      target.replaceChildren();
+      if (!summary || !summary.solvers.length) return;
+      const caption = document.createElement("p");
+      caption.className = "table-title";
+      caption.textContent = "check-sat partition";
+      target.append(caption);
+      const legend = document.createElement("div");
+      legend.className = "legend";
+      for (const key of queryKeys) {
+        const node = document.createElement("span"), dot = document.createElement("i");
+        dot.style.background = queryColors[key];
+        node.append(dot, document.createTextNode(key));
+        legend.append(node);
+      }
+      target.append(legend);
+      for (const solver of summary.solvers) {
+        const values = summary.by_solver[solver];
+        const expected = Number(values.expected || 0) || queryKeys.reduce((total, key) => total + queryCount(values, key), 0);
+        const row = document.createElement("div");
+        row.className = "bar-row";
+        const name = document.createElement("div");
+        name.className = "bar-name";
+        name.textContent = solver;
+        const track = document.createElement("div");
+        track.className = "bar-track";
+        for (const key of queryKeys) {
+          const count = queryCount(values, key);
+          if (!count || !expected) continue;
+          const slice = document.createElement("i");
+          slice.className = `bar-${key}`;
+          slice.style.flex = String(count);
+          slice.title = `${key} ${count}`;
+          track.append(slice);
+        }
+        const label = document.createElement("div");
+        label.className = "bar-value";
+        label.textContent = coverage(querySolved(values), values.expected);
+        row.append(name, track, label);
+        target.append(row);
+      }
+    }
+
+    function renderSummary() {
+      const querySolvedTotal = summary.solvers.reduce((total, solver) => total + querySolved(summary.by_solver[solver]), 0);
+      const queryExpected = summary.solvers.reduce((total, solver) => total + Number(summary.by_solver[solver].expected || 0), 0);
+      const complete = summary.solvers.reduce((total, solver) => total + Number(summary.by_solver[solver].file_complete || 0), 0);
+      const partial = summary.solvers.reduce((total, solver) => total + Number(summary.by_solver[solver].file_partial || summary.by_solver[solver].partial_timeout || 0), 0);
+      const cards = [
+        ["Formulas", summary.case_count],
+        ["Completed pairs", summary.completed_pairs],
+        ["PO solved", querySolvedTotal],
+        ["PO coverage", coverage(querySolvedTotal, queryExpected)],
+        ["File complete", complete],
+        ["File partial", partial],
+      ];
+      $("summary").replaceChildren(...cards.map(([label, value]) => {
+        const node = document.createElement("div"), name = document.createElement("span"), number = document.createElement("strong");
+        node.className = "metric";
+        name.textContent = label;
+        number.textContent = String(value);
+        node.append(name, number);
+        return node;
+      }));
+      const best = {
+        query_solved: Math.max(0, ...summary.solvers.map(solver => querySolved(summary.by_solver[solver]))),
+      };
+      const queryTable = document.createElement("table");
+      const queryHead = document.createElement("thead"), queryRow = document.createElement("tr");
+      for (const label of ["Solver", "PO solved", "Coverage", "sat", "unsat", "unknown", "error", "unreached", "answered"]) {
+        const th = document.createElement("th");
+        th.textContent = label;
+        queryRow.append(th);
+      }
+      queryHead.append(queryRow);
+      const queryBody = document.createElement("tbody");
+      for (const solver of summary.solvers) {
+        const values = summary.by_solver[solver], tr = document.createElement("tr");
+        const cells = [
+          ["solver", solver],
+          ["query_solved", querySolved(values)],
+          ["coverage", coverage(querySolved(values), values.expected)],
+          ["sat", queryCount(values, "sat")],
+          ["unsat", queryCount(values, "unsat")],
+          ["unknown", queryCount(values, "unknown")],
+          ["error", queryCount(values, "error")],
+          ["unreached", queryCount(values, "unreached")],
+          ["answers", `${values.answers || 0}/${values.expected || 0}`],
+        ];
+        for (const [kind, value] of cells) {
+          const td = document.createElement("td");
+          td.textContent = String(value);
+          if (kind === "query_solved" && Number(value) === best.query_solved && Number(value) > 0) td.className = "best";
+          tr.append(td);
+        }
+        queryBody.append(tr);
+      }
+      queryTable.append(queryHead, queryBody);
+      const fileTable = document.createElement("table");
+      const fileHead = document.createElement("thead"), fileRow = document.createElement("tr");
+      for (const label of ["Solver", "Completed", "Complete", "Partial", "Timeout", "Error"]) {
+        const th = document.createElement("th");
+        th.textContent = label;
+        fileRow.append(th);
+      }
+      fileHead.append(fileRow);
+      const fileBody = document.createElement("tbody");
+      for (const solver of summary.solvers) {
+        const values = summary.by_solver[solver], tr = document.createElement("tr");
+        const cells = [
+          solver,
+          values.completed,
+          values.file_complete || 0,
+          values.file_partial || values.partial_timeout || 0,
+          values.file_timeout || 0,
+          values.file_error || 0,
+        ];
+        for (const value of cells) {
+          const td = document.createElement("td");
+          td.textContent = String(value);
+          tr.append(td);
+        }
+        fileBody.append(tr);
+      }
+      fileTable.append(fileHead, fileBody);
+      const wrap = document.createElement("div");
+      const queryTitle = document.createElement("p");
+      queryTitle.className = "table-title";
+      queryTitle.textContent = "check-sat";
+      const fileTitle = document.createElement("p");
+      fileTitle.className = "table-title";
+      fileTitle.textContent = "files";
+      wrap.append(queryTitle, queryTable, fileTitle, fileTable);
+      $("solver-summary").replaceChildren(wrap);
+      renderBars();
+    }
+
+    function renderCactus() {
+      const metric = $("cactus-metric").value;
+      $("cactus-caption").textContent = metric === "files"
+        ? "Cumulative files whose last answer is sat/unsat vs runtime, up to the timeout."
+        : "Cumulative solved check-sat answers vs file runtime, up to the timeout. Partial files still contribute the POs they answered.";
+      $("cactus-empty").textContent = metric === "files"
+        ? "No SAT or UNSAT file results match this filter."
+        : "No solved check-sat answers match this filter.";
+      const chart = resetSvg("cactus");
+      const series = summary.solvers.map((solver, index) => ({
+        solver,
+        color: colors[index % colors.length],
+        points: (metric === "files" ? summary.by_solver[solver].file_cactus : summary.by_solver[solver].cactus) || [],
+      }));
+      const maxX = Math.max(1, Number(summary.timeout));
+      const maxY = Math.max(1, ...series.flatMap(item => item.points.map(point => point.solved)));
+      const box = axis(chart, 580, 330, maxX, maxY);
+      let hasPoints = false;
+      for (const item of series) {
+        if (!item.points.length) continue;
+        hasPoints = true;
+        let path = `M ${box.left} ${box.top + box.plotHeight}`;
+        for (const point of item.points) {
+          path += ` L ${box.left + box.plotWidth * point.time / maxX} ${box.top + box.plotHeight * (1 - point.solved / maxY)}`;
+        }
+        svg(chart, "path", {d: path, stroke: item.color, class: "line"});
+      }
+      $("cactus").classList.toggle("hidden", !hasPoints);
+      $("cactus-empty").classList.toggle("hidden", hasPoints);
+      $("cactus-legend").replaceChildren(...series.map(item => {
+        const node = document.createElement("span"), dot = document.createElement("i");
+        dot.style.background = item.color;
+        node.append(dot, document.createTextNode(item.solver));
+        return node;
+      }));
+    }
+
+    function populateSolvers() {
+      const left = $("left-solver"), right = $("right-solver"), oldLeft = left.value, oldRight = right.value;
+      for (const select of [left, right]) {
+        select.replaceChildren(...summary.solvers.map(solver => {
+          const option = document.createElement("option");
+          option.value = solver;
+          option.textContent = solver;
+          return option;
+        }));
+      }
+      left.value = summary.solvers.includes(oldLeft) ? oldLeft : summary.solvers[0] || "";
+      right.value = summary.solvers.includes(oldRight) && oldRight !== left.value ? oldRight : summary.solvers[1] || summary.solvers[0] || "";
+    }
+
+    function scatterPointColor(point) {
+      const statuses = [point.left_status, point.right_status];
+      if (statuses.includes("partial")) return "rgba(241,201,109,.8)";
+      if (statuses.every(status => status === "complete")) return "rgba(86,213,167,.75)";
+      return "rgba(128,188,255,.6)";
+    }
+
+    function drawScatter(data) {
+      const canvas = $("scatter"), empty = $("scatter-empty"), legend = $("scatter-legend"), context = canvas.getContext("2d");
+      const metric = $("scatter-metric").value;
+      $("scatter-caption").textContent = metric === "time"
+        ? "Log-time scatter. The diagonal means equal time."
+        : "Coverage per file. The diagonal means equal coverage. Yellow points have a partial file.";
+      empty.textContent = metric === "time"
+        ? "Choose two solvers with completed timing data."
+        : "Choose two solvers with coverage data.";
+      const points = (data.points || []).map(point => metric === "coverage"
+        ? {x: Number(point.left_coverage ?? 0), y: Number(point.right_coverage ?? 0), color: scatterPointColor(point)}
+        : {x: Number(point.x), y: Number(point.y), color: scatterPointColor(point)}
+      ).filter(point => Number.isFinite(point.x) && Number.isFinite(point.y) && point.x >= 0 && point.y >= 0);
+      if (!points.length) {
+        canvas.classList.add("hidden");
+        empty.classList.remove("hidden");
+        legend.replaceChildren();
+        return;
+      }
+      canvas.classList.remove("hidden");
+      empty.classList.add("hidden");
+      const width = canvas.width, height = canvas.height;
+      context.clearRect(0, 0, width, height);
+      const left = 58, top = 20, plotWidth = width - left - 24, plotHeight = height - top - 48;
+      let scaleX, scaleY, ticks;
+      if (metric === "coverage") {
+        ticks = [0, 0.25, 0.5, 0.75, 1];
+        scaleX = value => left + plotWidth * Math.min(1, Math.max(0, value));
+        scaleY = value => top + plotHeight * (1 - Math.min(1, Math.max(0, value)));
+      } else {
+        const minimum = -3;
+        const maximum = Math.max(1, ...points.flatMap(point => [Math.log10(Math.max(point.x, 0.001)), Math.log10(Math.max(point.y, 0.001))]));
+        ticks = [0, 1, 2, 3, 4].map(step => 10 ** (minimum + (maximum - minimum) * step / 4));
+        scaleX = value => left + plotWidth * (Math.log10(Math.max(value, 0.001)) - minimum) / (maximum - minimum);
+        scaleY = value => top + plotHeight * (1 - (Math.log10(Math.max(value, 0.001)) - minimum) / (maximum - minimum));
+      }
+      context.strokeStyle = "#274255";
+      context.fillStyle = "#90a6b8";
+      context.font = "10px system-ui";
+      for (let step = 0; step <= 4; step++) {
+        const x = left + plotWidth * step / 4, y = top + plotHeight * (1 - step / 4);
+        context.setLineDash([3, 4]);
+        context.beginPath();
+        context.moveTo(x, top);
+        context.lineTo(x, top + plotHeight);
+        context.moveTo(left, y);
+        context.lineTo(left + plotWidth, y);
+        context.stroke();
+        context.setLineDash([]);
+        const label = metric === "coverage" ? percent(ticks[step]) : seconds(ticks[step]);
+        context.fillText(label, x - 14, height - 20);
+        context.fillText(label, 4, y + 3);
+      }
+      context.strokeStyle = "rgba(240,201,108,.7)";
+      context.beginPath();
+      context.moveTo(scaleX(metric === "coverage" ? 0 : 0.001), scaleY(metric === "coverage" ? 0 : 0.001));
+      context.lineTo(scaleX(metric === "coverage" ? 1 : ticks[4]), scaleY(metric === "coverage" ? 1 : ticks[4]));
+      context.stroke();
+      for (const point of points) {
+        context.fillStyle = point.color;
+        context.beginPath();
+        context.arc(scaleX(point.x), scaleY(point.y), 2.4, 0, Math.PI * 2);
+        context.fill();
+      }
+      legend.replaceChildren(...[
+        ["complete", "rgba(86,213,167,.75)"],
+        ["partial", "rgba(241,201,109,.8)"],
+        ["other", "rgba(128,188,255,.6)"],
+      ].map(([label, color]) => {
+        const node = document.createElement("span"), dot = document.createElement("i");
+        dot.style.background = color;
+        node.append(dot, document.createTextNode(label));
+        return node;
+      }));
+    }
+
+    async function loadScatter() {
+      if (!summary) return;
+      const left = $("left-solver").value, right = $("right-solver").value;
+      if (!left || !right) return;
+      if (scatterController) scatterController.abort();
+      scatterController = new AbortController();
+      try {
+        const query = new URLSearchParams({left, right, state: $("formula-state").value});
+        const response = await fetch(`/api/runs/${encodeURIComponent(runId)}/analysis/scatter?${query}`, {signal: scatterController.signal});
+        if (!response.ok) throw new Error(await response.text());
+        scatterData = await response.json();
+        drawScatter(scatterData);
+      } catch (error) {
+        if (error.name !== "AbortError") {
+          scatterData = {points: []};
+          drawScatter(scatterData);
+        }
+      }
+    }
+
+    function fileStatus(result) {
+      const status = String(result.file_status || "").toLowerCase();
+      if (["complete", "partial", "timeout", "error"].includes(status)) return status;
+      const raw = String(result.result || "pending").toLowerCase();
+      if (raw === "timeout" || raw === "error" || raw === "pending") return raw;
+      if (raw === "sat" || raw === "unsat" || raw === "unknown") return "complete";
+      return raw || "pending";
+    }
+    function checkSatStatus(result) {
+      if (fileStatus(result) === "pending" && !Number(result.queries) && !Number(result.expected)) return "pending";
+      const sat = Number(result.sat || 0);
+      const unsat = Number(result.unsat || 0);
+      const unknown = queryCount(result, "unknown");
+      const error = queryCount(result, "error");
+      const unreached = queryCount(result, "unreached");
+      if (error) return "error";
+      if (sat + unsat > 0 && unknown === 0 && unreached === 0) return sat && unsat ? "solved" : sat ? "sat" : "unsat";
+      if (sat + unsat > 0) return "mixed";
+      if (unknown > 0 && unreached === 0) return "unknown";
+      if (unreached > 0) return "unreached";
+      if (unknown > 0) return "unknown";
+      return "pending";
+    }
+    function taggedMetric(status, value, title) {
+      const td = document.createElement("td");
+      const label = document.createElement("span");
+      const metric = document.createElement("span");
+      label.className = `formula-result ${status}`;
+      label.textContent = status;
+      metric.className = "formula-metric";
+      metric.textContent = value;
+      td.title = title || "";
+      td.append(label, metric);
+      return {td, metric};
+    }
+    function checkSatCell(result) {
+      const expected = Number(result.expected || 0);
+      const solved = Number(result.sat || 0) + Number(result.unsat || 0);
+      return taggedMetric(
+        checkSatStatus(result),
+        expected > 0 ? `${solved}/${expected}` : "—",
+        "sat+unsat / expected check-sat",
+      ).td;
+    }
+    function fileCell(result) {
+      const {td, metric} = taggedMetric(
+        fileStatus(result),
+        Number.isFinite(result.time) ? seconds(result.time) : "—",
+        "file status and runtime",
+      );
+      const href = safeHref(result.log_url);
+      if (href) {
+        const log = document.createElement("a");
+        log.className = "open-log";
+        log.href = href;
+        log.target = "_blank";
+        log.rel = "noopener";
+        log.title = "Open solver log";
+        log.textContent = "↗";
+        metric.append(log);
+      }
+      return td;
+    }
+
+    async function loadFormulas() {
+      if (!summary) return;
+      if (formulaController) formulaController.abort();
+      formulaController = new AbortController();
+      const query = new URLSearchParams({
+        page: String(formulaPage),
+        page_size: $("formula-page-size").value,
+        query: $("formula-search").value.trim(),
+        state: $("formula-state").value,
+      });
+      try {
+        const response = await fetch(`/api/runs/${encodeURIComponent(runId)}/analysis/formulas?${query}`, {signal: formulaController.signal});
+        if (!response.ok) throw new Error(await response.text());
+        const data = await response.json();
+        const pages = Math.max(1, Math.ceil(data.total / data.page_size));
+        if (formulaPage > pages) {
+          formulaPage = pages;
+          return loadFormulas();
+        }
+        $("formula-count").textContent = `Showing ${data.cases.length} of ${data.total} formulas`;
+        const top = document.createElement("tr");
+        const sub = document.createElement("tr");
+        for (const label of ["Formula", "State"]) {
+          const th = document.createElement("th");
+          th.textContent = label;
+          th.rowSpan = 2;
+          top.append(th);
+        }
+        for (const solver of data.solvers) {
+          const group = document.createElement("th");
+          group.colSpan = 2;
+          group.textContent = solver;
+          top.append(group);
+          const checkSat = document.createElement("th");
+          checkSat.textContent = "check-sat";
+          checkSat.title = "sat+unsat / expected check-sat";
+          const files = document.createElement("th");
+          files.textContent = "files";
+          files.title = "file status and runtime";
+          sub.append(checkSat, files);
+        }
+        $("formula-head").replaceChildren(top, sub);
+        const body = $("formula-rows");
+        body.replaceChildren();
+        for (const item of data.cases) {
+          const row = document.createElement("tr");
+          const file = document.createElement("td");
+          const link = document.createElement("a");
+          const state = document.createElement("td");
+          const href = safeHref(item.file_url);
+          file.title = item.file;
+          if (href) {
+            link.className = "formula-link";
+            link.href = href;
+            link.target = "_blank";
+            link.rel = "noopener";
+            link.textContent = item.file;
+            file.append(link);
+          } else file.textContent = item.file;
+          state.className = "formula-state";
+          state.textContent = item.state;
+          row.append(file, state);
+          for (const solver of data.solvers) {
+            const result = item.results[solver] || {};
+            row.append(checkSatCell(result), fileCell(result));
+          }
+          body.append(row);
+        }
+        if (!data.cases.length) {
+          const row = document.createElement("tr"), cell = document.createElement("td");
+          cell.className = "empty";
+          cell.colSpan = 2 + data.solvers.length * 2;
+          cell.textContent = "No formulas match the current filters.";
+          row.append(cell);
+          body.append(row);
+        }
+        $("formula-page-info").textContent = `Page ${formulaPage}/${pages}`;
+        $("formula-prev").disabled = formulaPage <= 1;
+        $("formula-next").disabled = formulaPage >= pages;
+      } catch (error) {
+        if (error.name !== "AbortError") $("formula-count").textContent = "Formula list unavailable.";
+      }
+    }
+
+    async function loadSummary() {
+      const response = await fetch(`/api/runs/${encodeURIComponent(runId)}/analysis/summary?state=${encodeURIComponent($("formula-state").value)}`, {cache: "no-store"});
+      if (!response.ok) throw new Error(await response.text());
+      summary = await response.json();
+      $("title").textContent = summary.run_id;
+      $("status").textContent = `${summary.status} · updated ${summary.updated_at || "unknown"}`;
+      renderSummary();
+      renderCactus();
+      populateSolvers();
+      await Promise.all([loadScatter(), loadFormulas()]);
+    }
+
+    async function refresh() {
+      try {
+        await loadSummary();
+      } catch (error) {
+        $("title").textContent = "Analysis unavailable";
+        $("status").textContent = error.message || String(error);
+        $("status").className = "status error";
+      }
+    }
+
+    const scheduleFormulas = () => {
+      clearTimeout(formulaTimer);
+      formulaTimer = setTimeout(loadFormulas, 250);
+    };
+    $("refresh").onclick = refresh;
+    $("cactus-metric").onchange = () => summary && renderCactus();
+    $("scatter-metric").onchange = () => scatterData && drawScatter(scatterData);
+    $("left-solver").onchange = loadScatter;
+    $("right-solver").onchange = loadScatter;
+    $("formula-search").oninput = () => { formulaPage = 1; scheduleFormulas(); };
+    $("formula-state").onchange = () => { formulaPage = 1; refresh(); };
+    $("formula-page-size").onchange = () => { formulaPage = 1; loadFormulas(); };
+    $("formula-prev").onclick = () => { formulaPage = Math.max(1, formulaPage - 1); loadFormulas(); };
+    $("formula-next").onclick = () => { formulaPage += 1; loadFormulas(); };
+    refresh();
   </script>
 </body>
 </html>

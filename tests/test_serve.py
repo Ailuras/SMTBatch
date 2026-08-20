@@ -13,6 +13,7 @@ from unittest import mock
 from smtbatch.run import _RunLock
 from smtbatch.serve import ExperimentManager
 from smtbatch.task import RESULT_FIELDS
+from tests.tsvutil import jobs_tsv, result_row, write_results
 
 
 def _init_smtbatch_checkout(root: Path, branch: str = "main") -> Path:
@@ -75,50 +76,31 @@ command = ["{binary}", "{input}"]
         self.run = self.results / "sample-run"
         self.run.mkdir()
         (self.run / "jobs.tsv").write_text(
-            f"job_id\tsolver\tfile\n1\talpha\t{self.formula}\n2\tbeta\t{self.formula}\n",
+            jobs_tsv([(1, "alpha", self.formula, 1), (2, "beta", self.formula, 1)]),
             encoding="utf-8",
         )
-        with (self.run / "results.tsv").open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=RESULT_FIELDS, delimiter="\t")
-            writer.writeheader()
-            writer.writerow(
-                {
-                    "job_id": 1,
-                    "solver": "alpha",
-                    "file": str(self.formula),
-                    "result": "sat",
-                    "time": "2.0",
-                    "code": "0",
-                    "output_path": "",
-                    "queries": "1",
-                    "sat": "1",
-                    "unsat": "0",
-                    "unknown": "0",
-                    "first": "sat",
-                    "last": "sat",
-                    "expected": "1",
-                    "complete": "yes",
-                }
-            )
-            writer.writerow(
-                {
-                    "job_id": 2,
-                    "solver": "beta",
-                    "file": str(self.formula),
-                    "result": "error",
-                    "time": "4.0",
-                    "code": "1",
-                    "output_path": "",
-                    "queries": "0",
-                    "sat": "0",
-                    "unsat": "0",
-                    "unknown": "0",
-                    "first": "",
-                    "last": "",
-                    "expected": "1",
-                    "complete": "no",
-                }
-            )
+        write_results(
+            self.run / "results.tsv",
+            [
+                result_row(job_id=1, solver="alpha", file=self.formula, result="sat", time="2.0"),
+                result_row(
+                    job_id=2,
+                    solver="beta",
+                    file=self.formula,
+                    result="error",
+                    time="4.0",
+                    code="1",
+                    queries=0,
+                    sat=0,
+                    first="",
+                    last="",
+                    complete="no",
+                    file_status="error",
+                    error=1,
+                    unreached=0,
+                ),
+            ],
+        )
         (self.run / "progress.json").write_text(
             json.dumps({"status": "complete", "updated_at": "2026-01-01T00:00:00+00:00", "total_jobs": 2, "completed_jobs": 2}),
             encoding="utf-8",
@@ -146,30 +128,72 @@ command = ["{binary}", "{input}"]
         for path in files.values():
             path.write_text("(check-sat)\n", encoding="utf-8")
         rows = [
-            (1, "alpha", files[0], "sat", "2.0"),
-            (2, "beta", files[0], "timeout", "30.0"),
-            (3, "alpha", files[1], "sat", "8.0"),
-            (4, "beta", files[1], "sat", "15.0"),
-            (5, "alpha", files[2], "sat", "8.0"),
-            (6, "beta", files[2], "unknown", "1.0"),
-            (7, "alpha", files[3], "timeout", "30.0"),
-            (8, "beta", files[3], "error", "0.5"),
+            result_row(job_id=1, solver="alpha", file=files[0], result="sat", time="2.0"),
+            result_row(
+                job_id=2,
+                solver="beta",
+                file=files[0],
+                result="timeout",
+                time="30.0",
+                code="124",
+                queries=0,
+                sat=0,
+                first="",
+                last="",
+                complete="no",
+                file_status="timeout",
+                timeout=1,
+            ),
+            result_row(job_id=3, solver="alpha", file=files[1], result="sat", time="8.0"),
+            result_row(job_id=4, solver="beta", file=files[1], result="sat", time="15.0"),
+            result_row(job_id=5, solver="alpha", file=files[2], result="sat", time="8.0"),
+            result_row(
+                job_id=6,
+                solver="beta",
+                file=files[2],
+                result="unknown",
+                time="1.0",
+                sat=0,
+                unknown=1,
+                first="unknown",
+                last="unknown",
+            ),
+            result_row(
+                job_id=7,
+                solver="alpha",
+                file=files[3],
+                result="timeout",
+                time="30.0",
+                code="124",
+                queries=0,
+                sat=0,
+                first="",
+                last="",
+                complete="no",
+                file_status="timeout",
+                timeout=1,
+            ),
+            result_row(
+                job_id=8,
+                solver="beta",
+                file=files[3],
+                result="error",
+                time="0.5",
+                code="1",
+                queries=0,
+                sat=0,
+                first="",
+                last="",
+                complete="no",
+                file_status="error",
+                error=1,
+            ),
         ]
         (run_dir / "jobs.tsv").write_text(
-            "job_id\tsolver\tfile\n"
-            + "\n".join(f"{job_id}\t{solver}\t{file}" for job_id, solver, file, _, _ in rows)
-            + "\n",
+            jobs_tsv([(row["job_id"], row["solver"], Path(row["file"]), 1) for row in rows]),
             encoding="utf-8",
         )
-        (run_dir / "results.tsv").write_text(
-            "job_id\tsolver\tfile\tresult\ttime\tcode\toutput_path\n"
-            + "\n".join(
-                f"{job_id}\t{solver}\t{file}\t{result}\t{time}\t0\t"
-                for job_id, solver, file, result, time in rows
-            )
-            + "\n",
-            encoding="utf-8",
-        )
+        write_results(run_dir / "results.tsv", rows)
         (run_dir / "progress.json").write_text(
             json.dumps(
                 {
@@ -200,16 +224,112 @@ command = ["{binary}", "{input}"]
         self.assertEqual(beta["unique_solved"], 0)
         self.assertEqual(beta["avg_solved_seconds"], 15.0)
 
+    def test_report_summary_cactus_credits_partial_check_sat(self) -> None:
+        run_dir = self.results / "po-cactus-run"
+        run_dir.mkdir()
+        early = self.inputs / "early.smt2"
+        late = self.inputs / "late.smt2"
+        early.write_text("(check-sat)\n(check-sat)\n(check-sat)\n", encoding="utf-8")
+        late.write_text("(check-sat)\n" * 10, encoding="utf-8")
+        (run_dir / "jobs.tsv").write_text(
+            jobs_tsv([(1, "alpha", early, 3), (2, "alpha", late, 10)]),
+            encoding="utf-8",
+        )
+        with (run_dir / "results.tsv").open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=RESULT_FIELDS, delimiter="\t")
+            writer.writeheader()
+            writer.writerow(
+                {
+                    "job_id": 1,
+                    "solver": "alpha",
+                    "file": str(early),
+                    "result": "unsat",
+                    "time": "2.0",
+                    "code": "0",
+                    "output_path": "",
+                    "queries": "3",
+                    "sat": "0",
+                    "unsat": "3",
+                    "unknown": "0",
+                    "error": "0",
+                    "timeout": "0",
+                    "unreached": "0",
+                    "first": "unsat",
+                    "last": "unsat",
+                    "expected": "3",
+                    "complete": "yes",
+                    "file_status": "complete",
+                }
+            )
+            writer.writerow(
+                {
+                    "job_id": 2,
+                    "solver": "alpha",
+                    "file": str(late),
+                    "result": "timeout",
+                    "time": "30.0",
+                    "code": "124",
+                    "output_path": "",
+                    "queries": "5",
+                    "sat": "4",
+                    "unsat": "1",
+                    "unknown": "0",
+                    "error": "0",
+                    "timeout": "1",
+                    "unreached": "4",
+                    "first": "sat",
+                    "last": "unsat",
+                    "expected": "10",
+                    "complete": "no",
+                    "file_status": "partial",
+                }
+            )
+        (run_dir / "progress.json").write_text(
+            json.dumps(
+                {
+                    "status": "complete",
+                    "updated_at": "2026-01-01T00:00:00+00:00",
+                    "total_jobs": 2,
+                    "completed_jobs": 2,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (run_dir / "metadata.txt").write_text("solvers=alpha\ntimeout=30\njobs=1\nlog=all\n", encoding="utf-8")
+        summary = self.manager.report_summary("po-cactus-run", "all")
+        alpha = summary["by_solver"]["alpha"]
+        self.assertEqual(alpha["query_solved"], 8)
+        self.assertEqual(alpha["solved"], 1)
+        self.assertEqual(
+            alpha["cactus"],
+            [{"time": 2.0, "solved": 3}, {"time": 30.0, "solved": 8}],
+        )
+        self.assertEqual(
+            alpha["file_cactus"],
+            [{"time": 2.0, "solved": 1}, {"time": 30.0, "solved": 1}],
+        )
+
     def test_report_summary_single_solver(self) -> None:
         run_dir = self.results / "single-solver-run"
         run_dir.mkdir()
         formula = self.inputs / "only.smt2"
         formula.write_text("(check-sat)\n", encoding="utf-8")
-        (run_dir / "jobs.tsv").write_text(f"job_id\tsolver\tfile\n1\talpha\t{formula}\n", encoding="utf-8")
-        (run_dir / "results.tsv").write_text(
-            "job_id\tsolver\tfile\tresult\ttime\tcode\toutput_path\n"
-            f"1\talpha\t{formula}\tunsat\t3.5\t0\t\n",
-            encoding="utf-8",
+        (run_dir / "jobs.tsv").write_text(jobs_tsv([(1, "alpha", formula, 1)]), encoding="utf-8")
+        write_results(
+            run_dir / "results.tsv",
+            [
+                result_row(
+                    job_id=1,
+                    solver="alpha",
+                    file=formula,
+                    result="unsat",
+                    time="3.5",
+                    sat=0,
+                    unsat=1,
+                    first="unsat",
+                    last="unsat",
+                )
+            ],
         )
         (run_dir / "progress.json").write_text(
             json.dumps(
@@ -235,6 +355,8 @@ command = ["{binary}", "{input}"]
         self.assertEqual(scatter["total_points"], 1)
         self.assertEqual(scatter["points"][0]["x"], 3.5)
         self.assertEqual(scatter["points"][0]["y"], 3.5)
+        self.assertEqual(scatter["points"][0]["left_coverage"], 1.0)
+        self.assertEqual(scatter["points"][0]["right_coverage"], 1.0)
 
     def test_formula_pagination_and_scatter_are_bounded(self) -> None:
         page = self.manager.report_formulas("sample-run", "sample", "all", 1, 1)
@@ -243,15 +365,101 @@ command = ["{binary}", "{input}"]
         scatter = self.manager.report_scatter("sample-run", "alpha", "beta", "all")
         self.assertEqual(scatter["total_points"], 1)
         self.assertFalse(scatter["sampled"])
+        self.assertEqual(scatter["points"][0]["left_coverage"], 1.0)
+        self.assertEqual(scatter["points"][0]["right_coverage"], 0.0)
         page = self.manager.report_formulas("sample-run", "sample", "all", 1, 1)
         alpha = page["cases"][0]["results"]["alpha"]
         self.assertEqual(alpha["queries"], 1)
         self.assertEqual(alpha["last"], "sat")
         self.assertEqual(alpha["complete"], "yes")
+        self.assertEqual(alpha["file_status"], "complete")
+        self.assertEqual(alpha["sat"], 1)
+        self.assertEqual(alpha["timeout"], 0)
+        self.assertEqual(alpha["unreached"], 0)
         summary = self.manager.report_summary("sample-run", "all")
         self.assertEqual(summary["by_solver"]["alpha"]["file_complete"], 1)
         self.assertEqual(summary["by_solver"]["alpha"]["answers"], 1)
         self.assertEqual(summary["by_solver"]["alpha"]["partial_timeout"], 0)
+        self.assertEqual(summary["by_solver"]["alpha"]["query_sat"], 1)
+        self.assertEqual(summary["by_solver"]["alpha"]["query_solved"], 1)
+        self.assertEqual(summary["by_solver"]["beta"]["query_error"], 1)
+        self.assertEqual(summary["by_solver"]["beta"]["file_error"], 1)
+        self.assertEqual(page["cases"][0]["done"], 2)
+        self.assertEqual(page["cases"][0]["total"], 2)
+        self.assertEqual(page["cases"][0]["expected"], 1)
+        self.assertIsNone(page["cases"][0]["queries"])
+
+    def test_formula_list_reports_check_sat_progress(self) -> None:
+        run_dir = self.results / "inc-progress-run"
+        run_dir.mkdir()
+        formula = self.inputs / "inc.smt2"
+        formula.write_text("(check-sat)\n(check-sat)\n(check-sat)\n(check-sat)\n", encoding="utf-8")
+        (run_dir / "jobs.tsv").write_text(jobs_tsv([(1, "alpha", formula, 4)]), encoding="utf-8")
+        with (run_dir / "results.tsv").open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=RESULT_FIELDS, delimiter="\t")
+            writer.writeheader()
+            writer.writerow(
+                {
+                    "job_id": 1,
+                    "solver": "alpha",
+                    "file": str(formula),
+                    "result": "timeout",
+                    "time": "300.0",
+                    "code": "124",
+                    "output_path": "",
+                    "queries": "2",
+                    "sat": "1",
+                    "unsat": "0",
+                    "unknown": "1",
+                    "error": "0",
+                    "timeout": "1",
+                    "unreached": "1",
+                    "first": "sat",
+                    "last": "unknown",
+                    "expected": "4",
+                    "complete": "no",
+                    "file_status": "partial",
+                }
+            )
+        (run_dir / "progress.json").write_text(
+            json.dumps(
+                {
+                    "status": "complete",
+                    "updated_at": "2026-01-01T00:00:00+00:00",
+                    "total_jobs": 1,
+                    "completed_jobs": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (run_dir / "metadata.txt").write_text("solvers=alpha\ntimeout=300\n", encoding="utf-8")
+        page = self.manager.report_formulas("inc-progress-run", "", "all", 1, 20)
+        self.assertEqual(page["cases"][0]["queries"], 2)
+        self.assertEqual(page["cases"][0]["expected"], 4)
+        self.assertEqual(page["cases"][0]["done"], 1)
+        self.assertEqual(page["cases"][0]["total"], 1)
+
+        pending_dir = self.results / "inc-pending-run"
+        pending_dir.mkdir()
+        (pending_dir / "jobs.tsv").write_text(jobs_tsv([(1, "alpha", formula, 4)]), encoding="utf-8")
+        write_results(pending_dir / "results.tsv", [])
+        (pending_dir / "progress.json").write_text(
+            json.dumps(
+                {
+                    "status": "running",
+                    "updated_at": "2026-01-01T00:00:00+00:00",
+                    "total_jobs": 1,
+                    "completed_jobs": 0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (pending_dir / "metadata.txt").write_text("solvers=alpha\ntimeout=300\n", encoding="utf-8")
+        pending = self.manager.report_formulas("inc-pending-run", "", "all", 1, 20)
+        self.assertEqual(pending["cases"][0]["queries"], 0)
+        self.assertEqual(pending["cases"][0]["expected"], 4)
+        pending_summary = self.manager.report_summary("inc-pending-run", "all")
+        self.assertEqual(pending_summary["by_solver"]["alpha"]["expected"], 4)
 
     def test_historical_duration_estimate_uses_matching_jobs(self) -> None:
         history = self.manager._historical_durations()
@@ -339,13 +547,10 @@ command = ["{binary}", "{input}"]
         run_dir = self.results / name
         run_dir.mkdir()
         (run_dir / "jobs.tsv").write_text(
-            f"job_id\tsolver\tfile\n1\talpha\t{self.formula}\n2\tbeta\t{self.formula}\n",
+            jobs_tsv([(1, "alpha", self.formula, 1), (2, "beta", self.formula, 1)]),
             encoding="utf-8",
         )
-        (run_dir / "results.tsv").write_text(
-            "job_id\tsolver\tfile\tresult\ttime\tcode\toutput_path\n",
-            encoding="utf-8",
-        )
+        write_results(run_dir / "results.tsv", [])
         (run_dir / "progress.json").write_text(
             json.dumps({"status": "interrupted", "updated_at": "2026-01-01T00:00:00+00:00", "total_jobs": 2, "completed_jobs": 1}),
             encoding="utf-8",
@@ -394,48 +599,6 @@ command = ["{binary}", "{input}"]
             self.assertEqual(run["status"], "running")
             with self.assertRaisesRegex(ValueError, "still running"):
                 self.manager.resume("locked-run", {"jobs": 2})
-        finally:
-            lock.release()
-
-    def test_runs_backfills_old_runner_metrics_incrementally(self) -> None:
-        run_dir = self._interrupted_run("old-runner")
-        results_path = run_dir / "results.tsv"
-        results_path.write_text(
-            "job_id\tsolver\tfile\tresult\ttime\tcode\toutput_path\n"
-            f"1\talpha\t{self.formula}\tsat\t2.0\t0\t\n",
-            encoding="utf-8",
-        )
-        (run_dir / "progress.json").write_text(
-            json.dumps(
-                {
-                    "status": "running",
-                    "updated_at": "2026-01-01T00:00:00+00:00",
-                    "total_jobs": 2,
-                    "completed_jobs": 1,
-                }
-            ),
-            encoding="utf-8",
-        )
-        lock = _RunLock(run_dir)
-        lock.acquire()
-        try:
-            first = next(item for item in self.manager.runs() if item["run_id"] == "old-runner")
-            self.assertEqual(first["performance"]["average_solved_seconds"], 2.0)
-            self.assertEqual(first["performance"]["par2_seconds"], 2.0)
-
-            with results_path.open("a", encoding="utf-8") as handle:
-                handle.write(f"2\tbeta\t{self.formula}\terror\t4.0\t1\t\n")
-            second = next(item for item in self.manager.runs() if item["run_id"] == "old-runner")
-            self.assertEqual(
-                second["performance"],
-                {
-                    "completed_jobs": 2,
-                    "solved_jobs": 1,
-                    "average_solved_seconds": 2.0,
-                    "par2_seconds": 31.0,
-                },
-            )
-            self.assertEqual(second["by_solver_performance"]["beta"]["par2_seconds"], 60.0)
         finally:
             lock.release()
 

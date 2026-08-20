@@ -25,13 +25,16 @@ from smtbatch.run import (
     _load_existing_results,
     _prepare_fresh,
     _prepare_resume,
+    _results_writer_fields,
     parse_args,
     main,
+    retain_job_log,
     run_queue,
     solver_artifacts,
     solver_bundle_hash,
 )
-from smtbatch.task import JobSpec, load_jobs
+from smtbatch.task import RESULT_FIELDS, JobSpec, load_jobs
+from tests.tsvutil import jobs_tsv, result_row, write_results
 
 
 def _init_smtbatch_checkout(root: Path, branch: str = "main") -> Path:
@@ -90,14 +93,17 @@ class ResumeLogicTests(unittest.TestCase):
     def _make_run(self, name: str, completed: int, total: int = 4) -> Path:
         run_dir = self.root / "results" / name
         run_dir.mkdir()
-        lines = ["job_id\tsolver\tfile"]
-        for job_id in range(1, total + 1):
-            lines.append(f"{job_id}\talpha\t{self.formulas[job_id - 1]}")
-        (run_dir / "jobs.tsv").write_text("\n".join(lines) + "\n", encoding="utf-8")
-        rows = ["job_id\tsolver\tfile\tresult\ttime\tcode\toutput_path"]
-        for job_id in range(1, completed + 1):
-            rows.append(f"{job_id}\talpha\t{self.formulas[job_id - 1]}\tsat\t0.5\t0\t")
-        (run_dir / "results.tsv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+        (run_dir / "jobs.tsv").write_text(
+            jobs_tsv([(job_id, "alpha", self.formulas[job_id - 1], 1) for job_id in range(1, total + 1)]),
+            encoding="utf-8",
+        )
+        write_results(
+            run_dir / "results.tsv",
+            [
+                result_row(job_id=job_id, solver="alpha", file=self.formulas[job_id - 1])
+                for job_id in range(1, completed + 1)
+            ],
+        )
         artifacts = solver_artifacts(self.binary)
         artifacts_json = json.dumps(artifacts, separators=(",", ":"), sort_keys=True)
         bundle_hash = solver_bundle_hash(artifacts)
@@ -130,18 +136,59 @@ class ResumeLogicTests(unittest.TestCase):
         self.assertEqual(par2_seconds, {"alpha": 1.0})
         self.assertEqual(incremental.file_complete, 2)
         self.assertEqual(by_solver_incremental["alpha"].file_complete, 2)
+        self.assertEqual(incremental.file_partial, 0)
+
+    def test_resume_rejects_old_results_header(self) -> None:
+        run_dir = self._make_run("legacy-header", completed=1)
+        (run_dir / "results.tsv").write_text(
+            "job_id\tsolver\tfile\tresult\ttime\tcode\toutput_path\n"
+            f"1\talpha\t{self.formulas[0]}\tsat\t0.5\t0\t\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ValueError, "invalid results header"):
+            _results_writer_fields(run_dir / "results.tsv", True)
+        with self.assertRaisesRegex(ValueError, "invalid results header"):
+            _load_existing_results(run_dir / "results.tsv", load_jobs(run_dir / "jobs.tsv"), 10)
+
+    def test_resume_rejects_old_jobs_header(self) -> None:
+        run_dir = self._make_run("legacy-jobs", completed=1)
+        (run_dir / "jobs.tsv").write_text(
+            "job_id\tsolver\tfile\n"
+            f"1\talpha\t{self.formulas[0]}\n"
+            f"2\talpha\t{self.formulas[1]}\n"
+            f"3\talpha\t{self.formulas[2]}\n"
+            f"4\talpha\t{self.formulas[3]}\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ValueError, "invalid jobs header"):
+            load_jobs(run_dir / "jobs.tsv")
+
+    def test_retain_job_log_follows_policy(self) -> None:
+        logs = self.root / "logs"
+        logs.mkdir()
+        path = logs / "job_0000001.alpha.out"
+        path.write_text("sat\n", encoding="utf-8")
+        self.assertIsNone(retain_job_log(path, "fail", "sat"))
+        self.assertFalse(path.exists())
+        path.write_text("sat\n", encoding="utf-8")
+        self.assertEqual(retain_job_log(path, "fail", "timeout"), path)
+        self.assertTrue(path.is_file())
+        self.assertEqual(retain_job_log(path, "all", "sat"), path)
+        self.assertIsNone(retain_job_log(path, "none", "error"))
 
     def test_load_existing_results_rejects_truncated_or_mismatched_rows(self) -> None:
         run_dir = self._make_run("corrupt", completed=0)
         jobs = load_jobs(run_dir / "jobs.tsv")
+        header = "\t".join(RESULT_FIELDS) + "\n"
         for row in (
             "1\talpha\n",
-            f"1\tbeta\t{self.formulas[0]}\tsat\t0.5\t0\t\n",
-        ):
-            (run_dir / "results.tsv").write_text(
-                "job_id\tsolver\tfile\tresult\ttime\tcode\toutput_path\n" + row,
-                encoding="utf-8",
+            "\t".join(
+                result_row(job_id=1, solver="beta", file=self.formulas[0]).get(field, "")
+                for field in RESULT_FIELDS
             )
+            + "\n",
+        ):
+            (run_dir / "results.tsv").write_text(header + row, encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "malformed|does not match"):
                 _load_existing_results(run_dir / "results.tsv", jobs, 10)
 
@@ -160,6 +207,21 @@ class ResumeLogicTests(unittest.TestCase):
             },
         )
         self.assertEqual(snapshot["by_solver_performance"], {"alpha": snapshot["performance"]})
+
+    def test_progress_tracker_uses_queue_expected_as_coverage_denominator(self) -> None:
+        tracker = ProgressTracker(self.root / "results" / "coverage", ("alpha",), 2, 1.0, 5, timeout=10)
+        tracker.set_queue_expected(
+            [JobSpec(1, "alpha", self.formulas[0], 3), JobSpec(2, "alpha", self.formulas[1], 7)]
+        )
+        tracker.finish(
+            JobResult(JobSpec(1, "alpha", self.formulas[0], 3), 1.0, "sat", 0, "", sat=1, expected=3, complete=True),
+            None,
+        )
+        snapshot = tracker.snapshot()
+        incremental = snapshot["incremental"]
+        assert isinstance(incremental, dict)
+        self.assertEqual(incremental["expected"], 10)
+        self.assertEqual(incremental["sat"], 1)
 
     def test_prepare_resume_selects_only_missing_jobs(self) -> None:
         run_dir = self._make_run("partial", completed=2)
@@ -235,6 +297,8 @@ class ResumeLogicTests(unittest.TestCase):
         self.assertIn("target_branch=main\n", metadata)
         self.assertIn("smtbatch_branch=main\n", metadata)
         self.assertEqual(plan.pair_count, 4)
+        jobs = load_jobs(output / "jobs.tsv")
+        self.assertEqual([job.expected for job in jobs], [1, 1, 1, 1])
 
     def test_prepare_fresh_rejects_wrong_smtbatch_branch(self) -> None:
         self.config_path.write_text(
@@ -371,7 +435,7 @@ class ResumeLogicTests(unittest.TestCase):
         output = self.root / "results" / "cancel.tsv"
         jobs = [JobSpec(index, "alpha", self.formulas[index - 1]) for index in range(1, 4)]
 
-        def slow_result(_spec, job, _timeout, _outer_timeout):
+        def slow_result(_spec, job, _timeout, _outer_timeout, **_kwargs):
             time.sleep(0.15)
             return JobResult(job, 0.15, "sat", 0, "sat\n")
 
@@ -396,6 +460,30 @@ class ResumeLogicTests(unittest.TestCase):
         with output.open("r", encoding="utf-8", newline="") as handle:
             rows = list(csv.DictReader(handle, delimiter="\t"))
         self.assertEqual(sorted(int(row["job_id"]) for row in rows), [1, 2])
+
+    def test_run_queue_streams_solver_logs(self) -> None:
+        results_path = self.root / "results" / "logged.tsv"
+        logs_dir = self.root / "results" / "logged-logs"
+        jobs = [JobSpec(1, "alpha", self.formulas[0], 1)]
+        outcomes = run_queue(
+            jobs,
+            {"alpha": load_config().solvers["alpha"]},
+            timeout=5,
+            workers=1,
+            logs_dir=logs_dir,
+            log_policy="all",
+            checkpoint_every=1,
+            tracker=None,
+            results_path=results_path,
+        )
+        self.assertEqual(dict(outcomes), {"sat": 1})
+        log_path = logs_dir / "job_0000001.alpha.out"
+        self.assertTrue(log_path.is_file())
+        self.assertIn("sat", log_path.read_text(encoding="utf-8"))
+        with results_path.open("r", encoding="utf-8", newline="") as handle:
+            row = next(csv.DictReader(handle, delimiter="\t"))
+        self.assertEqual(row["output_path"], str(log_path))
+        self.assertEqual(row["expected"], "1")
 
 
 if __name__ == "__main__":

@@ -24,26 +24,21 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from .config import Config, branch_status, find_config_path, load_config
 from .task import (
-    RESULT_INCREMENTAL_FIELDS,
-    VALID_TASK_RESULTS,
     classify_consistency,
+    incremental_from_row,
     load_jobs,
-    optional_nonneg_int,
     result_label,
     results_header_ok,
-    row_complete,
-    summarize_performance,
 )
 
 
@@ -128,52 +123,66 @@ def _data_url(path: object, results_root: Path) -> str:
     return "/data/" + quote(relative.as_posix())
 
 
-@dataclass
-class _PerformanceTotals:
-    completed_jobs: int = 0
-    solved_jobs: int = 0
-    solved_seconds: float = 0.0
-    par2_seconds: float = 0.0
-
-    def summary(self) -> dict[str, object]:
-        return summarize_performance(
-            self.completed_jobs,
-            self.solved_jobs,
-            self.solved_seconds,
-            self.par2_seconds,
-        )
+def _metric_int(result: Mapping[str, object], key: str) -> int:
+    value = result.get(key)
+    return value if isinstance(value, int) else 0
 
 
-@dataclass
-class _MetricsState:
-    """Incremental reader state for a run created by an older batch process."""
+def _query_solved(result: Mapping[str, object]) -> int:
+    return _metric_int(result, "sat") + _metric_int(result, "unsat")
 
-    identity: tuple[int, int]
-    timeout: float
-    expected_jobs: dict[int, tuple[str, str]]
-    offset: int = 0
-    tail: bytes = b""
-    record_buffer: bytes = b""
-    in_quotes: bool = False
-    header_seen: bool = False
-    invalid: bool = False
-    completed_ids: set[int] = field(default_factory=set)
-    by_solver: dict[str, _PerformanceTotals] = field(default_factory=dict)
-    fields: list[str] = field(default_factory=list)
 
-    def payload(self) -> dict[str, object]:
-        aggregate = _PerformanceTotals()
-        for totals in self.by_solver.values():
-            aggregate.completed_jobs += totals.completed_jobs
-            aggregate.solved_jobs += totals.solved_jobs
-            aggregate.solved_seconds += totals.solved_seconds
-            aggregate.par2_seconds += totals.par2_seconds
-        return {
-            "performance": aggregate.summary(),
-            "by_solver_performance": {
-                solver: totals.summary() for solver, totals in self.by_solver.items()
-            },
-        }
+def _query_coverage(result: Mapping[str, object]) -> float:
+    expected = _metric_int(result, "expected")
+    if expected <= 0:
+        return 0.0
+    return _query_solved(result) / expected
+
+
+def _public_result(result: object) -> dict[str, object]:
+    if not isinstance(result, dict):
+        return {}
+    return {key: value for key, value in result.items() if not str(key).startswith("_")}
+
+
+def _formula_check_sat_progress(
+    case: Mapping[str, object],
+    solvers: Sequence[str],
+) -> tuple[int | None, int]:
+    """File-level (printed check-sats, expected check-sats) for the formula list.
+
+    Expected counts come from ``jobs.tsv``. The numerator is only defined for a
+    single-solver run: how many of those commands already printed an outcome.
+    """
+    expected = _metric_int(case, "expected")
+    results = case.get("results")
+    if isinstance(results, dict):
+        for solver in solvers:
+            result = results.get(solver)
+            if isinstance(result, dict):
+                expected = max(expected, _metric_int(result, "expected"))
+    queries: int | None = None
+    if len(solvers) != 1 or not isinstance(results, dict):
+        return queries, expected
+    result = results.get(solvers[0])
+    if not isinstance(result, dict):
+        return queries, expected
+    if str(result.get("result") or "") == "pending":
+        return 0, expected
+    return _metric_int(result, "queries"), expected
+
+
+def _cactus_from_events(events: Sequence[tuple[float, int]], limit: float) -> list[dict[str, float]]:
+    cactus: list[dict[str, float]] = []
+    seen = 0
+    for duration, group in itertools.groupby(sorted(events), key=lambda item: item[0]):
+        if duration > limit:
+            break
+        seen += sum(weight for _, weight in group)
+        cactus.append({"time": round(duration, 3), "solved": seen})
+    if not cactus or cactus[-1]["time"] < limit:
+        cactus.append({"time": round(limit, 3), "solved": seen})
+    return cactus
 
 
 class ExperimentManager:
@@ -191,8 +200,6 @@ class ExperimentManager:
         self._progress_cache: dict[str, tuple[tuple[int, int], dict[str, object]]] = {}
         self._run_cache: dict[str, tuple[tuple[int, int, int, int], dict[str, object]]] = {}
         self._history_cache: tuple[float, dict[tuple[str, str], float]] | None = None
-        self._metrics_lock = threading.Lock()
-        self._metrics_cache: dict[str, _MetricsState] = {}
 
     def _solver_config(self) -> Config:
         """Return the current project config, reloading it when TOML changes."""
@@ -312,110 +319,6 @@ class ExperimentManager:
         run_dir = self._run_dir(run_id)
         return _read_run_pid(run_dir / ".run.pid") is not None or _run_lock_held(run_dir / ".run.lock")
 
-    @staticmethod
-    def _update_quote_state(state: _MetricsState, data: bytes) -> None:
-        index = 0
-        while index < len(data):
-            if data[index] != ord('"'):
-                index += 1
-                continue
-            if state.in_quotes and index + 1 < len(data) and data[index + 1] == ord('"'):
-                index += 2
-                continue
-            state.in_quotes = not state.in_quotes
-            index += 1
-
-    @staticmethod
-    def _consume_metrics_record(state: _MetricsState, record: bytes) -> None:
-        try:
-            decoded = record.rstrip(b"\r").decode("utf-8")
-            row = next(csv.reader([decoded], delimiter="\t", strict=True))
-        except (UnicodeDecodeError, csv.Error, StopIteration):
-            state.invalid = True
-            return
-        if not state.header_seen:
-            state.header_seen = True
-            if not results_header_ok(row):
-                state.invalid = True
-                return
-            state.fields = list(row)
-            return
-        if not state.fields or len(row) != len(state.fields):
-            state.invalid = True
-            return
-        values = dict(zip(state.fields, row, strict=True))
-        try:
-            job_id = int(values["job_id"])
-            duration = float(values["time"])
-        except ValueError:
-            state.invalid = True
-            return
-        expected = state.expected_jobs.get(job_id)
-        result = values["result"].lower()
-        if (
-            expected is None
-            or job_id in state.completed_ids
-            or expected != (values["solver"], values["file"])
-            or result not in VALID_TASK_RESULTS
-            or not math.isfinite(duration)
-            or duration < 0
-        ):
-            state.invalid = True
-            return
-        state.completed_ids.add(job_id)
-        totals = state.by_solver.setdefault(values["solver"], _PerformanceTotals())
-        totals.completed_jobs += 1
-        if result in {"sat", "unsat"}:
-            totals.solved_jobs += 1
-            totals.solved_seconds += duration
-            totals.par2_seconds += duration
-        else:
-            totals.par2_seconds += 2 * state.timeout
-
-    def _incremental_run_metrics(self, run_id: str) -> dict[str, object] | None:
-        """Backfill metrics once, then consume only bytes appended by an old runner."""
-        run_dir = self._run_dir(run_id)
-        results_path = run_dir / "results.tsv"
-        with self._metrics_lock:
-            try:
-                with results_path.open("rb") as handle:
-                    stat = os.fstat(handle.fileno())
-                    identity = (stat.st_dev, stat.st_ino)
-                    state = self._metrics_cache.get(run_id)
-                    if state is None or state.identity != identity or stat.st_size < state.offset:
-                        metadata = _metadata(run_dir / "metadata.txt")
-                        timeout = float(metadata.get("timeout") or "")
-                        if not math.isfinite(timeout) or timeout <= 0:
-                            return None
-                        jobs = load_jobs(run_dir / "jobs.tsv")
-                        state = _MetricsState(
-                            identity,
-                            timeout,
-                            {job.job_id: (job.solver, str(job.file_path)) for job in jobs},
-                        )
-                        self._metrics_cache[run_id] = state
-                    if state.invalid:
-                        return None
-                    handle.seek(state.offset)
-                    data = state.tail + handle.read()
-                    state.offset = handle.tell()
-            except (OSError, UnicodeError, ValueError, csv.Error):
-                return None
-
-            physical_lines = data.split(b"\n")
-            state.tail = physical_lines.pop()
-            for physical_line in physical_lines:
-                state.record_buffer += physical_line
-                self._update_quote_state(state, physical_line)
-                if state.in_quotes:
-                    state.record_buffer += b"\n"
-                    continue
-                self._consume_metrics_record(state, state.record_buffer)
-                state.record_buffer = b""
-                if state.invalid:
-                    return None
-            return state.payload() if state.header_seen else None
-
     def runs(self) -> list[dict[str, Any]]:
         """Return history with stale active states repaired from actual process liveness."""
         self._reap_managed_processes()
@@ -432,12 +335,6 @@ class ExperimentManager:
             elif live and status in {"interrupted", "failed"}:
                 # A resume child can be live briefly before it publishes its first snapshot.
                 run["status"] = "starting"
-            if not isinstance(run.get("performance"), dict) and (
-                live or run_id in self._metrics_cache
-            ):
-                metrics = self._incremental_run_metrics(run_id)
-                if metrics is not None:
-                    run.update(metrics)
             normalized.append(run)
         return normalized
 
@@ -677,8 +574,6 @@ class ExperimentManager:
             raise ValueError("experiment not found") from None
 
         self._progress_cache.pop(run_id, None)
-        with self._metrics_lock:
-            self._metrics_cache.pop(run_id, None)
         _RUN_CACHE.pop(run_dir / "progress.json", None)
         return {"run_id": run_id, "status": "deleted"}
 
@@ -832,27 +727,15 @@ class ExperimentManager:
                     reader = csv.DictReader(handle, delimiter="\t")
                     if not results_header_ok(reader.fieldnames):
                         raise ValueError("invalid results header")
-                    has_incremental = bool(set(reader.fieldnames or []) & set(RESULT_INCREMENTAL_FIELDS))
                     for row in reader:
                         job_id = int(row.get("job_id") or "")
+                        output_path = (row.get("output_path") or "").strip()
                         record: dict[str, object] = {
                             "result": row.get("result") or "error",
                             "time": float(row.get("time") or ""),
-                            "log_url": _data_url(row.get("output_path"), self.results_root),
+                            "log_url": _data_url(output_path, self.results_root),
+                            **incremental_from_row(row),
                         }
-                        if has_incremental:
-                            record.update(
-                                {
-                                    "queries": optional_nonneg_int(row.get("queries")),
-                                    "sat": optional_nonneg_int(row.get("sat")),
-                                    "unsat": optional_nonneg_int(row.get("unsat")),
-                                    "unknown": optional_nonneg_int(row.get("unknown")),
-                                    "first": row.get("first") or "",
-                                    "last": row.get("last") or "",
-                                    "expected": optional_nonneg_int(row.get("expected")),
-                                    "complete": "yes" if row_complete(row) else "no",
-                                }
-                            )
                         results[job_id] = record
             except (OSError, ValueError, csv.Error) as exc:
                 raise ValueError(f"unable to read experiment results: {exc}") from None
@@ -874,6 +757,8 @@ class ExperimentManager:
                 case = {
                     "file": display_name,
                     "file_url": f"/api/runs/{quote(run_id, safe='')}/file?path={quote(file_name, safe='')}",
+                    "source": file_name,
+                    "expected": 0 if job.expected is None else job.expected,
                     "results": {},
                     "times": {},
                     "state": "pending",
@@ -882,6 +767,8 @@ class ExperimentManager:
                 }
                 by_file[file_name] = case
                 cases.append(case)
+            else:
+                case["expected"] = max(int(case["expected"]), 0 if job.expected is None else job.expected)
             result = results.get(job.job_id)
             case_results = case["results"]
             assert isinstance(case_results, dict)
@@ -933,13 +820,25 @@ class ExperimentManager:
                 "unique_solved": 0,
                 "outcomes": {result: 0 for result in ("sat", "unsat", "unknown", "timeout", "error")},
                 "cactus": [],
+                "file_cactus": [],
                 "file_complete": 0,
+                "file_partial": 0,
+                "file_timeout": 0,
+                "file_error": 0,
                 "partial_timeout": 0,
                 "answers": 0,
                 "expected": 0,
+                "query_sat": 0,
+                "query_unsat": 0,
+                "query_unknown": 0,
+                "query_error": 0,
+                "query_timeout": 0,
+                "query_unreached": 0,
+                "query_solved": 0,
             }
             for solver in solvers
         }
+        query_events_by_solver: dict[str, list[tuple[float, int]]] = {solver: [] for solver in solvers}
         solved_times_by_solver: dict[str, list[float]] = {solver: [] for solver in solvers}
         for case in cases:
             results = case["results"]
@@ -950,24 +849,37 @@ class ExperimentManager:
                 if not isinstance(result, dict):
                     continue
                 label = str(result.get("result") or "pending")
-                if label not in {"sat", "unsat", "unknown", "timeout", "error"}:
-                    continue
                 summary = by_solver[solver]
+                expected_count = _metric_int(result, "expected") or _metric_int(case, "expected")
+                if label not in {"sat", "unsat", "unknown", "timeout", "error"}:
+                    summary["expected"] += expected_count
+                    continue
                 outcomes = summary["outcomes"]
                 assert isinstance(outcomes, dict)
                 summary["completed"] += 1
                 outcomes[label] += 1
                 summary["file_complete"] += int(str(result.get("complete") or "") == "yes")
-                queries = result.get("queries")
-                expected = result.get("expected")
-                query_count = queries if isinstance(queries, int) else 0
-                expected_count = expected if isinstance(expected, int) else 0
+                file_status = str(result.get("file_status") or "")
+                summary["file_partial"] += int(file_status == "partial")
+                summary["file_timeout"] += int(file_status == "timeout")
+                summary["file_error"] += int(file_status == "error")
+                query_count = _metric_int(result, "queries")
                 summary["answers"] += query_count
                 summary["expected"] += expected_count
+                summary["query_sat"] += _metric_int(result, "sat")
+                summary["query_unsat"] += _metric_int(result, "unsat")
+                summary["query_unknown"] += _metric_int(result, "unknown")
+                summary["query_error"] += _metric_int(result, "error")
+                summary["query_timeout"] += _metric_int(result, "timeout")
+                summary["query_unreached"] += _metric_int(result, "unreached")
+                query_solved = _query_solved(result)
+                summary["query_solved"] += query_solved
                 if label == "timeout" and query_count > 0:
                     summary["partial_timeout"] += 1
                 value = result.get("time")
                 if isinstance(value, (int, float)) and math.isfinite(value) and value >= 0:
+                    if query_solved > 0:
+                        query_events_by_solver[solver].append((value, query_solved))
                     if label == "sat":
                         summary["sat_seconds"] += value
                     elif label == "unsat":
@@ -989,17 +901,8 @@ class ExperimentManager:
             summary["avg_sat_seconds"] = round(summary["sat_seconds"] / sat_count, 3) if sat_count else None
             summary["avg_unsat_seconds"] = round(summary["unsat_seconds"] / unsat_count, 3) if unsat_count else None
             solved_times = sorted(solved_times_by_solver[solver])
-            limit = timeout
-            cactus: list[dict[str, float]] = []
-            seen = 0
-            for duration, group in itertools.groupby(solved_times):
-                if duration > limit:
-                    break
-                seen += sum(1 for _ in group)
-                cactus.append({"time": round(duration, 3), "solved": seen})
-            if not cactus or cactus[-1]["time"] < limit:
-                cactus.append({"time": round(limit, 3), "solved": seen})
-            summary["cactus"] = cactus
+            summary["file_cactus"] = _cactus_from_events([(duration, 1) for duration in solved_times], timeout)
+            summary["cactus"] = _cactus_from_events(query_events_by_solver[solver], timeout)
         return {
             "run_id": run_id,
             "status": data["progress"].get("status", "unknown"),
@@ -1032,6 +935,7 @@ class ExperimentManager:
         for case in cases[start : start + page_size]:
             results = case["results"]
             assert isinstance(results, dict)
+            queries, expected = _formula_check_sat_progress(case, solvers)
             page_cases.append(
                 {
                     "file": case["file"],
@@ -1039,7 +943,9 @@ class ExperimentManager:
                     "state": case["state"],
                     "done": case["done"],
                     "total": case["total"],
-                    "results": {solver: results.get(solver, {}) for solver in solvers},
+                    "queries": queries,
+                    "expected": expected,
+                    "results": {solver: _public_result(results.get(solver, {})) for solver in solvers},
                 }
             )
         return {"solvers": solvers, "total": total, "page": page, "page_size": page_size, "cases": page_cases}
@@ -1065,7 +971,21 @@ class ExperimentManager:
             x, y = left_result.get("time"), right_result.get("time")
             if not isinstance(x, (int, float)) or not isinstance(y, (int, float)) or x < 0 or y < 0:
                 continue
-            points.append({"file": case["file"], "x": x, "y": y, "left": left_result.get("result"), "right": right_result.get("result")})
+            points.append(
+                {
+                    "file": case["file"],
+                    "x": x,
+                    "y": y,
+                    "left": left_result.get("result"),
+                    "right": right_result.get("result"),
+                    "left_coverage": round(_query_coverage(left_result), 4),
+                    "right_coverage": round(_query_coverage(right_result), 4),
+                    "left_solved": _query_solved(left_result),
+                    "right_solved": _query_solved(right_result),
+                    "left_status": left_result.get("file_status") or "",
+                    "right_status": right_result.get("file_status") or "",
+                }
+            )
         total = len(points)
         limit = 5_000
         if total > limit:

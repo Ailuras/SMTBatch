@@ -91,10 +91,10 @@ Select a run from the history to load its separate report page. The report
 loads its summary first; scatter data and server-paginated formula rows load
 only when requested, keeping large experiments responsive.
 
-Every run directory contains `jobs.tsv` (immutable queue), `results.tsv`
-(streaming results), `progress.json` (live progress), `metadata.txt`
-(immutable initial provenance), and `logs/` (one output file per job, kept for
-debugging). Resumed runs additionally contain append-only
+Every run directory contains `jobs.tsv` (immutable queue, including the expected
+check-sat count per file), `results.tsv` (streaming results), `progress.json`
+(live progress), `metadata.txt` (immutable initial provenance), and `logs/`
+(one output file per job, streamed while the solver runs). Resumed runs additionally contain append-only
 `resume_history.jsonl`, preserving each resume attempt and its worker count.
 Solver provenance in `metadata.txt` includes the resolved artifact inventory
 and a path-independent bundle hash. It also records the commit and dirty state
@@ -104,22 +104,40 @@ Excel export contains only log paths.
 ## Incremental SMT-LIB files
 
 This branch scores incremental files (many `push` / `check-sat` / `pop` in one
-`.smt2`) at **file** granularity:
+`.smt2`) at two layers.
 
-- The solver process must finish the whole file (`complete=yes`, exit 0).
-  Timeout, SIGKILL, or a non-zero exit is not a file success, even if stdout
-  already contains `sat` or `unsat`.
-- Only the **last** `check-sat` answer is the file result. Intermediate
-  `unknown` is allowed and does not fail the file.
-- `result` in `results.tsv` stays process-level: exit 0 uses that last answer;
-  a kill is still `timeout`.
+**Query counts** partition every expected `check-sat` / `check-sat-assuming`:
 
-New runs append these columns after the original seven:
+`sat + unsat + unknown + error + timeout + unreached = expected`
 
-`queries  sat  unsat  unknown  first  last  expected  complete`
+- `sat` / `unsat` — definite answers.
+- `unknown` — printed `unknown` (including a solver's own per-query budget).
+- `error` — an `(error "...")` line, or the in-flight query if the process crashed.
+- `timeout` — bookkeeping only: at most one query, the check-sat that was running when GNU timeout / SIGKILL fired. The analysis UI does not treat this as a check-sat status; it is folded into `unreached`.
+- `unreached` — later queries that never started after the process died.
 
-`expected` is the number of top-level `check-sat` / `check-sat-assuming`
-commands in the source file. `queries` is how many answers were printed.
-`complete=yes` means the process exited 0. Dashboard and Excel report the same
-fields, including `partial_timeout` (timed out after printing at least one
-answer). Resume still accepts the original 7-column `results.tsv`.
+**File status** is `complete` (exit 0 and every expected check-sat printed an
+outcome), `partial` (at least one printed outcome, then timeout/error),
+`timeout` (killed with no answers), or `error` (failed with no answers). Timeout belongs on this
+layer: it describes the process, not a printed SMT answer.
+
+`result` stays process-level: exit 0 uses the last printed outcome; a kill is still
+`timeout`. Dashboard, analysis charts, and Excel lead with PO coverage
+`(sat+unsat)/expected`. Check-sat summaries show sat/unsat/unknown/error/unreached.
+The formula list gives each solver a check-sat column (PO tag plus
+`sat+unsat/expected`) and a files column (file status plus runtime). The cactus
+plot counts solved check-sat answers (partial files still contribute); switch it
+to files for the old last-answer curve. The scatter plot defaults to per-file
+coverage.
+
+`jobs.tsv` records `expected` (the number of `check-sat` / `check-sat-assuming`
+commands) when the queue is built, so pending files do not need to be re-parsed.
+`results.tsv` always has:
+
+`job_id solver file result time code output_path queries sat unsat unknown error timeout unreached first last expected complete file_status`
+
+`queries` is how many outcomes were printed. Resume requires this header and
+rejects older result streams. `jobs.tsv` must include `expected`; queues without
+that column are rejected rather than re-parsed. Solver stdout is streamed into
+`logs/job_<id>.<solver>.out` while the job runs, so a timeout still leaves a
+partial log. `--log fail` deletes the file afterwards when the process succeeded.

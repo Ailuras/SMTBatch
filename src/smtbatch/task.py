@@ -12,15 +12,32 @@ from typing import Iterable, Mapping, Sequence, TextIO
 
 MANIFEST_FIELDS = ["task_id", "case_index", "file"]
 TASK_FIELDS = ["solver", "file", "result", "time", "code", "output_path"]
-JOB_FIELDS = ["job_id", "solver", "file"]
+JOB_FIELDS = ["job_id", "solver", "file", "expected"]
 RESULT_CORE_FIELDS = ["job_id", *TASK_FIELDS]
-RESULT_INCREMENTAL_FIELDS = ["queries", "sat", "unsat", "unknown", "first", "last", "expected", "complete"]
+RESULT_INCREMENTAL_FIELDS = [
+    "queries",
+    "sat",
+    "unsat",
+    "unknown",
+    "error",
+    "timeout",
+    "unreached",
+    "first",
+    "last",
+    "expected",
+    "complete",
+    "file_status",
+]
 RESULT_FIELDS = [*RESULT_CORE_FIELDS, *RESULT_INCREMENTAL_FIELDS]
 VALID_TASK_RESULTS = {"sat", "unsat", "unknown", "timeout", "error"}
 VALID_ANSWERS = {"sat", "unsat", "unknown"}
+VALID_OUTCOMES = {"sat", "unsat", "unknown", "error"}
 VALID_COMPLETE = {"yes", "no"}
+VALID_FILE_STATUS = {"complete", "partial", "timeout", "error"}
+QUERY_COUNT_FIELDS = ("sat", "unsat", "unknown", "error", "timeout", "unreached")
 _CHECK_SAT_COMMANDS = frozenset({"check-sat", "check-sat-assuming"})
 _TASK_NAME_RE = re.compile(r"^task_(\d+)\.tsv$")
+_ERROR_LINE_RE = re.compile(r"^\(error(?:\s|$)", re.IGNORECASE)
 
 # Result labels as recorded by smtbatch run in the task TSV (lowercase) and the
 # uppercase labels used for cross-solver consistency classification.
@@ -41,27 +58,42 @@ CONSISTENCY_TYPES = {
 }
 
 
+def jobs_header_ok(fieldnames: Sequence[str] | None) -> bool:
+    """Accept only the current jobs.tsv header, including expected check-sat counts."""
+    return list(fieldnames or []) == JOB_FIELDS
+
+
 def results_header_ok(fieldnames: Sequence[str] | None) -> bool:
-    """Accept the original 7-column results header or the incremental extension."""
-    if not fieldnames:
-        return False
-    fields = list(fieldnames)
-    if fields[: len(RESULT_CORE_FIELDS)] != RESULT_CORE_FIELDS:
-        return False
-    extra = fields[len(RESULT_CORE_FIELDS) :]
-    if not extra:
-        return True
-    return len(extra) == len(set(extra)) and set(extra) <= set(RESULT_INCREMENTAL_FIELDS)
+    """Accept only the current results.tsv header."""
+    return list(fieldnames or []) == RESULT_FIELDS
+
+
+def parse_outcomes(output: str) -> list[str]:
+    """Collect every check-sat outcome from solver stdout: sat/unsat/unknown/error."""
+    outcomes: list[str] = []
+    for line in output.splitlines():
+        outcome = outcome_from_line(line)
+        if outcome is not None:
+            outcomes.append(outcome)
+    return outcomes
 
 
 def parse_answers(output: str) -> list[str]:
     """Collect every SMT-LIB sat/unsat/unknown printed as the first token of a line."""
-    answers: list[str] = []
-    for line in output.splitlines():
-        parts = line.strip().split(maxsplit=1)
-        if parts and parts[0] in VALID_ANSWERS:
-            answers.append(parts[0])
-    return answers
+    return [outcome for outcome in parse_outcomes(output) if outcome in VALID_ANSWERS]
+
+
+def outcome_from_line(line: str) -> str | None:
+    """Return a check-sat outcome if this solver line is sat/unsat/unknown/error."""
+    text = line.strip()
+    if not text:
+        return None
+    if _ERROR_LINE_RE.match(text):
+        return "error"
+    token = text.split(maxsplit=1)[0].lower()
+    if token in VALID_OUTCOMES:
+        return token
+    return None
 
 
 def count_check_sat(path: Path) -> int:
@@ -146,31 +178,108 @@ def _count_top_level_commands(handle: TextIO, names: frozenset[str]) -> int:
     return count
 
 
-def incremental_from_answers(
-    answers: Sequence[str],
+def classify_file_status(*, complete: bool, printed: int, result: str) -> str:
+    """Process-level file status: complete, partial, timeout, or error."""
+    if complete:
+        return "complete"
+    if printed > 0:
+        return "partial"
+    if result == "timeout":
+        return "timeout"
+    return "error"
+
+
+def incremental_stats(
+    outcomes: Sequence[str],
     expected: int,
     *,
-    complete: bool,
-) -> dict[str, str]:
-    """Serialize per-query incremental columns for one results.tsv row."""
+    result: str,
+    exit_ok: bool,
+) -> dict[str, object]:
+    """Partition one file's check-sat commands into query-level counts.
+
+    ``sat + unsat + unknown + error + timeout + unreached == expected``.
+    A GNU timeout / kill attributes at most one in-flight query to ``timeout``;
+    later commands that never started are ``unreached``. A non-timeout crash
+    attributes the in-flight query to ``error``. Printed ``unknown`` stays
+    unknown (soft ``-t`` timeouts are not reclassified).
+
+    ``complete`` means the process exited 0 and every expected check-sat printed
+    an outcome. A process that exits 0 early is ``partial``/``error``, not complete.
+    """
+    expected = max(0, expected)
+    capped = list(outcomes[:expected])
+    sat = sum(1 for outcome in capped if outcome == "sat")
+    unsat = sum(1 for outcome in capped if outcome == "unsat")
+    unknown = sum(1 for outcome in capped if outcome == "unknown")
+    printed_error = sum(1 for outcome in capped if outcome == "error")
+    printed = len(capped)
+    remaining = max(0, expected - printed)
+    complete = bool(exit_ok) and remaining == 0
+    timeout = 0
+    extra_error = 0
+    unreached = remaining
+    if not complete and remaining > 0:
+        if result == "timeout":
+            timeout = 1
+        else:
+            extra_error = 1
+        unreached = remaining - 1
+    answers = [outcome for outcome in capped if outcome in VALID_ANSWERS]
     return {
-        "queries": str(len(answers)),
-        "sat": str(sum(1 for answer in answers if answer == "sat")),
-        "unsat": str(sum(1 for answer in answers if answer == "unsat")),
-        "unknown": str(sum(1 for answer in answers if answer == "unknown")),
+        "queries": printed,
+        "sat": sat,
+        "unsat": unsat,
+        "unknown": unknown,
+        "error": printed_error + extra_error,
+        "timeout": timeout,
+        "unreached": unreached,
         "first": answers[0] if answers else "",
         "last": answers[-1] if answers else "",
-        "expected": str(expected),
+        "expected": expected,
         "complete": "yes" if complete else "no",
+        "file_status": classify_file_status(complete=complete, printed=printed, result=result),
+    }
+
+
+def incremental_tsv_fields(stats: Mapping[str, object]) -> dict[str, str]:
+    """Serialize :func:`incremental_stats` (or a row view) for ``results.tsv``."""
+    fields: dict[str, str] = {}
+    for key in RESULT_INCREMENTAL_FIELDS:
+        value = stats.get(key, "")
+        fields[key] = str(value)
+    return fields
+
+
+def incremental_from_row(row: Mapping[str, str]) -> dict[str, object]:
+    """Read the incremental columns written by the current batch runner."""
+    complete = row_complete(row)
+    result = (row.get("result") or "").strip().lower()
+    queries = optional_nonneg_int(row.get("queries"))
+    file_status = (row.get("file_status") or "").strip().lower()
+    if file_status not in VALID_FILE_STATUS:
+        file_status = classify_file_status(complete=complete, printed=queries, result=result)
+    first = (row.get("first") or "").strip().lower()
+    last = (row.get("last") or "").strip().lower()
+    return {
+        "queries": queries,
+        "sat": optional_nonneg_int(row.get("sat")),
+        "unsat": optional_nonneg_int(row.get("unsat")),
+        "unknown": optional_nonneg_int(row.get("unknown")),
+        "error": optional_nonneg_int(row.get("error")),
+        "timeout": optional_nonneg_int(row.get("timeout")),
+        "unreached": optional_nonneg_int(row.get("unreached")),
+        "first": first if first in VALID_ANSWERS else "",
+        "last": last if last in VALID_ANSWERS else "",
+        "expected": optional_nonneg_int(row.get("expected")),
+        "complete": "yes" if complete else "no",
+        "file_status": file_status,
     }
 
 
 def row_complete(row: Mapping[str, str]) -> bool:
-    """Whether the solver process finished the whole incremental file."""
-    raw = (row.get("complete") or "").strip().lower()
-    if raw in VALID_COMPLETE:
-        return raw == "yes"
-    return (row.get("result") or "").strip().lower() in VALID_ANSWERS
+    """Whether the solver finished every expected check-sat and exited 0."""
+    return (row.get("complete") or "").strip().lower() == "yes"
 
 
 def optional_nonneg_int(value: str | None, default: int = 0) -> int:
@@ -223,6 +332,7 @@ class JobSpec:
     job_id: int
     solver: str
     file_path: Path
+    expected: int | None = None
 
 
 @dataclass(frozen=True)
@@ -292,11 +402,13 @@ def write_jobs(path: Path, jobs: Iterable[JobSpec]) -> None:
             writer = csv.DictWriter(handle, fieldnames=JOB_FIELDS, delimiter="\t")
             writer.writeheader()
             for job in jobs:
+                expected = job.expected if job.expected is not None else count_check_sat(job.file_path)
                 writer.writerow(
                     {
                         "job_id": job.job_id,
                         "solver": job.solver,
                         "file": str(job.file_path),
+                        "expected": expected,
                     }
                 )
             handle.flush()
@@ -312,24 +424,25 @@ def load_jobs(path: Path) -> list[JobSpec]:
     seen_pairs: set[tuple[str, str]] = set()
     with path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
-        if reader.fieldnames != JOB_FIELDS:
+        if not jobs_header_ok(reader.fieldnames):
             raise ValueError(f"invalid jobs header in {path}: {reader.fieldnames}")
         for row_number, row in enumerate(reader, start=2):
             if None in row:
                 raise ValueError(f"extra columns in jobs row at {path}:{row_number}")
             try:
                 job_id = int(row.get("job_id") or "")
+                expected = int(row.get("expected") or "")
             except ValueError as exc:
-                raise ValueError(f"invalid job ID at {path}:{row_number}") from exc
+                raise ValueError(f"invalid job ID or expected count at {path}:{row_number}") from exc
             solver = (row.get("solver") or "").strip()
             file_name = row.get("file") or ""
-            if job_id != len(jobs) + 1 or not solver or not file_name:
+            if job_id != len(jobs) + 1 or expected < 0 or not solver or not file_name:
                 raise ValueError(f"invalid jobs row at {path}:{row_number}")
             pair = (solver, file_name)
             if pair in seen_pairs:
                 raise ValueError(f"duplicate solver-file pair at {path}:{row_number}")
             seen_pairs.add(pair)
-            jobs.append(JobSpec(job_id, solver, Path(file_name)))
+            jobs.append(JobSpec(job_id, solver, Path(file_name), expected))
     return jobs
 
 
@@ -354,9 +467,16 @@ def audit_results(jobs: Sequence[JobSpec], results_path: Path) -> JobAudit:
                 job = expected.get(job_id)
                 if job is None or job_id in completed:
                     return JobAudit("corrupt", len(jobs), len(completed), f"row {row_number}: unknown or duplicate job ID")
-                error = _validate_task_row(row, str(job.file_path), job.solver)
+                error = _validate_result_row(row, str(job.file_path), job.solver)
                 if error:
                     return JobAudit("corrupt", len(jobs), len(completed), f"row {row_number}: {error}")
+                if job.expected is not None and optional_nonneg_int(row.get("expected")) != job.expected:
+                    return JobAudit(
+                        "corrupt",
+                        len(jobs),
+                        len(completed),
+                        f"row {row_number}: expected count does not match jobs.tsv",
+                    )
                 completed.add(job_id)
     except (OSError, csv.Error) as exc:
         return JobAudit("corrupt", len(jobs), len(completed), f"{type(exc).__name__}: {exc}")
@@ -434,16 +554,24 @@ def _validate_task_row(row: dict[str, str], expected_file: str, expected_solver:
             int(code)
         except ValueError:
             return f"invalid code {code!r}"
+    return ""
+
+
+def _validate_result_row(row: dict[str, str], expected_file: str, expected_solver: str | None) -> str:
+    error = _validate_task_row(row, expected_file, expected_solver)
+    if error:
+        return error
     return _validate_incremental_row(row)
 
 
 def _validate_incremental_row(row: Mapping[str, str]) -> str:
-    for key in ("queries", "sat", "unsat", "unknown", "expected"):
+    for key in RESULT_INCREMENTAL_FIELDS:
         if key not in row:
-            continue
-        raw = row.get(key) or ""
-        if raw == "":
-            continue
+            return f"missing {key}"
+    for key in ("queries", "sat", "unsat", "unknown", "error", "timeout", "unreached", "expected"):
+        raw = row.get(key)
+        if raw in (None, ""):
+            return f"invalid {key} {raw!r}"
         try:
             value = int(raw)
         except ValueError:
@@ -451,15 +579,19 @@ def _validate_incremental_row(row: Mapping[str, str]) -> str:
         if value < 0:
             return f"invalid {key} {raw!r}"
     for key in ("first", "last"):
-        if key not in row:
-            continue
         raw = (row.get(key) or "").strip().lower()
         if raw and raw not in VALID_ANSWERS:
             return f"invalid {key} {raw!r}"
-    if "complete" in row:
-        raw = (row.get("complete") or "").strip().lower()
-        if raw and raw not in VALID_COMPLETE:
-            return f"invalid complete {raw!r}"
+    raw_complete = (row.get("complete") or "").strip().lower()
+    if raw_complete not in VALID_COMPLETE:
+        return f"invalid complete {row.get('complete')!r}"
+    raw_status = (row.get("file_status") or "").strip().lower()
+    if raw_status not in VALID_FILE_STATUS:
+        return f"invalid file_status {row.get('file_status')!r}"
+    expected = optional_nonneg_int(row.get("expected"))
+    total = sum(optional_nonneg_int(row.get(key)) for key in QUERY_COUNT_FIELDS)
+    if total != expected:
+        return "query counts do not sum to expected"
     return ""
 
 

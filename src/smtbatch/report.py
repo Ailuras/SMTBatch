@@ -9,9 +9,10 @@ solvers come from different ``<output>`` directories; cross-solver consistency i
 classified and a styled workbook is written.
 
 The ``Results`` sheet uses ``path | filename | logic | file_size | consistency`` followed by
-``<solver>_result | <solver>_time | <solver>_log | <solver>_queries | <solver>_last |
-<solver>_expected | <solver>_complete`` and, with ``--load-output``,
-``<solver>_output``. SMT-LIB details such as ``logic`` are read from the source
+``<solver>_result | <solver>_time | <solver>_log | <solver>_queries | <solver>_sat |
+<solver>_unsat | <solver>_unknown | <solver>_error | <solver>_timeout | <solver>_unreached |
+<solver>_last | <solver>_expected | <solver>_complete | <solver>_file_status`` and, with
+``--load-output``, ``<solver>_output``. SMT-LIB details such as ``logic`` are read from the source
 file during aggregation rather than copied through task TSVs.
 """
 
@@ -65,6 +66,13 @@ class LogEntry:
     last: str = ""
     expected: int | None = None
     complete: str = ""
+    query_sat: int | None = None
+    query_unsat: int | None = None
+    query_unknown: int | None = None
+    query_error: int | None = None
+    query_timeout: int | None = None
+    unreached: int | None = None
+    file_status: str = ""
 
     @property
     def success(self) -> bool:
@@ -97,6 +105,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _optional_count(row: dict[str, str], key: str) -> int | None:
+    raw = row.get(key)
+    if raw in (None, ""):
+        return None
+    return optional_nonneg_int(raw)
+
+
 def load_entries(task_files: list[Path], load_output: bool) -> list[LogEntry]:
     entries: list[LogEntry] = []
     for task_file in task_files:
@@ -127,10 +142,17 @@ def load_entries(task_files: list[Path], load_output: bool) -> list[LogEntry]:
                         exit_code=exit_code,
                         raw_output=raw_output,
                         result=result,
-                        queries=optional_nonneg_int(row.get("queries")) if row.get("queries") not in (None, "") else None,
+                        queries=_optional_count(row, "queries"),
                         last=(row.get("last") or "").strip(),
-                        expected=optional_nonneg_int(row.get("expected")) if row.get("expected") not in (None, "") else None,
+                        expected=_optional_count(row, "expected"),
                         complete=(row.get("complete") or "").strip().lower(),
+                        query_sat=_optional_count(row, "sat"),
+                        query_unsat=_optional_count(row, "unsat"),
+                        query_unknown=_optional_count(row, "unknown"),
+                        query_error=_optional_count(row, "error"),
+                        query_timeout=_optional_count(row, "timeout"),
+                        unreached=_optional_count(row, "unreached"),
+                        file_status=(row.get("file_status") or "").strip().lower(),
                     )
                 )
     return entries
@@ -187,9 +209,16 @@ def build_rows(
         record[f"{solver_prefix}_time"] = entry.duration_sec
         record[f"{solver_prefix}_log"] = str(entry.log_path)
         record[f"{solver_prefix}_queries"] = entry.queries
+        record[f"{solver_prefix}_sat"] = entry.query_sat
+        record[f"{solver_prefix}_unsat"] = entry.query_unsat
+        record[f"{solver_prefix}_unknown"] = entry.query_unknown
+        record[f"{solver_prefix}_error"] = entry.query_error
+        record[f"{solver_prefix}_timeout"] = entry.query_timeout
+        record[f"{solver_prefix}_unreached"] = entry.unreached
         record[f"{solver_prefix}_last"] = entry.last
         record[f"{solver_prefix}_expected"] = entry.expected
         record[f"{solver_prefix}_complete"] = entry.complete
+        record[f"{solver_prefix}_file_status"] = entry.file_status.upper()
         if include_output:
             record[f"{solver_prefix}_output"] = entry.raw_output
 
@@ -208,9 +237,16 @@ def build_rows(
                 f"{solver}_time",
                 f"{solver}_log",
                 f"{solver}_queries",
+                f"{solver}_sat",
+                f"{solver}_unsat",
+                f"{solver}_unknown",
+                f"{solver}_error",
+                f"{solver}_timeout",
+                f"{solver}_unreached",
                 f"{solver}_last",
                 f"{solver}_expected",
                 f"{solver}_complete",
+                f"{solver}_file_status",
             ]
         )
         if include_output:
@@ -224,9 +260,16 @@ def build_rows(
             record.setdefault(f"{solver}_time", None)
             record.setdefault(f"{solver}_log", "")
             record.setdefault(f"{solver}_queries", None)
+            record.setdefault(f"{solver}_sat", None)
+            record.setdefault(f"{solver}_unsat", None)
+            record.setdefault(f"{solver}_unknown", None)
+            record.setdefault(f"{solver}_error", None)
+            record.setdefault(f"{solver}_timeout", None)
+            record.setdefault(f"{solver}_unreached", None)
             record.setdefault(f"{solver}_last", "")
             record.setdefault(f"{solver}_expected", None)
             record.setdefault(f"{solver}_complete", "")
+            record.setdefault(f"{solver}_file_status", "")
             if include_output:
                 record.setdefault(f"{solver}_output", "")
         results = [str(record.get(f"{solver}_result", "")).upper().strip() for solver in solvers]
@@ -273,6 +316,19 @@ def build_statistics(fieldnames: list[str], rows: list[dict[str, object]]) -> di
             "min_time": min(durations) if durations else 0,
             "max_time": max(durations) if durations else 0,
         }
+        queries = {"sat": 0, "unsat": 0, "unknown": 0, "error": 0, "timeout": 0, "unreached": 0, "expected": 0}
+        has_queries = False
+        for row in rows:
+            for key in queries:
+                value = row.get(f"{solver}_{key}")
+                if isinstance(value, (int, float)):
+                    queries[key] += int(value)
+                    has_queries = True
+        if has_queries:
+            stats.setdefault("queries", {})[solver] = {
+                **queries,
+                "solved": queries["sat"] + queries["unsat"],
+            }
 
     for row in rows:
         consistency_type = row.get("consistency", "Other")
@@ -316,10 +372,11 @@ HEADER_FONT = Font(bold=True, color="FFFFFF")
 SECTION_FILL = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
 SECTION_FONT = Font(bold=True)
 RESULT_FILLS = {
-    "SAT": PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid"),
+    "COMPLETE": PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid"),
     "UNSAT": PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid"),
     "UNKNOWN": PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid"),
     "TIMEOUT": PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid"),
+    "PARTIAL": PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid"),
     "ERROR": PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid"),
 }
 CONSISTENCY_FILLS = {
@@ -386,6 +443,10 @@ def result_column_width(field: str) -> float:
         return 14
     if field.endswith("_log") or field.endswith("_output"):
         return 80
+    if field.endswith("_file_status") or field.endswith("_complete"):
+        return 14
+    if field.endswith(("_queries", "_sat", "_unsat", "_unknown", "_error", "_timeout", "_unreached", "_expected")):
+        return 12
     return 20
 
 
@@ -412,6 +473,8 @@ def write_excel(output_path: Path, fieldnames: list[str], rows: list[dict[str, o
         for field in fieldnames:
             value = sanitize_excel_value(row_data.get(field))
             fill = result_fill(value) if field.endswith("_result") else None
+            if field.endswith("_file_status"):
+                fill = RESULT_FILLS.get(str(value).upper().strip())
             if field == "consistency":
                 fill = CONSISTENCY_FILLS.get(str(value))
             cells.append(styled_cell(worksheet, value, fill=fill) if fill is not None else value)
@@ -457,6 +520,34 @@ def write_statistics_sheet(workbook: Workbook, stats: dict[str, object]) -> None
     )
     for solver in solvers:
         append_solver_statistics(worksheet, solver, stats["overall"][solver], include_min_max=True)
+
+    if stats.get("queries"):
+        worksheet.append([None])
+        append_section(worksheet, "Check-sat Statistics")
+        append_header(
+            worksheet,
+            ["Solver", "Expected", "Solved", "Coverage", "sat", "unsat", "unknown", "error", "unreached"],
+        )
+        for solver in solvers:
+            data = stats["queries"].get(solver)
+            if not data:
+                continue
+            expected = data["expected"]
+            solved = data["solved"]
+            coverage = f"{100 * solved / expected:.1f}%" if expected else "—"
+            worksheet.append(
+                [
+                    solver,
+                    expected,
+                    solved,
+                    coverage,
+                    data["sat"],
+                    data["unsat"],
+                    data["unknown"],
+                    data["error"],
+                    data["unreached"] + data["timeout"],
+                ]
+            )
 
     worksheet.append([None])
     append_section(worksheet, "Result Consistency Analysis")
