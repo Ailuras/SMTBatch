@@ -93,8 +93,9 @@ only when requested, keeping large experiments responsive.
 
 Every run directory contains `jobs.tsv` (immutable queue, including the expected
 check-sat count per file), `results.tsv` (streaming results), `progress.json`
-(live progress), `metadata.txt` (immutable initial provenance), and `logs/`
-(one output file per job, streamed while the solver runs). Resumed runs additionally contain append-only
+(live progress), `metadata.txt` (immutable initial provenance), and, by default,
+`events/` (one timestamped check-sat event stream per job). `logs/` contains one
+solver-output file per retained job. Resumed runs additionally contain append-only
 `resume_history.jsonl`, preserving each resume attempt and its worker count.
 Solver provenance in `metadata.txt` includes the resolved artifact inventory
 and a path-independent bundle hash. It also records the commit and dirty state
@@ -132,6 +133,11 @@ coverage.
 
 `jobs.tsv` records `expected` (the number of `check-sat` / `check-sat-assuming`
 commands) when the queue is built, so pending files do not need to be re-parsed.
+For repeatable probe sets, pass `--files-from probe.txt` instead of `--input`.
+The manifest is newline-delimited, ignores blank lines and `#` comments, resolves
+relative paths from its own directory, preserves order, and is hashed into run
+metadata.
+
 `results.tsv` always has:
 
 `job_id solver file result time code output_path queries sat unsat unknown error timeout unreached first last expected complete file_status`
@@ -141,3 +147,8 @@ rejects older result streams. `jobs.tsv` must include `expected`; queues without
 that column are rejected rather than re-parsed. Solver stdout is streamed into
 `logs/job_<id>.<solver>.out` while the job runs, so a timeout still leaves a
 partial log. `--log fail` deletes the file afterwards when the process succeeded.
+Independently of that log policy, `events/job_<id>.<solver>.tsv` records
+`ordinal elapsed_ms delta_ms outcome source` as answers arrive. A killed or
+failed in-flight query gets one final `source=synthetic` timeout/error event;
+later queries remain `unreached` in `results.tsv`. Use `--no-query-events` to
+disable these files for a new run.

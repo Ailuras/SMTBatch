@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import tempfile
 import unittest
 from pathlib import Path
@@ -249,6 +250,40 @@ class IncrementalRunJobTests(unittest.TestCase):
         text = log_path.read_text(encoding="utf-8")
         self.assertIn("unknown", text)
         self.assertIn("sat", text)
+
+    def test_query_events_record_solver_answers_and_synthetic_timeout(self) -> None:
+        event_path = Path(self.temp.name) / "events" / "job_0000001.alpha.tsv"
+        item = run_job(
+            self._spec("#!/bin/sh\necho unknown\necho sat\nsleep 30\n"),
+            JobSpec(1, "alpha", self.formula, 3),
+            timeout=1,
+            outer_timeout=1.0,
+            event_path=event_path,
+        )
+        self.assertEqual(item.result, "timeout")
+        with event_path.open("r", encoding="utf-8", newline="") as handle:
+            rows = list(csv.DictReader(handle, delimiter="\t"))
+        self.assertEqual([row["ordinal"] for row in rows], ["1", "2", "3"])
+        self.assertEqual([row["outcome"] for row in rows], ["unknown", "sat", "timeout"])
+        self.assertEqual([row["source"] for row in rows], ["solver", "solver", "synthetic"])
+        elapsed = [int(row["elapsed_ms"]) for row in rows]
+        self.assertEqual(elapsed, sorted(elapsed))
+        self.assertEqual(sum(int(row["delta_ms"]) for row in rows), elapsed[-1])
+
+    def test_complete_query_events_have_no_synthetic_row(self) -> None:
+        event_path = Path(self.temp.name) / "complete.tsv"
+        item = run_job(
+            self._spec("#!/bin/sh\necho sat\necho unknown\necho unsat\n"),
+            JobSpec(1, "alpha", self.formula, 3),
+            timeout=5,
+            outer_timeout=5,
+            event_path=event_path,
+        )
+        self.assertTrue(item.complete)
+        with event_path.open("r", encoding="utf-8", newline="") as handle:
+            rows = list(csv.DictReader(handle, delimiter="\t"))
+        self.assertEqual([row["outcome"] for row in rows], ["sat", "unknown", "unsat"])
+        self.assertEqual({row["source"] for row in rows}, {"solver"})
 
     def test_three_answers_and_exit_zero_is_complete(self) -> None:
         item = run_job(

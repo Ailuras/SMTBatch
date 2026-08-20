@@ -26,6 +26,7 @@ from smtbatch.run import (
     _prepare_fresh,
     _prepare_resume,
     _results_writer_fields,
+    load_files_from,
     parse_args,
     main,
     retain_job_log,
@@ -296,9 +297,73 @@ class ResumeLogicTests(unittest.TestCase):
         self.assertIn("alpha_solver_bundle_schema=linked-artifacts-v1\n", metadata)
         self.assertIn("target_branch=main\n", metadata)
         self.assertIn("smtbatch_branch=main\n", metadata)
+        self.assertIn("query_events=yes\n", metadata)
+        self.assertTrue(plan.query_events)
         self.assertEqual(plan.pair_count, 4)
         jobs = load_jobs(output / "jobs.tsv")
         self.assertEqual([job.expected for job in jobs], [1, 1, 1, 1])
+
+    def test_files_from_preserves_order_resolves_relative_paths_and_deduplicates(self) -> None:
+        manifest = self.root / "probe.txt"
+        manifest.write_text(
+            "# fixed probe\ninputs/f2.smt2\ninputs/f0.smt2\ninputs/f2.smt2\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(load_files_from(manifest, 0), [self.formulas[2], self.formulas[0]])
+        self.assertEqual(load_files_from(manifest, 1), [self.formulas[2]])
+
+        output = self.root / "results" / "files-from"
+        plan = _prepare_fresh(
+            parse_args(
+                [
+                    "--solver",
+                    "alpha",
+                    "--files-from",
+                    str(manifest),
+                    "--output",
+                    str(output),
+                ]
+            )
+        )
+        self.assertEqual([job.file_path for job in plan.jobs], [self.formulas[2], self.formulas[0]])
+        metadata = (output / "metadata.txt").read_text(encoding="utf-8")
+        self.assertIn(f"files_from={manifest}\n", metadata)
+        self.assertIn(f"files_from_sha256={hashlib.sha256(manifest.read_bytes()).hexdigest()}\n", metadata)
+
+    def test_prepare_fresh_rejects_input_with_files_from(self) -> None:
+        manifest = self.root / "probe.txt"
+        manifest.write_text(f"{self.formulas[0]}\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "cannot be combined"):
+            _prepare_fresh(
+                parse_args(
+                    [
+                        "--solver",
+                        "alpha",
+                        "--input",
+                        str(self.root / "inputs"),
+                        "--files-from",
+                        str(manifest),
+                    ]
+                )
+            )
+
+    def test_query_events_can_be_disabled_for_a_new_run(self) -> None:
+        output = self.root / "results" / "no-query-events"
+        plan = _prepare_fresh(
+            parse_args(
+                [
+                    "--solver",
+                    "alpha",
+                    "--input",
+                    str(self.root / "inputs"),
+                    "--output",
+                    str(output),
+                    "--no-query-events",
+                ]
+            )
+        )
+        self.assertFalse(plan.query_events)
+        self.assertIn("query_events=no\n", (output / "metadata.txt").read_text(encoding="utf-8"))
 
     def test_prepare_fresh_rejects_wrong_smtbatch_branch(self) -> None:
         self.config_path.write_text(
@@ -338,7 +403,7 @@ class ResumeLogicTests(unittest.TestCase):
 
     def test_prepare_resume_rejects_input_and_solver_flags(self) -> None:
         run_dir = self._make_run("partial", completed=1)
-        for extra in (["--input", "inputs"], ["--solver", "alpha"]):
+        for extra in (["--input", "inputs"], ["--files-from", "probe.txt"], ["--solver", "alpha"]):
             with self.assertRaisesRegex(ValueError, "--resume cannot be combined"):
                 _prepare_resume(parse_args(["--resume", "--output", str(run_dir), *extra]))
 
@@ -484,6 +549,28 @@ class ResumeLogicTests(unittest.TestCase):
             row = next(csv.DictReader(handle, delimiter="\t"))
         self.assertEqual(row["output_path"], str(log_path))
         self.assertEqual(row["expected"], "1")
+
+    def test_run_queue_keeps_query_events_when_solver_logs_are_disabled(self) -> None:
+        results_path = self.root / "results" / "event-results.tsv"
+        events_dir = self.root / "results" / "events"
+        jobs = [JobSpec(1, "alpha", self.formulas[0], 1)]
+        run_queue(
+            jobs,
+            {"alpha": load_config().solvers["alpha"]},
+            timeout=5,
+            workers=1,
+            logs_dir=self.root / "unused-logs",
+            events_dir=events_dir,
+            log_policy="none",
+            checkpoint_every=1,
+            tracker=None,
+            results_path=results_path,
+        )
+        event_path = events_dir / "job_0000001.alpha.tsv"
+        self.assertTrue(event_path.is_file())
+        with event_path.open("r", encoding="utf-8", newline="") as handle:
+            rows = list(csv.DictReader(handle, delimiter="\t"))
+        self.assertEqual([(row["ordinal"], row["outcome"], row["source"]) for row in rows], [("1", "sat", "solver")])
 
 
 if __name__ == "__main__":

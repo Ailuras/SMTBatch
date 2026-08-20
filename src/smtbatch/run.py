@@ -65,6 +65,7 @@ _LOG_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 RESULT_ORDER = ("sat", "unsat", "unknown", "timeout", "error")
 SOLVER_BUNDLE_SCHEMA = "linked-artifacts-v1"
+QUERY_EVENT_FIELDS = ("ordinal", "elapsed_ms", "delta_ms", "outcome", "source")
 
 
 @contextmanager
@@ -318,7 +319,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--input",
         action="append",
         type=Path,
-        help="directory to scan for .smt2 files; repeat for multiple folders (required unless --resume is used)",
+        help="directory to scan for .smt2 files; repeat for multiple folders",
+    )
+    parser.add_argument(
+        "--files-from",
+        type=Path,
+        help="read a fixed .smt2 file order from a newline-delimited manifest; "
+        "relative paths are resolved from the manifest directory",
     )
     parser.add_argument("--output", type=Path, default=Path("results"), help="output directory (default: results)")
     parser.add_argument("--timeout", type=float, default=10.0, help="per-job solver timeout in seconds")
@@ -334,6 +341,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--hash-inputs",
         action="store_true",
         help="write input_hashes.tsv with SHA-256 and byte size before running",
+    )
+    parser.add_argument(
+        "--query-events",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="write one timestamped event row per check-sat outcome (default: enabled for new runs)",
     )
     parser.add_argument(
         "--progress-interval",
@@ -528,6 +541,12 @@ def job_log_path(logs_dir: Path, job: JobSpec) -> Path:
     return logs_dir / f"job_{job.job_id:07d}.{solver}.out"
 
 
+def query_event_path(events_dir: Path, job: JobSpec) -> Path:
+    """Stable per-job query-event path: ``job_0000001.<solver>.tsv``."""
+    solver = _LOG_NAME_RE.sub("_", job.solver) or "solver"
+    return events_dir / f"job_{job.job_id:07d}.{solver}.tsv"
+
+
 def retain_job_log(log_path: Path | None, policy: str, result: str) -> Path | None:
     """Keep streamed logs according to ``--log``; delete successful jobs when policy is fail."""
     if log_path is None or policy == "none":
@@ -614,6 +633,35 @@ def discover_files(input_dirs: Sequence[Path], limit: int) -> list[Path]:
     return files
 
 
+def load_files_from(path: Path, limit: int) -> list[Path]:
+    """Load a stable, de-duplicated benchmark order from a text manifest."""
+    manifest = path.expanduser().resolve()
+    if not manifest.is_file():
+        raise FileNotFoundError(f"file manifest not found: {manifest}")
+    files: list[Path] = []
+    seen: set[Path] = set()
+    for line_number, raw in enumerate(
+        manifest.read_text(encoding="utf-8", errors="replace").splitlines(),
+        start=1,
+    ):
+        value = raw.strip()
+        if not value or value.startswith("#"):
+            continue
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            candidate = manifest.parent / candidate
+        resolved = candidate.resolve()
+        if not resolved.is_file() or resolved.suffix.lower() != ".smt2":
+            raise ValueError(f"invalid SMT-LIB file at {manifest}:{line_number}: {value}")
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        files.append(resolved)
+        if limit > 0 and len(files) >= limit:
+            break
+    return files
+
+
 def iter_jobs(
     files: Sequence[Path],
     solvers: Sequence[str],
@@ -645,8 +693,10 @@ def run_job(
     outer_timeout: float,
     *,
     log_path: Path | None = None,
+    event_path: Path | None = None,
 ) -> JobResult:
     start = time.perf_counter()
+    expected = _expected_for(job)
     code: int | None = None
     command = spec.render(job.file_path, timeout)
     outcomes: list[str] = []
@@ -654,6 +704,28 @@ def run_job(
     process: subprocess.Popen[str] | None = None
 
     consume_error: list[BaseException] = []
+    event_handle: IO[str] | None = None
+    event_writer: csv.DictWriter[str] | None = None
+    last_event_ms = 0
+    synthetic_event_written = False
+
+    def write_event(outcome: str, source: str) -> None:
+        nonlocal last_event_ms, synthetic_event_written
+        if event_writer is None or event_handle is None:
+            return
+        elapsed_ms = max(last_event_ms, int((time.perf_counter() - start) * 1000))
+        event_writer.writerow(
+            {
+                "ordinal": len(outcomes) + (1 if source == "synthetic" else 0),
+                "elapsed_ms": elapsed_ms,
+                "delta_ms": elapsed_ms - last_event_ms,
+                "outcome": outcome,
+                "source": source,
+            }
+        )
+        event_handle.flush()
+        last_event_ms = elapsed_ms
+        synthetic_event_written = synthetic_event_written or source == "synthetic"
 
     def consume(stream: IO[str], log_handle: IO[str] | None) -> None:
         try:
@@ -665,8 +737,9 @@ def run_job(
                     log_handle.write(line)
                     log_handle.flush()
                 outcome = outcome_from_line(line)
-                if outcome is not None:
+                if outcome is not None and len(outcomes) < expected:
                     outcomes.append(outcome)
+                    write_event(outcome, "solver")
                 encoded = line.encode("utf-8", errors="replace")
                 tail.extend(encoded)
                 overflow = len(tail) - LOG_TAIL_BYTES
@@ -680,6 +753,12 @@ def run_job(
     try:
         if log_path is not None:
             log_path.parent.mkdir(parents=True, exist_ok=True)
+        if event_path is not None:
+            event_path.parent.mkdir(parents=True, exist_ok=True)
+            event_handle = event_path.open("w", encoding="utf-8", newline="", buffering=1)
+            event_writer = csv.DictWriter(event_handle, fieldnames=QUERY_EVENT_FIELDS, delimiter="\t")
+            event_writer.writeheader()
+            event_handle.flush()
         process = subprocess.Popen(
             command,
             text=True,
@@ -723,6 +802,8 @@ def run_job(
                 result = outcomes[-1] if outcomes else "error"
             else:
                 result = "error"
+            if len(outcomes) < expected:
+                write_event("timeout" if result == "timeout" else "error", "synthetic")
         finally:
             if log_handle is not None:
                 log_handle.flush()
@@ -749,7 +830,17 @@ def run_job(
                     handle.write(output)
             except OSError:
                 pass
+        if len(outcomes) < expected and not synthetic_event_written:
+            write_event("error", "synthetic")
         return _job_result_from_output(job, time.perf_counter() - start, "error", code, output)
+    finally:
+        if event_handle is not None:
+            event_handle.flush()
+            try:
+                os.fsync(event_handle.fileno())
+            except OSError:
+                pass
+            event_handle.close()
     return _job_result_from_outcomes(job, time.perf_counter() - start, result, code, output, outcomes)
 
 
@@ -774,7 +865,7 @@ def clean_previous_outputs(output_dir: Path) -> None:
         "manifest.tsv",
     ):
         (output_dir / name).unlink(missing_ok=True)
-    for name in ("logs", "tsv", "summary", "failures"):
+    for name in ("logs", "events", "tsv", "summary", "failures"):
         path = output_dir / name
         if path.is_symlink():
             raise ValueError(f"refusing to remove symlinked batch output path: {path}")
@@ -1033,12 +1124,14 @@ class _RunPlan:
 
     output_dir: Path
     logs_dir: Path
+    events_dir: Path
     jobs: list[JobSpec]
     remaining: list[JobSpec]
     specs: dict[str, SolverSpec]
     solvers: tuple[str, ...]
     timeout: float
     log: str
+    query_events: bool
     selected_file_count: int
     pair_count: int
     completed_before: int
@@ -1052,8 +1145,10 @@ class _RunPlan:
 
 
 def _prepare_fresh(args: argparse.Namespace) -> _RunPlan:
-    if not args.solver or not args.input:
-        raise ValueError("--solver and --input are required unless --resume is used")
+    if not args.solver or (not args.input and not args.files_from):
+        raise ValueError("--solver and either --input or --files-from are required unless --resume is used")
+    if args.input and args.files_from:
+        raise ValueError("--input and --files-from cannot be combined")
     config = load_config()
     smtbatch_branch = validate_target_branch(config)
     solvers = normalize_solvers(args.solver, config)
@@ -1062,13 +1157,18 @@ def _prepare_fresh(args: argparse.Namespace) -> _RunPlan:
     provenance = {
         name: solver_provenance(spec, artifact_cache) for name, spec in specs.items()
     }
-    files = discover_files(args.input, args.limit)
+    files = (
+        load_files_from(args.files_from, args.limit)
+        if args.files_from
+        else discover_files(args.input, args.limit)
+    )
     if not files:
         raise ValueError("no .smt2 files selected")
     expected_by_file = _count_check_sat_files(files)
     pair_count = len(files) * len(solvers)
     output_dir = args.output.expanduser().resolve()
     logs_dir = output_dir / "logs"
+    events_dir = output_dir / "events"
     clean_previous_outputs(output_dir)
     jobs = list(iter_jobs(files, solvers, expected_by_file))
     write_jobs(output_dir / "jobs.tsv", jobs)
@@ -1083,7 +1183,10 @@ def _prepare_fresh(args: argparse.Namespace) -> _RunPlan:
         "selected_files": str(len(files)),
         "solver_formula_pairs": str(pair_count),
         "log": args.log,
+        "query_events": "yes" if args.query_events is not False else "no",
         "input_hashes": "input_hashes.tsv" if args.hash_inputs else "",
+        "files_from": str(args.files_from.expanduser().resolve()) if args.files_from else "",
+        "files_from_sha256": sha256_path(args.files_from.expanduser().resolve()) if args.files_from else "",
         "solver_config": str(config.path),
         "incremental": "yes",
         "target_branch": config.target_branch,
@@ -1097,12 +1200,14 @@ def _prepare_fresh(args: argparse.Namespace) -> _RunPlan:
     return _RunPlan(
         output_dir=output_dir,
         logs_dir=logs_dir,
+        events_dir=events_dir,
         jobs=jobs,
         remaining=jobs,
         specs=specs,
         solvers=solvers,
         timeout=args.timeout,
         log=args.log,
+        query_events=args.query_events is not False,
         selected_file_count=len(files),
         pair_count=pair_count,
         completed_before=0,
@@ -1117,10 +1222,15 @@ def _prepare_fresh(args: argparse.Namespace) -> _RunPlan:
 
 
 def _prepare_resume(args: argparse.Namespace) -> _RunPlan:
-    if args.input or args.solver:
-        raise ValueError("--resume cannot be combined with --input or --solver (recovered from jobs.tsv)")
+    if args.input or args.files_from or args.solver:
+        raise ValueError(
+            "--resume cannot be combined with --input, --files-from, or --solver "
+            "(recovered from jobs.tsv)"
+        )
     if args.hash_inputs:
         raise ValueError("--hash-inputs cannot be combined with --resume")
+    if args.query_events is not None:
+        raise ValueError("--query-events/--no-query-events cannot be combined with --resume")
     output_dir = args.output.expanduser().resolve()
     if not output_dir.is_dir():
         raise ValueError(f"output directory not found: {output_dir}")
@@ -1174,12 +1284,14 @@ def _prepare_resume(args: argparse.Namespace) -> _RunPlan:
     return _RunPlan(
         output_dir=output_dir,
         logs_dir=output_dir / "logs",
+        events_dir=output_dir / "events",
         jobs=jobs,
         remaining=remaining,
         specs=specs,
         solvers=solvers,
         timeout=timeout,
         log=metadata.get("log", "fail"),
+        query_events=metadata.get("query_events", "no") == "yes",
         selected_file_count=len({job.file_path for job in jobs}),
         pair_count=len(jobs),
         completed_before=len(completed_ids),
@@ -1200,6 +1312,7 @@ def run_queue(
     timeout: float,
     workers: int,
     logs_dir: Path,
+    events_dir: Path | None = None,
     log_policy: str,
     checkpoint_every: int,
     tracker: ProgressTracker | None,
@@ -1208,12 +1321,16 @@ def run_queue(
 ) -> Counter[str]:
     outer_timeout = timeout + max(15.0, timeout * 0.5)
     pending = iter(jobs)
-    in_flight: dict[concurrent.futures.Future[JobResult], tuple[JobSpec, Path | None]] = {}
+    in_flight: dict[
+        concurrent.futures.Future[JobResult], tuple[JobSpec, Path | None, Path | None]
+    ] = {}
     outcomes: Counter[str] = Counter()
     completed = 0
 
     if log_policy != "none":
         logs_dir.mkdir(parents=True, exist_ok=True)
+    if events_dir is not None:
+        events_dir.mkdir(parents=True, exist_ok=True)
     if append_results:
         _ensure_append_boundary(results_path)
     fieldnames = _results_writer_fields(results_path, append_results)
@@ -1230,6 +1347,7 @@ def run_queue(
                 except StopIteration:
                     return
                 log_path = job_log_path(logs_dir, job) if log_policy != "none" else None
+                event_path = query_event_path(events_dir, job) if events_dir is not None else None
                 with _defer_sigint():
                     future = executor.submit(
                         run_job,
@@ -1238,8 +1356,9 @@ def run_queue(
                         timeout,
                         outer_timeout,
                         log_path=log_path,
+                        event_path=event_path,
                     )
-                    in_flight[future] = (job, log_path)
+                    in_flight[future] = (job, log_path, event_path)
                     if tracker is not None:
                         tracker.start(job)
 
@@ -1247,7 +1366,7 @@ def run_queue(
             nonlocal completed
             with _defer_sigint():
                 for future in done:
-                    job, log_path = in_flight.pop(future)
+                    job, log_path, _event_path = in_flight.pop(future)
                     try:
                         item = future.result()
                     except Exception as exc:  # noqa: BLE001 - persist an unexpected worker failure.
@@ -1379,6 +1498,7 @@ def _main_locked(args: argparse.Namespace) -> int:
             timeout=plan.timeout,
             workers=args.jobs,
             logs_dir=plan.logs_dir,
+            events_dir=plan.events_dir if plan.query_events else None,
             log_policy=plan.log,
             checkpoint_every=args.checkpoint_every,
             tracker=tracker,
