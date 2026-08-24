@@ -36,6 +36,7 @@ from .config import Config, branch_status, find_config_path, load_config
 from .run import write_progress_snapshot
 from .task import (
     classify_consistency,
+    classify_file_outcome,
     incremental_from_row,
     load_jobs,
     result_label,
@@ -770,6 +771,7 @@ class ExperimentManager:
                             "log_url": _data_url(output_path, self.results_root),
                             **incremental_from_row(row),
                         }
+                        record["file_outcome"] = classify_file_outcome(record)
                         results[job_id] = record
             except (OSError, ValueError, csv.Error) as exc:
                 raise ValueError(f"unable to read experiment results: {exc}") from None
@@ -806,7 +808,12 @@ class ExperimentManager:
             result = results.get(job.job_id)
             case_results = case["results"]
             assert isinstance(case_results, dict)
-            case_results[job.solver] = result or {"result": "pending", "time": None, "log_url": ""}
+            case_results[job.solver] = result or {
+                "result": "pending",
+                "time": None,
+                "log_url": "",
+                "file_outcome": "pending",
+            }
             case["total"] = int(case["total"]) + 1
             if result:
                 case["done"] = int(case["done"]) + 1
@@ -896,11 +903,15 @@ class ExperimentManager:
                 assert isinstance(outcomes, dict)
                 summary["completed"] += 1
                 outcomes[label] += 1
-                summary["file_complete"] += int(str(result.get("complete") or "") == "yes")
-                file_status = str(result.get("file_status") or "")
-                summary["file_partial"] += int(file_status == "partial")
-                summary["file_timeout"] += int(file_status == "timeout")
-                summary["file_error"] += int(file_status == "error")
+                outcome = str(result.get("file_outcome") or classify_file_outcome(result))
+                if outcome == "complete":
+                    summary["file_complete"] += 1
+                elif outcome == "partial":
+                    summary["file_partial"] += 1
+                elif outcome == "timeout":
+                    summary["file_timeout"] += 1
+                elif outcome == "error":
+                    summary["file_error"] += 1
                 query_count = _metric_int(result, "queries")
                 summary["answers"] += query_count
                 summary["expected"] += expected_count
@@ -1020,8 +1031,10 @@ class ExperimentManager:
                     "right_coverage": round(_query_coverage(right_result), 4),
                     "left_solved": _query_solved(left_result),
                     "right_solved": _query_solved(right_result),
-                    "left_status": left_result.get("file_status") or "",
-                    "right_status": right_result.get("file_status") or "",
+                    "left_status": left_result.get("file_outcome")
+                    or classify_file_outcome(left_result),
+                    "right_status": right_result.get("file_outcome")
+                    or classify_file_outcome(right_result),
                 }
             )
         total = len(points)

@@ -185,7 +185,7 @@ def _count_top_level_commands_bytes(data: bytes, names: frozenset[bytes]) -> int
 
 
 def classify_file_status(*, complete: bool, printed: int, result: str) -> str:
-    """Process-level file status: complete, partial, timeout, or error."""
+    """Process-level file status written to results.tsv: complete, partial, timeout, or error."""
     if complete:
         return "complete"
     if printed > 0:
@@ -193,6 +193,58 @@ def classify_file_status(*, complete: bool, printed: int, result: str) -> str:
     if result == "timeout":
         return "timeout"
     return "error"
+
+
+def _as_count(value: object) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value if value >= 0 else 0
+    if isinstance(value, str):
+        return optional_nonneg_int(value)
+    return 0
+
+
+def classify_file_outcome(stats: Mapping[str, object], *, result: str | None = None) -> str:
+    """Dashboard/report file label derived from query counts.
+
+    Complete: every expected check-sat is sat or unsat.
+    Partial: the session printed every check-sat, but some are unknown or error.
+    Timeout: the session did not finish because of the file wall.
+    Error: the session did not finish for any other reason.
+    """
+    label = (result if result is not None else str(stats.get("result") or "")).strip().lower()
+    if label in {"", "pending"}:
+        return "pending"
+    expected = _as_count(stats.get("expected"))
+    sat = _as_count(stats.get("sat"))
+    unsat = _as_count(stats.get("unsat"))
+    unknown = _as_count(stats.get("unknown"))
+    error = _as_count(stats.get("error"))
+    timeout = _as_count(stats.get("timeout"))
+    unreached = _as_count(stats.get("unreached"))
+    raw_queries = stats.get("queries")
+    if raw_queries is None or raw_queries == "":
+        printed = sat + unsat + unknown + error
+    else:
+        printed = _as_count(raw_queries)
+    accounted = sat + unsat + unknown + error + timeout + unreached
+    if expected <= 0:
+        expected = accounted
+    unfinished = printed < expected or unreached > 0 or timeout > 0
+    if unfinished:
+        if timeout > 0 or label == "timeout":
+            return "timeout"
+        return "error"
+    if expected > 0 and sat + unsat == expected and unknown == 0 and error == 0:
+        return "complete"
+    if expected == 0:
+        if label == "timeout":
+            return "timeout"
+        if label == "error":
+            return "error"
+        return "complete"
+    return "partial"
 
 
 def incremental_stats(

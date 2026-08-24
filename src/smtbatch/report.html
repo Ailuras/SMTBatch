@@ -23,7 +23,7 @@
     <div class="summary" id="summary"></div>
     <div class="grid">
       <section class="panel solver-summary-panel">
-        <div class="panel-head"><div><h2>Solver summary</h2><p>check-sat outcomes are sat/unsat/unknown/error; leftover POs are unreached. File status is complete/partial/timeout/error — timeout is a process result, not a printed check-sat.</p></div></div>
+        <div class="panel-head"><div><h2>Solver summary</h2><p>check-sat: sat/unsat/unknown/error; unreached includes the in-flight wall. Files: complete = all check-sat decided; partial = finished with unknown/error; timeout = did not finish; error = crashed.</p></div></div>
         <div id="query-bars"></div>
         <div id="solver-summary"></div>
       </section>
@@ -171,14 +171,14 @@
       const querySolvedTotal = summary.solvers.reduce((total, solver) => total + querySolved(summary.by_solver[solver]), 0);
       const queryExpected = summary.solvers.reduce((total, solver) => total + Number(summary.by_solver[solver].expected || 0), 0);
       const complete = summary.solvers.reduce((total, solver) => total + Number(summary.by_solver[solver].file_complete || 0), 0);
-      const partial = summary.solvers.reduce((total, solver) => total + Number(summary.by_solver[solver].file_partial || summary.by_solver[solver].partial_timeout || 0), 0);
+      const partial = summary.solvers.reduce((total, solver) => total + Number(summary.by_solver[solver].file_partial || 0), 0);
       const cards = [
         ["Formulas", summary.case_count],
-        ["Completed pairs", summary.completed_pairs],
+        ["Jobs", summary.completed_pairs],
         ["PO solved", querySolvedTotal],
         ["PO coverage", coverage(querySolvedTotal, queryExpected)],
-        ["File complete", complete],
-        ["File partial", partial],
+        ["Complete", complete],
+        ["Partial", partial],
       ];
       $("summary").replaceChildren(...cards.map(([label, value]) => {
         const node = document.createElement("div"), name = document.createElement("span"), number = document.createElement("strong");
@@ -224,7 +224,7 @@
       queryTable.append(queryHead, queryBody);
       const fileTable = document.createElement("table");
       const fileHead = document.createElement("thead"), fileRow = document.createElement("tr");
-      for (const label of ["Solver", "Completed", "Complete", "Partial", "Timeout", "Error"]) {
+      for (const label of ["Solver", "Jobs", "Complete", "Partial", "Timeout", "Error"]) {
         const th = document.createElement("th");
         th.textContent = label;
         fileRow.append(th);
@@ -237,7 +237,7 @@
           solver,
           values.completed,
           values.file_complete || 0,
-          values.file_partial || values.partial_timeout || 0,
+          values.file_partial || 0,
           values.file_timeout || 0,
           values.file_error || 0,
         ];
@@ -265,7 +265,7 @@
       const metric = $("cactus-metric").value;
       $("cactus-caption").textContent = metric === "files"
         ? "Cumulative files whose last answer is sat/unsat vs runtime, up to the timeout."
-        : "Cumulative solved check-sat answers vs file runtime, up to the timeout. Partial files still contribute the POs they answered.";
+        : "Cumulative solved check-sat answers vs file runtime, up to the timeout. Truncated files still contribute the POs they answered.";
       $("cactus-empty").textContent = metric === "files"
         ? "No SAT or UNSAT file results match this filter."
         : "No solved check-sat answers match this filter.";
@@ -314,6 +314,8 @@
 
     function scatterPointColor(point) {
       const statuses = [point.left_status, point.right_status];
+      if (statuses.includes("error")) return "rgba(139,154,171,.85)";
+      if (statuses.includes("timeout")) return "rgba(232,154,92,.85)";
       if (statuses.includes("partial")) return "rgba(241,201,109,.8)";
       if (statuses.every(status => status === "complete")) return "rgba(86,213,167,.75)";
       return "rgba(128,188,255,.6)";
@@ -324,7 +326,7 @@
       const metric = $("scatter-metric").value;
       $("scatter-caption").textContent = metric === "time"
         ? "Log-time scatter. The diagonal means equal time."
-        : "Coverage per file. The diagonal means equal coverage. Yellow points have a partial file.";
+        : "Coverage per file. Green = both complete; yellow = partial; orange = timeout; gray = error.";
       empty.textContent = metric === "time"
         ? "Choose two solvers with completed timing data."
         : "Choose two solvers with coverage data.";
@@ -386,6 +388,8 @@
       legend.replaceChildren(...[
         ["complete", "rgba(86,213,167,.75)"],
         ["partial", "rgba(241,201,109,.8)"],
+        ["timeout", "rgba(232,154,92,.85)"],
+        ["error", "rgba(139,154,171,.85)"],
         ["other", "rgba(128,188,255,.6)"],
       ].map(([label, color]) => {
         const node = document.createElement("span"), dot = document.createElement("i");
@@ -416,11 +420,23 @@
     }
 
     function fileStatus(result) {
-      const status = String(result.file_status || "").toLowerCase();
-      if (["complete", "partial", "timeout", "error"].includes(status)) return status;
+      const outcome = String(result.file_outcome || "").toLowerCase();
+      if (["complete", "partial", "timeout", "error", "pending"].includes(outcome)) return outcome;
+      const expected = Number(result.expected || 0);
+      const printed = Number(result.queries || 0);
+      const sat = Number(result.sat || 0);
+      const unsat = Number(result.unsat || 0);
+      const unknown = Number(result.unknown || 0);
+      const error = Number(result.error || 0);
+      const timeout = Number(result.timeout || 0);
+      const unreached = Number(result.unreached || 0);
       const raw = String(result.result || "pending").toLowerCase();
-      if (raw === "timeout" || raw === "error" || raw === "pending") return raw;
-      if (raw === "sat" || raw === "unsat" || raw === "unknown") return "complete";
+      if (raw === "pending" || (!printed && !expected && !raw)) return "pending";
+      if (printed < expected || unreached > 0 || timeout > 0) return timeout > 0 || raw === "timeout" ? "timeout" : "error";
+      if (expected > 0 && sat + unsat === expected && unknown === 0 && error === 0) return "complete";
+      if (raw === "timeout") return "timeout";
+      if (raw === "error") return "error";
+      if (raw === "sat" || raw === "unsat" || raw === "unknown") return unknown || error ? "partial" : "complete";
       return raw || "pending";
     }
     function checkSatStatus(result) {
@@ -463,7 +479,7 @@
       const {td, metric} = taggedMetric(
         fileStatus(result),
         Number.isFinite(result.time) ? seconds(result.time) : "—",
-        "file status and runtime",
+        "file status and runtime: complete = all check-sat decided, partial = finished with unknown/error, timeout = did not finish, error = crashed",
       );
       const href = safeHref(result.log_url);
       if (href) {
@@ -517,7 +533,7 @@
           checkSat.title = "sat+unsat / expected check-sat";
           const files = document.createElement("th");
           files.textContent = "files";
-          files.title = "file status and runtime";
+          files.title = "complete = all check-sat sat/unsat; partial = finished with unknown/error; timeout = wall; error = crashed";
           sub.append(checkSat, files);
         }
         $("formula-head").replaceChildren(top, sub);

@@ -117,17 +117,21 @@ This branch scores incremental files (many `push` / `check-sat` / `pop` in one
 - `timeout` — bookkeeping only: at most one query, the check-sat that was running when GNU timeout / SIGKILL fired. The analysis UI does not treat this as a check-sat status; it is folded into `unreached`.
 - `unreached` — later queries that never started after the process died.
 
-**File status** is `complete` (exit 0 and every expected check-sat printed an
-outcome), `partial` (at least one printed outcome, then timeout/error),
-`timeout` (killed with no answers), or `error` (failed with no answers). Timeout belongs on this
-layer: it describes the process, not a printed SMT answer.
+**File labels** on the dashboard and report are derived from those counts, not from the process-level `file_status` column in `results.tsv`:
+
+- `complete` — every expected check-sat is `sat` or `unsat`.
+- `partial` — the session printed every check-sat, but some are `unknown` or `error`.
+- `timeout` — the session did not finish because of the file wall.
+- `error` — the session did not finish for any other reason.
+
+`results.tsv` still stores a separate process-lifecycle `file_status` (`complete` = exit 0 and every check-sat printed an outcome, including `unknown`). Resume and the live progress snapshot keep that column unchanged so a running experiment is not rewritten.
 
 `result` stays process-level: exit 0 uses the last printed outcome; a kill is still
 `timeout`. Dashboard, analysis charts, and Excel lead with PO coverage
 `(sat+unsat)/expected`. Check-sat summaries show sat/unsat/unknown/error/unreached.
 The formula list gives each solver a check-sat column (PO tag plus
-`sat+unsat/expected`) and a files column (file status plus runtime). The cactus
-plot counts solved check-sat answers (partial files still contribute); switch it
+`sat+unsat/expected`) and a files column (file label plus runtime). The cactus
+plot counts solved check-sat answers (truncated files still contribute); switch it
 to files for the old last-answer curve. The scatter plot defaults to per-file
 coverage.
 

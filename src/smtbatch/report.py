@@ -12,7 +12,9 @@ The ``Results`` sheet uses ``path | filename | logic | file_size | consistency``
 ``<solver>_result | <solver>_time | <solver>_log | <solver>_queries | <solver>_sat |
 <solver>_unsat | <solver>_unknown | <solver>_error | <solver>_timeout | <solver>_unreached |
 <solver>_last | <solver>_expected | <solver>_complete | <solver>_file_status`` and, with
-``--load-output``, ``<solver>_output``. SMT-LIB details such as ``logic`` are read from the source
+``--load-output``, ``<solver>_output``. ``file_status`` is the report file label
+(complete / partial / timeout / error). ``complete`` remains the process-level
+yes/no from ``results.tsv``. SMT-LIB details such as ``logic`` are read from the source
 file during aggregation rather than copied through task TSVs.
 """
 
@@ -34,6 +36,7 @@ from openpyxl.utils import get_column_letter
 
 from .task import (
     classify_consistency,
+    classify_file_outcome,
     iter_task_tsvs,
     optional_nonneg_int,
     read_file_details,
@@ -218,7 +221,26 @@ def build_rows(
         record[f"{solver_prefix}_last"] = entry.last
         record[f"{solver_prefix}_expected"] = entry.expected
         record[f"{solver_prefix}_complete"] = entry.complete
-        record[f"{solver_prefix}_file_status"] = entry.file_status.upper()
+        process_result = (
+            "timeout"
+            if entry.status == "TIMEOUT"
+            else "error"
+            if entry.status == "ERROR"
+            else (entry.result or "").lower()
+        )
+        record[f"{solver_prefix}_file_status"] = classify_file_outcome(
+            {
+                "queries": entry.queries,
+                "sat": entry.query_sat,
+                "unsat": entry.query_unsat,
+                "unknown": entry.query_unknown,
+                "error": entry.query_error,
+                "timeout": entry.query_timeout,
+                "unreached": entry.unreached,
+                "expected": entry.expected,
+            },
+            result=process_result,
+        ).upper()
         if include_output:
             record[f"{solver_prefix}_output"] = entry.raw_output
 

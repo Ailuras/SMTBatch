@@ -15,6 +15,7 @@ from smtbatch.task import (
     count_check_sat,
     incremental_from_row,
     incremental_stats,
+    classify_file_outcome,
     load_jobs,
     parse_answers,
     parse_outcomes,
@@ -118,6 +119,32 @@ class IncrementalPartitionTests(unittest.TestCase):
         self.assertEqual(stats["error"], 1)
         self.assertEqual(stats["unreached"], 0)
         self.assertEqual(_query_sum(stats), 3)
+
+    def test_file_outcome_all_decided_is_complete(self) -> None:
+        stats = incremental_stats(["sat", "unsat"], 2, result="unsat", exit_ok=True)
+        self.assertEqual(stats["file_status"], "complete")
+        self.assertEqual(classify_file_outcome(stats, result="unsat"), "complete")
+
+    def test_file_outcome_finished_unknown_is_partial(self) -> None:
+        stats = incremental_stats(["unknown", "sat", "unsat"], 3, result="unsat", exit_ok=True)
+        self.assertEqual(stats["file_status"], "complete")
+        self.assertEqual(classify_file_outcome(stats, result="unsat"), "partial")
+
+    def test_file_outcome_wall_is_timeout_not_partial(self) -> None:
+        stats = incremental_stats(["sat", "unknown"], 5, result="timeout", exit_ok=False)
+        self.assertEqual(stats["file_status"], "partial")
+        self.assertEqual(classify_file_outcome(stats, result="timeout"), "timeout")
+
+    def test_file_outcome_crash_is_error_not_partial(self) -> None:
+        stats = incremental_stats(["sat"], 3, result="error", exit_ok=False)
+        self.assertEqual(stats["file_status"], "partial")
+        self.assertEqual(classify_file_outcome(stats, result="error"), "error")
+
+    def test_file_outcome_empty_timeout_and_error(self) -> None:
+        timeout = incremental_stats([], 4, result="timeout", exit_ok=False)
+        crash = incremental_stats([], 4, result="error", exit_ok=False)
+        self.assertEqual(classify_file_outcome(timeout, result="timeout"), "timeout")
+        self.assertEqual(classify_file_outcome(crash, result="error"), "error")
 
     def test_stored_partition_is_not_reinferred(self) -> None:
         stats = incremental_from_row(

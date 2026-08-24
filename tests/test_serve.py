@@ -373,6 +373,7 @@ command = ["{binary}", "{input}"]
         self.assertEqual(alpha["last"], "sat")
         self.assertEqual(alpha["complete"], "yes")
         self.assertEqual(alpha["file_status"], "complete")
+        self.assertEqual(alpha["file_outcome"], "complete")
         self.assertEqual(alpha["sat"], 1)
         self.assertEqual(alpha["timeout"], 0)
         self.assertEqual(alpha["unreached"], 0)
@@ -438,6 +439,11 @@ command = ["{binary}", "{input}"]
         self.assertEqual(page["cases"][0]["expected"], 4)
         self.assertEqual(page["cases"][0]["done"], 1)
         self.assertEqual(page["cases"][0]["total"], 1)
+        self.assertEqual(page["cases"][0]["results"]["alpha"]["file_outcome"], "timeout")
+        truncated = self.manager.report_summary("inc-progress-run", "all")
+        self.assertEqual(truncated["by_solver"]["alpha"]["file_timeout"], 1)
+        self.assertEqual(truncated["by_solver"]["alpha"]["file_complete"], 0)
+        self.assertEqual(truncated["by_solver"]["alpha"]["file_partial"], 0)
 
         pending_dir = self.results / "inc-pending-run"
         pending_dir.mkdir()
@@ -460,6 +466,66 @@ command = ["{binary}", "{input}"]
         self.assertEqual(pending["cases"][0]["expected"], 4)
         pending_summary = self.manager.report_summary("inc-pending-run", "all")
         self.assertEqual(pending_summary["by_solver"]["alpha"]["expected"], 4)
+
+    def test_report_summary_file_outcome_uses_query_partition(self) -> None:
+        run_dir = self.results / "file-outcome-run"
+        run_dir.mkdir()
+        decided = self.inputs / "decided.smt2"
+        unknown = self.inputs / "unknown.smt2"
+        decided.write_text("(check-sat)\n(check-sat)\n", encoding="utf-8")
+        unknown.write_text("(check-sat)\n(check-sat)\n", encoding="utf-8")
+        (run_dir / "jobs.tsv").write_text(
+            jobs_tsv([(1, "alpha", decided, 2), (2, "alpha", unknown, 2)]),
+            encoding="utf-8",
+        )
+        write_results(
+            run_dir / "results.tsv",
+            [
+                result_row(
+                    job_id=1,
+                    solver="alpha",
+                    file=decided,
+                    result="unsat",
+                    queries=2,
+                    sat=1,
+                    unsat=1,
+                    expected=2,
+                    first="sat",
+                    last="unsat",
+                ),
+                result_row(
+                    job_id=2,
+                    solver="alpha",
+                    file=unknown,
+                    result="unknown",
+                    queries=2,
+                    sat=1,
+                    unsat=0,
+                    unknown=1,
+                    expected=2,
+                    first="sat",
+                    last="unknown",
+                    complete="yes",
+                    file_status="complete",
+                ),
+            ],
+        )
+        (run_dir / "progress.json").write_text(
+            json.dumps({"status": "complete", "updated_at": "2026-01-01T00:00:00+00:00", "total_jobs": 2, "completed_jobs": 2}),
+            encoding="utf-8",
+        )
+        (run_dir / "metadata.txt").write_text("solvers=alpha\ntimeout=30\n", encoding="utf-8")
+        summary = self.manager.report_summary("file-outcome-run", "all")
+        alpha = summary["by_solver"]["alpha"]
+        self.assertEqual(alpha["completed"], 2)
+        self.assertEqual(alpha["file_complete"], 1)
+        self.assertEqual(alpha["file_partial"], 1)
+        self.assertEqual(alpha["file_timeout"], 0)
+        self.assertEqual(alpha["file_error"], 0)
+        page = self.manager.report_formulas("file-outcome-run", "", "all", 1, 20)
+        outcomes = {case["file"]: case["results"]["alpha"]["file_outcome"] for case in page["cases"]}
+        self.assertEqual(outcomes["decided.smt2"], "complete")
+        self.assertEqual(outcomes["unknown.smt2"], "partial")
 
     def test_historical_duration_estimate_uses_matching_jobs(self) -> None:
         history = self.manager._historical_durations()
