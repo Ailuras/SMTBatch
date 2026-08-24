@@ -738,6 +738,58 @@ command = ["{binary}", "{input}"]
         self.assertEqual(response["status"], "starting")
         self.assertIn("disk full", response["warning"])
 
+    def test_launch_writes_starting_card_before_jobs_exist(self) -> None:
+        request = {
+            "input": str(self.inputs),
+            "solvers": ["alpha"],
+            "timeout": 30,
+            "jobs": 1,
+            "limit": 0,
+            "name": "startup-run",
+        }
+        with mock.patch("smtbatch.serve.subprocess.Popen") as popen:
+            popen.return_value.poll.return_value = None
+            response = self.manager.launch(request)
+        self.assertEqual(response["status"], "starting")
+        run_dir = self.results / "startup-run"
+        self.assertTrue((run_dir / "progress.json").is_file())
+        self.assertFalse((run_dir / "jobs.tsv").exists())
+        payload = json.loads((run_dir / "progress.json").read_text(encoding="utf-8"))
+        self.assertEqual(payload["status"], "starting")
+        self.assertEqual(payload["phase"], "launching")
+        listed = next(item for item in self.manager.runs() if item["run_id"] == "startup-run")
+        self.assertEqual(listed["status"], "starting")
+        self.assertIn("Launching", listed.get("startup_note", ""))
+        summary = self.manager.report_summary("startup-run", "all")
+        self.assertEqual(summary["status"], "starting")
+        self.assertEqual(summary["timeout"], 30)
+        self.assertEqual(summary["case_count"], 0)
+        self.assertEqual(summary["solvers"], ["alpha"])
+
+    def test_scan_runs_includes_starting_progress_without_jobs(self) -> None:
+        from smtbatch.serve import scan_runs
+
+        run_dir = self.results / "starting-only"
+        run_dir.mkdir()
+        (run_dir / "progress.json").write_text(
+            json.dumps(
+                {
+                    "status": "starting",
+                    "startup_note": "Counting check-sat commands",
+                    "updated_at": "2099-01-01T00:00:00+00:00",
+                    "started_at": "2099-01-01T00:00:00+00:00",
+                }
+            ),
+            encoding="utf-8",
+        )
+        found = next(item for item in scan_runs(self.results) if item["run_id"] == "starting-only")
+        self.assertEqual(found["status"], "starting")
+        listed = next(item for item in self.manager.runs() if item["run_id"] == "starting-only")
+        self.assertEqual(listed["status"], "starting")
+        summary = self.manager.report_summary("starting-only", "all")
+        self.assertEqual(summary["status"], "starting")
+        self.assertEqual(summary["case_count"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

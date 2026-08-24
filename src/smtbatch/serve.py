@@ -33,6 +33,7 @@ from typing import Any, Mapping, Sequence
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from .config import Config, branch_status, find_config_path, load_config
+from .run import write_progress_snapshot
 from .task import (
     classify_consistency,
     incremental_from_row,
@@ -323,6 +324,7 @@ class ExperimentManager:
         """Return history with stale active states repaired from actual process liveness."""
         self._reap_managed_processes()
         normalized: list[dict[str, Any]] = []
+        now = datetime.now(timezone.utc)
         for source in scan_runs(self.results_root):
             run = dict(source)
             run_id = str(run.get("run_id") or "")
@@ -330,6 +332,11 @@ class ExperimentManager:
             # Completed history is the common case; avoid pid/lock probes for it.
             live = status in {"running", "starting", "cancelling", "interrupted", "failed"} and self._run_is_live(run_id)
             if not live and status in {"running", "starting", "cancelling"}:
+                # The dashboard writes starting before the child creates .run.pid.
+                # Keep a fresh starting card visible across that handoff.
+                if status == "starting" and _recent_timestamp(run.get("updated_at") or run.get("started_at"), now):
+                    normalized.append(run)
+                    continue
                 run["stale_status"] = status
                 run["status"] = "interrupted"
             elif live and status in {"interrupted", "failed"}:
@@ -509,16 +516,34 @@ class ExperimentManager:
         with self._process_lock:
             if output_dir.exists() or self._managed_process_alive(run_id):
                 raise ValueError(f"experiment already exists: {run_id}")
-            with controller_log.open("w", encoding="utf-8") as log_handle:
-                process = subprocess.Popen(
-                    command,
-                    cwd=self.host_cwd,
-                    stdin=subprocess.DEVNULL,
-                    stdout=log_handle,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True,
-                    text=True,
+            write_progress_snapshot(
+                output_dir,
+                status="starting",
+                phase="launching",
+                startup_note="Launching controller",
+                timeout=timeout,
+                jobs=jobs,
+                by_solver={name: {} for name in solvers},
+            )
+            try:
+                with controller_log.open("w", encoding="utf-8") as log_handle:
+                    process = subprocess.Popen(
+                        command,
+                        cwd=self.host_cwd,
+                        stdin=subprocess.DEVNULL,
+                        stdout=log_handle,
+                        stderr=subprocess.STDOUT,
+                        start_new_session=True,
+                        text=True,
+                    )
+            except OSError as exc:
+                write_progress_snapshot(
+                    output_dir,
+                    status="failed",
+                    phase="failed",
+                    startup_note=f"unable to start controller: {exc}",
                 )
+                raise
             self.processes[run_id] = process
         warning = ""
         try:
@@ -701,12 +726,12 @@ class ExperimentManager:
         progress_path = run_dir / "progress.json"
         try:
             jobs_stat = jobs_path.stat()
-            results_stat = results_path.stat()
+            results_stat = results_path.stat() if results_path.is_file() else None
             progress_stat = progress_path.stat()
             cache_key: tuple[int, int, int, int] | None = (
                 jobs_stat.st_mtime_ns,
-                results_stat.st_mtime_ns,
-                results_stat.st_size,
+                0 if results_stat is None else results_stat.st_mtime_ns,
+                0 if results_stat is None else results_stat.st_size,
                 progress_stat.st_mtime_ns,
             )
         except OSError:
@@ -715,6 +740,15 @@ class ExperimentManager:
             cached = self._run_cache.get(run_id)
             if cached is not None and cached[0] == cache_key:
                 return cached[1]
+        if not jobs_path.is_file():
+            progress = self._progress(run_id)
+            return {
+                "run_id": run_id,
+                "solvers": list((progress.get("by_solver") or {})),
+                "completed_pairs": 0,
+                "cases": [],
+                "progress": progress,
+            }
         try:
             jobs = load_jobs(jobs_path)
         except (OSError, ValueError) as exc:
@@ -803,13 +837,17 @@ class ExperimentManager:
         assert isinstance(solvers, list)
         if state not in {"all", "pending", "consistent", "conflict", "hard", "error", "other"}:
             raise ValueError("invalid formula state")
-        settings = data["progress"].get("settings") or {}
+        progress = data["progress"] if isinstance(data.get("progress"), dict) else {}
+        settings = progress.get("settings") or {}
         try:
-            timeout = float(settings.get("timeout") or "")
+            timeout = float(settings.get("timeout") or progress.get("timeout") or "")
         except (TypeError, ValueError):
             timeout = math.nan
         if not math.isfinite(timeout) or timeout <= 0:
-            raise ValueError("experiment metadata has no valid timeout")
+            if str(progress.get("status") or "") == "starting":
+                timeout = 1.0
+            else:
+                raise ValueError("experiment metadata has no valid timeout")
         cases = [case for case in data["cases"] if isinstance(case, dict) and (state == "all" or case.get("state") == state)]
         by_solver: dict[str, dict[str, object]] = {
             solver: {
@@ -1020,9 +1058,14 @@ class ExperimentManager:
         progress_path = run_dir / "progress.json"
         metadata_path = run_dir / "metadata.txt"
         try:
-            cache_key = (progress_path.stat().st_mtime_ns, metadata_path.stat().st_mtime_ns)
+            progress_mtime = progress_path.stat().st_mtime_ns
         except OSError as exc:
             raise ValueError(f"unable to read experiment progress: {exc}") from None
+        try:
+            metadata_mtime = metadata_path.stat().st_mtime_ns
+        except OSError:
+            metadata_mtime = 0
+        cache_key = (progress_mtime, metadata_mtime)
         cached = self._progress_cache.get(run_id)
         if cached is not None and cached[0] == cache_key:
             return cached[1]
@@ -1047,11 +1090,20 @@ class ExperimentManager:
                 normalized_errors.append(record)
             payload["recent_errors"] = normalized_errors
         payload["run_id"] = relative_id
-        payload["settings"] = {
+        settings = {
             key: value
             for key, value in _metadata(run_dir / "metadata.txt").items()
             if key in {"solvers", "timeout", "jobs", "selected_files", "solver_formula_pairs"}
         }
+        if "timeout" not in settings and payload.get("timeout") not in (None, ""):
+            settings["timeout"] = str(payload["timeout"])
+        if "jobs" not in settings and payload.get("jobs") not in (None, ""):
+            settings["jobs"] = str(payload["jobs"])
+        if "solvers" not in settings:
+            by_solver = payload.get("by_solver")
+            if isinstance(by_solver, dict) and by_solver:
+                settings["solvers"] = ",".join(str(name) for name in by_solver)
+        payload["settings"] = settings
         self._progress_cache[run_id] = (cache_key, payload)
         return payload
 
@@ -1074,6 +1126,20 @@ class ExperimentManager:
 
 
 _RUN_CACHE: dict[Path, tuple[tuple[int, int], dict[str, Any]]] = {}
+_STARTUP_GRACE_SECONDS = 120.0
+
+
+def _recent_timestamp(value: object, now: datetime, *, grace: float = _STARTUP_GRACE_SECONDS) -> bool:
+    """True when a starting snapshot is new enough to outlive the pid handoff."""
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return (now - stamp).total_seconds() < grace
 
 
 def scan_runs(results_root: Path) -> list[dict[str, Any]]:
@@ -1084,7 +1150,7 @@ def scan_runs(results_root: Path) -> list[dict[str, Any]]:
     runs: list[dict[str, Any]] = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [name for name in dirnames if name != "logs" and not name.startswith(".")]
-        if "progress.json" not in filenames or "jobs.tsv" not in filenames:
+        if "progress.json" not in filenames:
             continue
         progress_path = Path(dirpath) / "progress.json"
         try:

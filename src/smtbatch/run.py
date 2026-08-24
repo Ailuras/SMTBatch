@@ -25,6 +25,7 @@ import fcntl
 import hashlib
 import json
 import math
+import multiprocessing
 import os
 import re
 import shutil
@@ -39,7 +40,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import IO, Iterable, Mapping, Sequence
+from typing import IO, Callable, Iterable, Mapping, Sequence
 
 from .config import Config, SolverSpec, load_config, validate_target_branch
 from .task import (
@@ -674,16 +675,49 @@ def iter_jobs(
         yield JobSpec(job_id, solver, file_path, expected_by_file[file_path])
 
 
-def _count_check_sat_files(paths: Sequence[Path]) -> dict[Path, int]:
-    """Count check-sat commands once per file, in parallel for larger queues."""
+def _count_check_sat_files(
+    paths: Sequence[Path],
+    progress: Callable[[int, int], None] | None = None,
+) -> dict[Path, int]:
+    """Count check-sat commands once per file.
+
+    Small queues stay in-process. Larger queues use a process pool so the
+    CPU-bound scanner is not serialized by the GIL.
+    """
     unique = list(dict.fromkeys(paths))
-    if len(unique) <= 8:
-        return {path: count_check_sat(path) for path in unique}
-    workers = min(32, os.cpu_count() or 8, len(unique))
-    with concurrent.futures.ThreadPoolExecutor(
-        max_workers=workers, thread_name_prefix="count-sat"
+    total = len(unique)
+    counted: dict[Path, int] = {}
+    if total == 0:
+        return counted
+
+    def record(path: Path, value: int, done: int) -> None:
+        counted[path] = value
+        if progress is not None and (done == total or done % max(1, total // 40) == 0):
+            progress(done, total)
+
+    if total <= 16:
+        for index, path in enumerate(unique, start=1):
+            record(path, count_check_sat(path), index)
+        return counted
+
+    workers = min(32, os.cpu_count() or 8, total)
+    chunksize = max(1, total // (workers * 4))
+    start_method = "fork" if sys.platform.startswith("linux") else "spawn"
+    context = multiprocessing.get_context(start_method)
+    with concurrent.futures.ProcessPoolExecutor(
+        max_workers=workers,
+        mp_context=context,
     ) as executor:
-        return dict(zip(unique, executor.map(count_check_sat, unique)))
+        try:
+            for index, (path, value) in enumerate(
+                zip(unique, executor.map(count_check_sat, unique, chunksize=chunksize)),
+                start=1,
+            ):
+                record(path, value, index)
+        except BaseException:
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
+    return counted
 
 
 def run_job(
@@ -853,6 +887,41 @@ def _atomic_write_text(path: Path, text: str) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def write_progress_snapshot(output_dir: Path, *, status: str, **fields: object) -> dict[str, object]:
+    """Persist a dashboard-readable progress.json, including the startup window.
+
+    The controller writes this before ``jobs.tsv`` exists so a closed browser or
+    a dashboard restart can still see a live ``starting`` card.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc).isoformat()
+    snapshot: dict[str, object] = {
+        "format": "pair-queue-progress-v1",
+        "output_dir": str(output_dir),
+        "status": status,
+        "phase": fields.pop("phase", "preparing" if status == "starting" else status),
+        "startup_note": fields.pop("startup_note", ""),
+        "started_at": fields.pop("started_at", now),
+        "updated_at": now,
+        "elapsed_seconds": fields.pop("elapsed_seconds", 0),
+        "total_jobs": fields.get("total_jobs", 0),
+        "completed_jobs": fields.get("completed_jobs", 0),
+        "running_jobs": fields.get("running_jobs", 0),
+        "pending_jobs": fields.get("pending_jobs", fields.get("total_jobs", 0)),
+        "selected_files": fields.get("selected_files", 0),
+        "counted_files": fields.get("counted_files", 0),
+        "outcomes": fields.get("outcomes", {}),
+        "by_solver": fields.get("by_solver", {}),
+        "incremental": fields.get("incremental", {}),
+    }
+    snapshot.update(fields)
+    _atomic_write_text(
+        output_dir / "progress.json",
+        json.dumps(snapshot, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+    )
+    return snapshot
+
+
 def clean_previous_outputs(output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     for name in (
@@ -860,7 +929,6 @@ def clean_previous_outputs(output_dir: Path) -> None:
         "results.tsv",
         "input_hashes.tsv",
         "metadata.txt",
-        "progress.json",
         "resume_history.jsonl",
         "manifest.tsv",
     ):
@@ -1144,11 +1212,16 @@ class _RunPlan:
     append_results: bool
 
 
-def _prepare_fresh(args: argparse.Namespace) -> _RunPlan:
+def _prepare_fresh(
+    args: argparse.Namespace,
+    progress: Callable[..., None] | None = None,
+) -> _RunPlan:
     if not args.solver or (not args.input and not args.files_from):
         raise ValueError("--solver and either --input or --files-from are required unless --resume is used")
     if args.input and args.files_from:
         raise ValueError("--input and --files-from cannot be combined")
+    if progress is not None:
+        progress("config", "Loading solver configuration")
     config = load_config()
     smtbatch_branch = validate_target_branch(config)
     solvers = normalize_solvers(args.solver, config)
@@ -1157,6 +1230,8 @@ def _prepare_fresh(args: argparse.Namespace) -> _RunPlan:
     provenance = {
         name: solver_provenance(spec, artifact_cache) for name, spec in specs.items()
     }
+    if progress is not None:
+        progress("discover", "Scanning benchmark files")
     files = (
         load_files_from(args.files_from, args.limit)
         if args.files_from
@@ -1164,14 +1239,47 @@ def _prepare_fresh(args: argparse.Namespace) -> _RunPlan:
     )
     if not files:
         raise ValueError("no .smt2 files selected")
-    expected_by_file = _count_check_sat_files(files)
+    if progress is not None:
+        progress(
+            "count",
+            f"Counting check-sat commands in {len(files)} files",
+            selected_files=len(files),
+        )
+
+    def _count_progress(done: int, total: int) -> None:
+        if progress is None:
+            return
+        progress(
+            "count",
+            f"Counting check-sat commands: {done}/{total} files",
+            selected_files=total,
+            counted_files=done,
+        )
+
+    expected_by_file = _count_check_sat_files(files, progress=_count_progress)
     pair_count = len(files) * len(solvers)
     output_dir = args.output.expanduser().resolve()
     logs_dir = output_dir / "logs"
     events_dir = output_dir / "events"
+    if progress is not None:
+        progress(
+            "queue",
+            f"Writing job queue ({pair_count} solver-file pairs)",
+            selected_files=len(files),
+            counted_files=len(files),
+            total_jobs=pair_count,
+        )
     clean_previous_outputs(output_dir)
     jobs = list(iter_jobs(files, solvers, expected_by_file))
     write_jobs(output_dir / "jobs.tsv", jobs)
+    if progress is not None:
+        progress(
+            "queue",
+            "Job queue ready",
+            selected_files=len(files),
+            counted_files=len(files),
+            total_jobs=pair_count,
+        )
     if args.hash_inputs:
         write_input_hashes(output_dir / "input_hashes.tsv", files)
     metadata = {
@@ -1427,9 +1535,53 @@ def run_queue(
 
 
 def _main_locked(args: argparse.Namespace) -> int:
+    output_dir = args.output.expanduser().resolve()
+    started_monotonic = time.monotonic()
+    started_at = datetime.now(timezone.utc).isoformat()
+
+    def note(phase: str, text: str, **extra: object) -> None:
+        write_progress_snapshot(
+            output_dir,
+            status="starting",
+            phase=phase,
+            startup_note=text,
+            started_at=started_at,
+            elapsed_seconds=round(time.monotonic() - started_monotonic, 3),
+            timeout=args.timeout,
+            jobs=args.jobs,
+            **extra,
+        )
+
+    if not args.resume:
+        note("preparing", "Preparing the job queue")
     try:
-        plan = _prepare_resume(args) if args.resume else _prepare_fresh(args)
+        plan = (
+            _prepare_resume(args)
+            if args.resume
+            else _prepare_fresh(args, progress=note)
+        )
+    except KeyboardInterrupt:
+        if not args.resume:
+            write_progress_snapshot(
+                output_dir,
+                status="interrupted",
+                phase="interrupted",
+                startup_note="Interrupted during startup",
+                started_at=started_at,
+                elapsed_seconds=round(time.monotonic() - started_monotonic, 3),
+            )
+        print("[batch] interrupted during startup", file=sys.stderr)
+        return 130
     except (FileNotFoundError, OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+        if not args.resume:
+            write_progress_snapshot(
+                output_dir,
+                status="failed",
+                phase="failed",
+                startup_note=str(exc),
+                started_at=started_at,
+                elapsed_seconds=round(time.monotonic() - started_monotonic, 3),
+            )
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
@@ -1441,6 +1593,8 @@ def _main_locked(args: argparse.Namespace) -> int:
         args.progress_interval,
         args.recent_limit,
         timeout=plan.timeout,
+        started_monotonic=started_monotonic,
+        started_at=started_at,
     )
     tracker.completed_jobs = plan.completed_before
     tracker.outcomes = Counter(plan.outcomes_before)

@@ -36,6 +36,8 @@ VALID_COMPLETE = {"yes", "no"}
 VALID_FILE_STATUS = {"complete", "partial", "timeout", "error"}
 QUERY_COUNT_FIELDS = ("sat", "unsat", "unknown", "error", "timeout", "unreached")
 _CHECK_SAT_COMMANDS = frozenset({"check-sat", "check-sat-assuming"})
+_CHECK_SAT_COMMANDS_BYTES = frozenset(name.encode("ascii") for name in _CHECK_SAT_COMMANDS)
+_SMT_WHITESPACE = frozenset(b" \t\n\r\f\v")
 _TASK_NAME_RE = re.compile(r"^task_(\d+)\.tsv$")
 _ERROR_LINE_RE = re.compile(r"^\(error(?:\s|$)", re.IGNORECASE)
 
@@ -99,20 +101,28 @@ def outcome_from_line(line: str) -> str | None:
 def count_check_sat(path: Path) -> int:
     """Count top-level check-sat / check-sat-assuming commands in one SMT-LIB file."""
     try:
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
-            return _count_top_level_commands(handle, _CHECK_SAT_COMMANDS)
+        return _count_top_level_commands_bytes(path.read_bytes(), _CHECK_SAT_COMMANDS_BYTES)
     except OSError:
         return 0
 
 
 def _count_top_level_commands(handle: TextIO, names: frozenset[str]) -> int:
+    """Compatibility wrapper: decode a text handle and reuse the bytes scanner."""
+    data = handle.read().encode("utf-8", errors="replace")
+    return _count_top_level_commands_bytes(
+        data, frozenset(name.encode("ascii") for name in names)
+    )
+
+
+def _count_top_level_commands_bytes(data: bytes, names: frozenset[bytes]) -> int:
+    """Count top-level SMT-LIB commands with a single pass over file bytes."""
     depth = 0
     in_comment = False
     in_string = False
     string_quote_pending = False
     in_quoted_symbol = False
-    token: list[str] = []
-    command_name = ""
+    token = bytearray()
+    command_name = b""
     count = 0
 
     def flush_token() -> None:
@@ -120,61 +130,57 @@ def _count_top_level_commands(handle: TextIO, names: frozenset[str]) -> int:
         if not token:
             return
         if depth == 1 and not command_name:
-            command_name = "".join(token)
+            command_name = bytes(token)
         token.clear()
 
-    while True:
-        chunk = handle.read(64 * 1024)
-        if not chunk:
-            break
-        for char in chunk:
-            if in_comment:
-                if char == "\n":
-                    in_comment = False
-                continue
-            if in_string:
-                if string_quote_pending:
-                    if char == '"':
-                        string_quote_pending = False
-                        continue
-                    in_string = False
+    for char in data:
+        if in_comment:
+            if char == 10:  # newline
+                in_comment = False
+            continue
+        if in_string:
+            if string_quote_pending:
+                if char == 34:  # "
                     string_quote_pending = False
-                else:
-                    if char == '"':
-                        string_quote_pending = True
                     continue
-            if in_quoted_symbol:
-                if char == "|":
-                    in_quoted_symbol = False
-                elif depth == 1 and not command_name:
-                    token.append(char)
+                in_string = False
+                string_quote_pending = False
+            else:
+                if char == 34:
+                    string_quote_pending = True
                 continue
-            if char == ";":
-                flush_token()
-                in_comment = True
-            elif char == '"':
-                flush_token()
-                in_string = True
-            elif char == "|":
-                flush_token()
-                in_quoted_symbol = True
-            elif char == "(":
-                flush_token()
-                if depth == 0:
-                    command_name = ""
-                depth += 1
-            elif char == ")":
-                flush_token()
-                if depth == 1:
-                    if command_name.lower() in names:
-                        count += 1
-                    command_name = ""
-                if depth > 0:
-                    depth -= 1
-            elif char.isspace():
-                flush_token()
+        if in_quoted_symbol:
+            if char == 124:  # |
+                in_quoted_symbol = False
             elif depth == 1 and not command_name:
                 token.append(char)
+            continue
+        if char == 59:  # ;
+            flush_token()
+            in_comment = True
+        elif char == 34:
+            flush_token()
+            in_string = True
+        elif char == 124:
+            flush_token()
+            in_quoted_symbol = True
+        elif char == 40:  # (
+            flush_token()
+            if depth == 0:
+                command_name = b""
+            depth += 1
+        elif char == 41:  # )
+            flush_token()
+            if depth == 1:
+                if command_name.lower() in names:
+                    count += 1
+                command_name = b""
+            if depth > 0:
+                depth -= 1
+        elif char in _SMT_WHITESPACE:
+            flush_token()
+        elif depth == 1 and not command_name:
+            token.append(char)
     return count
 
 

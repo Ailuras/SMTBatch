@@ -22,6 +22,7 @@ from smtbatch.run import (
     ProgressTracker,
     JobResult,
     _RunLock,
+    _count_check_sat_files,
     _load_existing_results,
     _prepare_fresh,
     _prepare_resume,
@@ -33,6 +34,8 @@ from smtbatch.run import (
     run_queue,
     solver_artifacts,
     solver_bundle_hash,
+    write_progress_snapshot,
+    _main_locked,
 )
 from smtbatch.task import RESULT_FIELDS, JobSpec, load_jobs
 from tests.tsvutil import jobs_tsv, result_row, write_results
@@ -571,6 +574,73 @@ class ResumeLogicTests(unittest.TestCase):
         with event_path.open("r", encoding="utf-8", newline="") as handle:
             rows = list(csv.DictReader(handle, delimiter="\t"))
         self.assertEqual([(row["ordinal"], row["outcome"], row["source"]) for row in rows], [("1", "sat", "solver")])
+
+    def test_count_check_sat_files_matches_per_file_counts(self) -> None:
+        from smtbatch.task import count_check_sat
+
+        paths = []
+        for index in range(3):
+            path = self.root / "inputs" / f"count-{index}.smt2"
+            path.write_text("(check-sat)\n" * (index + 1), encoding="utf-8")
+            paths.append(path)
+        counted = _count_check_sat_files(paths)
+        self.assertEqual(counted, {path: count_check_sat(path) for path in paths})
+
+    def test_count_check_sat_files_caps_process_workers(self) -> None:
+        paths = []
+        for index in range(40):
+            path = self.root / "inputs" / f"pool-{index}.smt2"
+            path.write_text("(check-sat)\n", encoding="utf-8")
+            paths.append(path)
+        fake_pool = mock.MagicMock()
+        fake_pool.__enter__.return_value.map.return_value = [1] * len(paths)
+        fake_pool.__exit__.return_value = False
+        with (
+            mock.patch("smtbatch.run.os.cpu_count", return_value=128),
+            mock.patch("smtbatch.run.concurrent.futures.ProcessPoolExecutor", return_value=fake_pool) as pool,
+        ):
+            counted = _count_check_sat_files(paths)
+        self.assertEqual(pool.call_args.kwargs["max_workers"], 32)
+        self.assertEqual(counted, {path: 1 for path in paths})
+
+    def test_resume_startup_preserves_existing_progress(self) -> None:
+        run_dir = self._make_run("resume-keep-progress", completed=2)
+        (run_dir / "progress.json").write_text(
+            json.dumps(
+                {
+                    "status": "interrupted",
+                    "completed_jobs": 2,
+                    "total_jobs": 4,
+                    "startup_note": "old",
+                }
+            ),
+            encoding="utf-8",
+        )
+        with (
+            mock.patch("smtbatch.run._prepare_resume", side_effect=ValueError("broken resume")),
+            redirect_stdout(io.StringIO()),
+        ):
+            code = _main_locked(parse_args(["--resume", "--output", str(run_dir)]))
+        self.assertEqual(code, 2)
+        payload = json.loads((run_dir / "progress.json").read_text(encoding="utf-8"))
+        self.assertEqual(payload["status"], "interrupted")
+        self.assertEqual(payload["completed_jobs"], 2)
+
+    def test_write_progress_snapshot_creates_starting_card(self) -> None:
+        output = self.root / "results" / "startup"
+        snapshot = write_progress_snapshot(
+            output,
+            status="starting",
+            phase="count",
+            startup_note="Counting check-sat commands: 2/3 files",
+            selected_files=3,
+            counted_files=2,
+        )
+        payload = json.loads((output / "progress.json").read_text(encoding="utf-8"))
+        self.assertEqual(payload["status"], "starting")
+        self.assertEqual(payload["phase"], "count")
+        self.assertEqual(snapshot["counted_files"], 2)
+        self.assertFalse((output / "jobs.tsv").exists())
 
 
 if __name__ == "__main__":
