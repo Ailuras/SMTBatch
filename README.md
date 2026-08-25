@@ -40,7 +40,8 @@ command = ["gtimeout", "--kill-after=1", "{timeout}", "{binary}", "{input}"]
 Each solver has a name, an executable, and an argv template controlling exactly
 where the timeout goes and which extra flags are passed. Placeholders:
 `{binary}`, `{input}` (required exactly once), `{timeout}` (seconds),
-`{timeout_ms}` (milliseconds). `version_args` defaults to `["--version"]`.
+`{timeout_ms}` (milliseconds), and `{timeout_watchdog}` (`{timeout}` plus 10
+seconds for an outer watchdog). `version_args` defaults to `["--version"]`.
 Relative `binary` paths are resolved from the directory containing
 `smtbatch.toml`.
 The TOML table is the complete solver menu: the dashboard exposes every
@@ -66,7 +67,9 @@ smtbatch serve foreground # debug in the current terminal
 smtbatch export results/baseline --output exports/baseline.xlsx
 ```
 
-The dashboard lives at <http://127.0.0.1:8000/>. Experiments submitted from the
+The dashboard lives at <http://127.0.0.1:8000/>. Add one or more benchmark
+folders with **Add** (or type a path and press Enter); each selected folder
+appears as a chip with an × to remove it. Experiments submitted from the
 page run in independent background sessions; closing the browser does not stop
 them. Running experiments can be cancelled after their in-flight jobs drain,
 and interrupted, failed, or stale runs can be resumed from their durable queue.

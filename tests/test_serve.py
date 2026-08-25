@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from smtbatch.run import _RunLock
-from smtbatch.serve import ExperimentManager
+from smtbatch.serve import ExperimentManager, scan_runs
 from smtbatch.task import RESULT_FIELDS
 
 
@@ -198,6 +198,56 @@ command = ["{binary}", "{input}"]
         self.assertEqual(preview["file_count"], 1)
         self.assertEqual(preview["total_file_count"], 1)
         self.assertEqual(preview["selected_file_count"], 1)
+        self.assertEqual(preview["inputs"], [str(self.inputs)])
+        self.assertEqual(
+            preview["input_counts"],
+            [{"path": str(self.inputs), "file_count": 1}],
+        )
+
+    def test_preview_unions_multiple_input_directories(self) -> None:
+        extra = self.inputs.parent / "inputs-b"
+        extra.mkdir()
+        (extra / "other.smt2").write_text("(check-sat)\n", encoding="utf-8")
+        request = {
+            "inputs": [str(self.inputs), str(extra)],
+            "solvers": ["alpha"],
+            "timeout": 30,
+            "jobs": 2,
+            "limit": 0,
+        }
+        preview = self.manager.preview(request)
+        self.assertTrue(preview["input_valid"])
+        self.assertEqual(preview["file_count"], 2)
+        self.assertEqual(preview["inputs"], [str(self.inputs), str(extra)])
+        self.assertEqual(
+            preview["input_counts"],
+            [
+                {"path": str(self.inputs), "file_count": 1},
+                {"path": str(extra), "file_count": 1},
+            ],
+        )
+
+    def test_launch_repeats_input_flags_for_each_directory(self) -> None:
+        extra = self.inputs.parent / "inputs-c"
+        extra.mkdir()
+        (extra / "other.smt2").write_text("(check-sat)\n", encoding="utf-8")
+        request = {
+            "inputs": [str(self.inputs), str(extra)],
+            "solvers": ["alpha"],
+            "timeout": 30,
+            "jobs": 1,
+            "limit": 0,
+            "name": "multi-input-run",
+        }
+        with mock.patch("smtbatch.serve.subprocess.Popen") as popen:
+            popen.return_value.poll.return_value = None
+            self.manager.launch(request)
+        command = popen.call_args[0][0]
+        flags = [command[index + 1] for index, token in enumerate(command) if token == "--input"]
+        self.assertEqual(flags, [str(self.inputs), str(extra)])
+        state = self.manager._read_last_run()
+        self.assertEqual(state["inputs"], [str(self.inputs), str(extra)])
+        self.assertEqual(state["input"], str(self.inputs))
 
     def test_preview_keeps_total_count_separate_from_formula_limit(self) -> None:
         for index in range(3):
@@ -209,6 +259,18 @@ command = ["{binary}", "{input}"]
         self.assertEqual(preview["selected_file_count"], 2)
         self.assertEqual(preview["historical_pairs"] + preview["fallback_pairs"], 2)
 
+    def test_count_inputs_does_not_require_solvers(self) -> None:
+        counted = self.manager.count_inputs({"input": str(self.inputs)})
+        self.assertTrue(counted["input_valid"])
+        self.assertEqual(counted["file_count"], 1)
+        self.assertEqual(
+            counted["input_counts"],
+            [{"path": str(self.inputs), "file_count": 1}],
+        )
+        empty = self.manager.count_inputs({"input": str(self.empty)})
+        self.assertFalse(empty["input_valid"])
+        self.assertEqual(empty["file_count"], 0)
+
     def test_preview_rejects_directory_without_smt2_files(self) -> None:
         request = {"input": str(self.empty), "solvers": ["alpha"], "timeout": 30, "jobs": 2, "limit": 0}
         preview = self.manager.preview(request)
@@ -216,6 +278,48 @@ command = ["{binary}", "{input}"]
         self.assertIn("no .smt2 files", preview["input_error"])
         with self.assertRaisesRegex(ValueError, r"no \.smt2 files"):
             self.manager.launch({**request, "name": "empty-run"})
+
+    def test_preview_skips_cold_history_scan(self) -> None:
+        request = {"input": str(self.inputs), "solvers": ["alpha"], "timeout": 30, "jobs": 2, "limit": 0}
+        with mock.patch.object(self.manager, "_historical_durations") as scanned:
+            preview = self.manager.preview(request)
+        scanned.assert_not_called()
+        self.assertEqual(preview["historical_pairs"], 0)
+        self.assertEqual(preview["fallback_pairs"], 1)
+        self.assertIsNone(self.manager._history_cache)
+
+    def test_preview_uses_warm_history_without_rescan(self) -> None:
+        self.manager._historical_durations()
+        request = {"input": str(self.inputs), "solvers": ["alpha"], "timeout": 30, "jobs": 2, "limit": 0}
+        with mock.patch.object(self.manager, "_historical_durations") as scanned:
+            preview = self.manager.preview(request)
+        scanned.assert_not_called()
+        self.assertEqual(preview["historical_pairs"], 1)
+        self.assertEqual(preview["fallback_pairs"], 0)
+
+    def test_preview_with_no_solvers_reports_zero_pairs(self) -> None:
+        preview = self.manager.preview(
+            {"input": str(self.inputs), "solvers": [], "timeout": 30, "jobs": 2, "limit": 0}
+        )
+        self.assertTrue(preview["input_valid"])
+        self.assertEqual(preview["file_count"], 1)
+        self.assertEqual(preview["historical_pairs"], 0)
+        self.assertEqual(preview["fallback_pairs"], 0)
+        self.assertEqual(preview["estimated_seconds"], 0.0)
+
+    def test_files_is_instance_method_and_respects_limit(self) -> None:
+        extra = self.inputs / "second.smt2"
+        extra.write_text("(check-sat)\n", encoding="utf-8")
+        listed = self.manager._files(self.inputs, 0)
+        self.assertEqual(len(listed), 2)
+        self.assertEqual(self.manager._files([self.inputs], 1), listed[:1])
+
+    def test_list_smt2_reuses_directory_cache(self) -> None:
+        first = self.manager._list_smt2(self.inputs)
+        with mock.patch.object(Path, "rglob", side_effect=AssertionError("uncached rglob")):
+            second = self.manager._list_smt2(self.inputs)
+        self.assertEqual(first, second)
+        self.assertEqual(len(first), 1)
 
     def test_config_api_uses_arbitrary_toml_solver_names_and_labels(self) -> None:
         config = self.manager.config()
@@ -487,6 +591,38 @@ command = ["{binary}", "{input}"]
             response = self.manager.launch(request)
         self.assertEqual(response["status"], "starting")
         self.assertIn("disk full", response["warning"])
+
+    def test_kill_after_sigkill_is_shown_as_timeout(self) -> None:
+        run_dir = self.results / "kill-after-run"
+        run_dir.mkdir()
+        formula = self.inputs / "slow.smt2"
+        formula.write_text("(check-sat)\n", encoding="utf-8")
+        (run_dir / "jobs.tsv").write_text(f"job_id\tsolver\tfile\n1\talpha\t{formula}\n", encoding="utf-8")
+        (run_dir / "results.tsv").write_text(
+            "job_id\tsolver\tfile\tresult\ttime\tcode\toutput_path\n"
+            f"1\talpha\t{formula}\terror\t302.5\t-9\t\n",
+            encoding="utf-8",
+        )
+        (run_dir / "progress.json").write_text(
+            json.dumps(
+                {
+                    "status": "complete",
+                    "updated_at": "2026-01-01T00:00:00+00:00",
+                    "total_jobs": 1,
+                    "completed_jobs": 1,
+                    "outcomes": {"error": 1, "timeout": 0, "sat": 0, "unsat": 0, "unknown": 0},
+                    "by_solver": {"alpha": {"error": 1, "timeout": 0, "sat": 0, "unsat": 0, "unknown": 0}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        (run_dir / "metadata.txt").write_text("solvers=alpha\ntimeout=300\njobs=1\nlog=all\n", encoding="utf-8")
+        summary = self.manager.report_summary("kill-after-run", "all")
+        self.assertEqual(summary["by_solver"]["alpha"]["outcomes"]["timeout"], 1)
+        self.assertEqual(summary["by_solver"]["alpha"]["outcomes"]["error"], 0)
+        history = {item["run_id"]: item for item in scan_runs(self.results)}
+        self.assertEqual(history["kill-after-run"]["outcomes"]["timeout"], 1)
+        self.assertEqual(history["kill-after-run"]["outcomes"]["error"], 0)
 
 
 if __name__ == "__main__":

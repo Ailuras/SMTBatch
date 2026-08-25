@@ -39,6 +39,8 @@ from .task import (
     VALID_TASK_RESULTS,
     classify_consistency,
     load_jobs,
+    recorded_result,
+    recorded_result_row,
     result_label,
     summarize_performance,
 )
@@ -187,6 +189,8 @@ class ExperimentManager:
         self._progress_cache: dict[str, tuple[tuple[int, int], dict[str, object]]] = {}
         self._run_cache: dict[str, tuple[tuple[int, int, int, int], dict[str, object]]] = {}
         self._history_cache: tuple[float, dict[tuple[str, str], float]] | None = None
+        self._smt2_cache: dict[str, tuple[float, float, list[Path]]] = {}
+        self._smt2_lock = threading.Lock()
         self._metrics_lock = threading.Lock()
         self._metrics_cache: dict[str, _MetricsState] = {}
 
@@ -253,8 +257,18 @@ class ExperimentManager:
 
     def _save_last_run(self, request: dict) -> None:
         """Persist the launched experiment's form values so the next session opens with them."""
+        inputs = [
+            value
+            for value in request.get("inputs", [])
+            if isinstance(value, str) and value.strip()
+        ]
+        if not inputs:
+            fallback = request.get("input", "")
+            if isinstance(fallback, str) and fallback.strip():
+                inputs = [fallback]
         state: dict[str, object] = {
-            "input": request.get("input", ""),
+            "input": inputs[0] if inputs else "",
+            "inputs": inputs,
             "solvers": list(dict.fromkeys(value for value in request.get("solvers", []) if isinstance(value, str))),
             "timeout": request.get("timeout"),
             "jobs": request.get("jobs"),
@@ -425,7 +439,7 @@ class ExperimentManager:
         if shutil.which("osascript") is None:
             raise RuntimeError(
                 "no graphical folder picker is available on this server; "
-                "type the benchmark directory path directly into the input field"
+                "type the benchmark directory path and click Add"
             )
         script = 'POSIX path of (choose folder with prompt "Select benchmark folder"'
         if self.inputs_root.is_dir():
@@ -483,10 +497,31 @@ class ExperimentManager:
             raise ValueError(f"{name} must be a non-negative integer")
         return parsed
 
-    def _run_options(self, request: object) -> tuple[Path, list[str], float, int, int]:
+    def _input_paths(self, request: dict[str, Any]) -> list[Path]:
+        raw = request.get("inputs")
+        if raw is None:
+            value = request.get("input")
+            raw = [value] if value not in (None, "") else []
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, list) or not raw:
+            raise ValueError("add at least one benchmark directory")
+        paths: list[Path] = []
+        seen: set[Path] = set()
+        for item in raw:
+            resolved = self._input_path(item)
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            paths.append(resolved)
+        if not paths:
+            raise ValueError("add at least one benchmark directory")
+        return paths
+
+    def _run_options(self, request: object) -> tuple[list[Path], list[str], float, int, int]:
         if not isinstance(request, dict):
             raise ValueError("request body must be a JSON object")
-        input_dir = self._input_path(request.get("input"))
+        input_dirs = self._input_paths(request)
         config = self._solver_config()
         values = request.get("solvers")
         if not isinstance(values, list):
@@ -500,16 +535,86 @@ class ExperimentManager:
         if jobs == 0:
             raise ValueError("jobs must be a positive integer")
         limit = self._nonnegative_int(request.get("limit", 0), "limit")
-        return input_dir, solvers, timeout, jobs, limit
+        return input_dirs, solvers, timeout, jobs, limit
 
-    @staticmethod
-    def _files(input_dir: Path, limit: int) -> list[Path]:
-        files = sorted(path.resolve() for path in input_dir.rglob("*.smt2"))
+    def _files(self, input_dirs: Path | list[Path], limit: int) -> list[Path]:
+        if isinstance(input_dirs, Path):
+            input_dirs = [input_dirs]
+        files, _counts = self._files_and_counts(input_dirs)
         return files if limit == 0 else files[:limit]
 
+    def _list_smt2(self, directory: Path) -> list[Path]:
+        """Cached recursive *.smt2 listing. Home-NFS walks of UFLIA/AUFLIA are expensive."""
+        resolved = directory.resolve()
+        key = str(resolved)
+        try:
+            mtime = resolved.stat().st_mtime
+        except OSError:
+            return []
+        now = time.monotonic()
+        cached = self._smt2_cache.get(key)
+        if cached is not None and cached[1] == mtime and now - cached[0] < 60.0:
+            return cached[2]
+        with self._smt2_lock:
+            now = time.monotonic()
+            try:
+                mtime = resolved.stat().st_mtime
+            except OSError:
+                return []
+            cached = self._smt2_cache.get(key)
+            if cached is not None and cached[1] == mtime and now - cached[0] < 60.0:
+                return cached[2]
+            files = sorted(path.resolve() for path in resolved.rglob("*.smt2"))
+            self._smt2_cache[key] = (now, mtime, files)
+            return files
+
+    def _files_and_counts(self, input_dirs: list[Path]) -> tuple[list[Path], list[dict[str, object]]]:
+        files: list[Path] = []
+        seen: set[Path] = set()
+        counts: list[dict[str, object]] = []
+        for input_dir in input_dirs:
+            listed = self._list_smt2(input_dir)
+            counts.append({"path": str(input_dir), "file_count": len(listed)})
+            for resolved in listed:
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                files.append(resolved)
+        return files, counts
+
+    def count_inputs(self, request: object) -> dict[str, object]:
+        """Count .smt2 files in the given folders. Solvers are not involved."""
+        if not isinstance(request, dict):
+            raise ValueError("request body must be a JSON object")
+        input_dirs = self._input_paths(request)
+        files, input_counts = self._files_and_counts(input_dirs)
+        joined = ", ".join(str(path) for path in input_dirs)
+        return {
+            "input": str(input_dirs[0]),
+            "inputs": [str(path) for path in input_dirs],
+            "input_counts": input_counts,
+            "file_count": len(files),
+            "input_valid": bool(files),
+            "input_error": "" if files else f"no .smt2 files found in {joined}",
+        }
+
     def preview(self, request: object) -> dict[str, object]:
-        input_dir, solvers, timeout, jobs, limit = self._run_options(request)
-        all_files = self._files(input_dir, 0)
+        if not isinstance(request, dict):
+            raise ValueError("request body must be a JSON object")
+        input_dirs = self._input_paths(request)
+        config = self._solver_config()
+        values = request.get("solvers")
+        solvers = (
+            list(dict.fromkeys(value for value in values if value in config.solvers))
+            if isinstance(values, list)
+            else []
+        )
+        timeout = self._positive_float(request.get("timeout", 30), "timeout")
+        jobs = self._nonnegative_int(request.get("jobs", 1), "jobs")
+        if jobs == 0:
+            jobs = 1
+        limit = self._nonnegative_int(request.get("limit", 0), "limit")
+        all_files, input_counts = self._files_and_counts(input_dirs)
         files = all_files if limit == 0 else all_files[:limit]
         total_file_count = len(all_files)
         selected_file_count = len(files)
@@ -520,7 +625,14 @@ class ExperimentManager:
         # timeout) at it; otherwise the LPT estimate can exceed the worst-case
         # bound, which is derived from the current timeout budget.
         watchdog_seconds = timeout + max(15.0, timeout * 0.5)
-        history = self._historical_durations()
+        # A cold history scan walks every results.tsv under the results root
+        # (including 20k-file campaigns) and blocks the dashboard. Use the
+        # cache when warm; otherwise estimate from the timeout budget.
+        now = time.monotonic()
+        if self._history_cache is not None and now - self._history_cache[0] < 30.0:
+            history = self._history_cache[1]
+        else:
+            history = {}
         predicted: list[float] = []
         historical_pairs = 0
         for path in files:
@@ -534,15 +646,18 @@ class ExperimentManager:
                     historical_pairs += 1
                     predicted.append(min(duration, watchdog_seconds))
         estimated_seconds = self._scheduled_duration(predicted, jobs)
+        joined = ", ".join(str(path) for path in input_dirs)
         return {
-            "input": str(input_dir),
+            "input": str(input_dirs[0]),
+            "inputs": [str(path) for path in input_dirs],
+            "input_counts": input_counts,
             # Keep the total benchmark-set size separate from the limit-bounded
             # selection used for scheduling and runtime estimation.
             "file_count": total_file_count,
             "total_file_count": total_file_count,
             "selected_file_count": selected_file_count,
             "input_valid": bool(all_files),
-            "input_error": "" if all_files else f"no .smt2 files found in {input_dir}",
+            "input_error": "" if all_files else f"no .smt2 files found in {joined}",
             "solvers": solvers,
             "estimated_seconds": estimated_seconds,
             "worst_case_seconds": batches * watchdog_seconds,
@@ -561,9 +676,10 @@ class ExperimentManager:
             raise ValueError("name may contain only letters, digits, '.', '_' and '-'")
         output_dir = self.results_root / run_id
 
-        input_dir, solvers, timeout, jobs, limit = self._run_options(request)
-        if not self._files(input_dir, limit):
-            raise ValueError(f"no .smt2 files found in {input_dir}")
+        input_dirs, solvers, timeout, jobs, limit = self._run_options(request)
+        if not self._files(input_dirs, limit):
+            joined = ", ".join(str(path) for path in input_dirs)
+            raise ValueError(f"no .smt2 files found in {joined}")
 
         self.results_root.mkdir(parents=True, exist_ok=True)
         command = [
@@ -571,8 +687,6 @@ class ExperimentManager:
             "-m",
             "smtbatch",
             "run",
-            "--input",
-            str(input_dir),
             "--output",
             str(output_dir),
             "--timeout",
@@ -584,6 +698,8 @@ class ExperimentManager:
             "--log",
             "all",
         ]
+        for input_dir in input_dirs:
+            command.extend(("--input", str(input_dir)))
         for solver in solvers:
             command.extend(("--solver", solver))
         controller_log = self.results_root / f".{run_id}.controller.log"
@@ -605,7 +721,8 @@ class ExperimentManager:
         try:
             self._save_last_run(
                 {
-                    "input": str(input_dir),
+                    "input": str(input_dirs[0]),
+                    "inputs": [str(path) for path in input_dirs],
                     "solvers": solvers,
                     "timeout": timeout,
                     "jobs": jobs,
@@ -802,6 +919,13 @@ class ExperimentManager:
         except (OSError, ValueError) as exc:
             raise ValueError(f"unable to read experiment queue: {exc}") from None
 
+        try:
+            timeout = float(_metadata(run_dir / "metadata.txt").get("timeout") or "")
+        except ValueError:
+            timeout = 0.0
+        if not math.isfinite(timeout) or timeout <= 0:
+            timeout = 0.0
+
         results: dict[int, dict[str, object]] = {}
         if results_path.is_file():
             try:
@@ -811,9 +935,10 @@ class ExperimentManager:
                         raise ValueError("invalid results header")
                     for row in reader:
                         job_id = int(row.get("job_id") or "")
+                        duration = float(row.get("time") or "")
                         results[job_id] = {
-                            "result": row.get("result") or "error",
-                            "time": float(row.get("time") or ""),
+                            "result": recorded_result_row(row, timeout),
+                            "time": duration,
                             "log_url": _data_url(row.get("output_path"), self.results_root),
                         }
             except (OSError, ValueError, csv.Error) as exc:
@@ -1065,6 +1190,7 @@ class ExperimentManager:
             relative_id = run_dir.resolve().relative_to(self.results_root).as_posix()
         except ValueError:
             raise ValueError("invalid experiment name") from None
+        _normalize_progress_outcomes(run_dir, payload)
         errors = payload.get("recent_errors")
         if isinstance(errors, list):
             normalized_errors = []
@@ -1102,6 +1228,85 @@ class ExperimentManager:
         return export_path
 
 
+def _run_timeout(run_dir: Path) -> float:
+    try:
+        timeout = float(_metadata(run_dir / "metadata.txt").get("timeout") or "")
+    except ValueError:
+        return 0.0
+    return timeout if math.isfinite(timeout) and timeout > 0 else 0.0
+
+
+def _normalize_progress_outcomes(run_dir: Path, payload: dict[str, Any]) -> None:
+    """Recount timeout vs error so kill-after SIGKILL is not shown as a solver crash.
+
+    Only finished runs are rescanned: live progress.json is rewritten every second,
+    and a growing results.tsv must not be parsed on every poll.
+    """
+    if payload.get("status") not in {"complete", "interrupted", "failed"}:
+        return
+    outcomes = payload.get("outcomes")
+    if not isinstance(outcomes, dict) or not int(outcomes.get("error") or 0):
+        return
+    timeout = _run_timeout(run_dir)
+    results_path = run_dir / "results.tsv"
+    if timeout <= 0 or not results_path.is_file():
+        return
+    recounted: dict[str, int] = {}
+    by_solver: dict[str, dict[str, int]] = {}
+    try:
+        with results_path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle, delimiter="\t")
+            if reader.fieldnames != RESULT_FIELDS:
+                return
+            for row in reader:
+                solver = row.get("solver") or ""
+                try:
+                    float(row.get("time") or "")
+                    if row.get("code"):
+                        int(row["code"])
+                except ValueError:
+                    continue
+                label = recorded_result_row(row, timeout)
+                if label not in VALID_TASK_RESULTS:
+                    continue
+                recounted[label] = recounted.get(label, 0) + 1
+                solver_counts = by_solver.setdefault(solver, {})
+                solver_counts[label] = solver_counts.get(label, 0) + 1
+    except (OSError, csv.Error):
+        return
+    if not recounted:
+        return
+    order = ("sat", "unsat", "unknown", "timeout", "error")
+    payload["outcomes"] = {name: recounted.get(name, 0) for name in order}
+    if payload.get("by_solver"):
+        payload["by_solver"] = {
+            solver: {name: counts.get(name, 0) for name in order} for solver, counts in by_solver.items()
+        }
+    errors = payload.get("recent_errors")
+    if isinstance(errors, list):
+        for item in errors:
+            if not isinstance(item, dict):
+                continue
+            try:
+                duration = float(item.get("time") or 0)
+                raw_code = item.get("code")
+                if isinstance(raw_code, str):
+                    code = int(raw_code) if raw_code else None
+                elif isinstance(raw_code, int):
+                    code = raw_code
+                else:
+                    code = None
+            except (TypeError, ValueError):
+                continue
+            item["result"] = recorded_result(
+                str(item.get("result") or ""),
+                code,
+                duration,
+                timeout,
+                str(item.get("output") or ""),
+            )
+
+
 _RUN_CACHE: dict[Path, tuple[tuple[int, int], dict[str, Any]]] = {}
 
 
@@ -1136,6 +1341,7 @@ def scan_runs(results_root: Path) -> list[dict[str, Any]]:
             run_id = run_dir.resolve().relative_to(root).as_posix()
         except ValueError:
             continue
+        _normalize_progress_outcomes(run_dir, payload)
         errors = payload.get("recent_errors")
         if isinstance(errors, list):
             payload["error_count"] = len(errors)
@@ -1290,6 +1496,14 @@ def handler_factory(manager: ExperimentManager) -> type[BaseHTTPRequestHandler]:
 
         def do_POST(self) -> None:  # noqa: N802 - HTTP handler API.
             request_path = unquote(urlparse(self.path).path)
+            if request_path == "/api/input-count":
+                try:
+                    response = manager.count_inputs(self._read_json())
+                except ValueError as exc:
+                    self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+                    return
+                self._send_json(response)
+                return
             if request_path == "/api/preview":
                 try:
                     response = manager.preview(self._read_json())

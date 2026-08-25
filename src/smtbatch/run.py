@@ -34,7 +34,15 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 from .config import Config, SolverSpec, load_config
-from .task import RESULT_FIELDS, JobSpec, load_jobs, summarize_performance, write_jobs
+from .task import (
+    RESULT_FIELDS,
+    JobSpec,
+    classify_job_outcome,
+    load_jobs,
+    recorded_result_row,
+    summarize_performance,
+    write_jobs,
+)
 
 
 RESULT_ORDER = ("sat", "unsat", "unknown", "timeout", "error")
@@ -374,15 +382,6 @@ def write_input_hashes(path: Path, files: Sequence[Path]) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def classify_output(output: str) -> str:
-    result = "error"
-    for line in output.splitlines():
-        parts = line.strip().split(maxsplit=1)
-        if parts and parts[0] in {"sat", "unsat", "unknown"}:
-            result = parts[0]
-    return result
-
-
 def discover_files(input_dirs: Sequence[Path], limit: int) -> list[Path]:
     files: list[Path] = []
     seen: set[Path] = set()
@@ -425,12 +424,12 @@ def run_job(spec: SolverSpec, job: JobSpec, timeout: float, outer_timeout: float
         try:
             output = process.communicate(timeout=outer_timeout)[0] or ""
             code = process.returncode
-            if code in {124, 137, 143}:
-                result = "timeout"
-            elif code == 0:
-                result = classify_output(output)
-            else:
-                result = "error"
+            result = classify_job_outcome(
+                code,
+                output,
+                duration_sec=time.perf_counter() - start,
+                timeout=timeout,
+            )
         except subprocess.TimeoutExpired:
             try:
                 os.killpg(os.getpgid(process.pid), signal.SIGKILL)
@@ -597,6 +596,7 @@ def _load_existing_results(
                         int(code)
                     except ValueError:
                         raise ValueError(f"invalid code at {results_path}:{row_number}") from None
+                result = recorded_result_row(row, timeout)
                 completed.add(job_id)
                 outcomes[result] += 1
                 by_solver.setdefault(solver, Counter())[result] += 1

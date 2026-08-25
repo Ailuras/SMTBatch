@@ -34,6 +34,8 @@ from .task import (
     classify_consistency,
     iter_task_tsvs,
     read_file_details,
+    recorded_result_row,
+    result_file_timeout,
 )
 
 VALID_RESULTS = {"SAT", "UNSAT", "UNKNOWN"}
@@ -94,6 +96,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def load_entries(task_files: list[Path], load_output: bool) -> list[LogEntry]:
     entries: list[LogEntry] = []
     for task_file in task_files:
+        timeout = result_file_timeout(task_file)
         with task_file.open("r", encoding="utf-8", newline="") as handle:
             for row in csv.DictReader(handle, delimiter="\t"):
                 solver = (row.get("solver") or "").strip()
@@ -101,9 +104,10 @@ def load_entries(task_files: list[Path], load_output: bool) -> list[LogEntry]:
                 if not solver or not file_str:
                     continue
                 file_path = Path(file_str)
-                status, result = RESULT_TO_STATUS.get((row.get("result") or "").strip().lower(), ("ERROR", "UNKNOWN"))
                 duration = _to_float(row.get("time"))
                 exit_code = _to_int(row.get("code"))
+                label = recorded_result_row(row, timeout)
+                status, result = RESULT_TO_STATUS.get(label, ("ERROR", "UNKNOWN"))
                 output_path = (row.get("output_path") or "").strip()
                 raw_output = ""
                 if load_output and output_path:

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import csv
+import math
 import os
 import re
+import signal
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence, TextIO
+from typing import Iterable, Mapping, Sequence, TextIO
 
 MANIFEST_FIELDS = ["task_id", "case_index", "file"]
 TASK_FIELDS = ["solver", "file", "result", "time", "code", "output_path"]
@@ -16,6 +18,133 @@ JOB_FIELDS = ["job_id", "solver", "file"]
 RESULT_FIELDS = ["job_id", *TASK_FIELDS]
 VALID_TASK_RESULTS = {"sat", "unsat", "unknown", "timeout", "error"}
 _TASK_NAME_RE = re.compile(r"^task_(\d+)\.tsv$")
+
+# GNU timeout(1) exits 124 when its deadline fires. Depending on the platform
+# and whether the wrapper propagates a signal to itself, Python may instead see
+# a negative signal number while a shell reports 128+N. SIGABRT is different:
+# ForteSMT deliberately aborts from its SIGALRM handler, but assertions abort in
+# exactly the same way, so only the explicit ForteSMT marker proves a timeout.
+_GNU_TIMEOUT_CODE = 124
+_KILL_SIGNAL_CODES = frozenset(
+    {
+        -signal.SIGKILL,
+        -signal.SIGTERM,
+        128 + signal.SIGKILL,
+        128 + signal.SIGTERM,
+    }
+)
+_ABORT_SIGNAL_CODES = frozenset({-signal.SIGABRT, 128 + signal.SIGABRT})
+_INTERNAL_TIMEOUT_MARKER = "ForteSMT interrupted by timeout."
+_LIMIT_TOLERANCE_SECONDS = 0.1
+_OUTPUT_SCAN_BYTES = 64 * 1024
+
+
+def _has_line(output: str, marker: str) -> bool:
+    return any(line.strip() == marker for line in output.splitlines())
+
+
+def _near_limit(duration_sec: float, timeout: float) -> bool:
+    return (
+        math.isfinite(duration_sec)
+        and math.isfinite(timeout)
+        and timeout > 0
+        and duration_sec + _LIMIT_TOLERANCE_SECONDS >= timeout
+    )
+
+
+def is_timeout_exit(
+    code: int | None,
+    duration_sec: float = 0.0,
+    timeout: float = 0.0,
+    output: str = "",
+) -> bool:
+    """True when the exit carries evidence that the job time limit fired.
+
+    Explicit solver/wrapper evidence wins. Timing is only a fallback for kill
+    signals because generic solvers killed by GNU timeout do not necessarily
+    print a marker. An unmarked SIGABRT always remains an error.
+    """
+    if code is None:
+        return False
+    if code in _ABORT_SIGNAL_CODES:
+        return _has_line(output, _INTERNAL_TIMEOUT_MARKER)
+    if code == _GNU_TIMEOUT_CODE:
+        return True
+    if code in _KILL_SIGNAL_CODES:
+        return _near_limit(duration_sec, timeout)
+    return False
+
+
+def classify_output(output: str) -> str:
+    result = "error"
+    for line in output.splitlines():
+        parts = line.strip().split(maxsplit=1)
+        if parts and parts[0] in {"sat", "unsat", "unknown"}:
+            result = parts[0]
+    return result
+
+
+def classify_job_outcome(
+    code: int | None,
+    output: str,
+    *,
+    duration_sec: float,
+    timeout: float,
+) -> str:
+    if is_timeout_exit(code, duration_sec, timeout, output):
+        return "timeout"
+    if code == 0:
+        return classify_output(output)
+    return "error"
+
+
+def recorded_result(
+    result: str,
+    code: int | None,
+    duration_sec: float,
+    timeout: float,
+    output: str = "",
+) -> str:
+    """Reclassify stored TSV rows that used the old timeout-as-error mapping."""
+    label = (result or "").strip().lower()
+    if label == "error" and is_timeout_exit(code, duration_sec, timeout, output):
+        return "timeout"
+    return label
+
+
+def _read_timeout_evidence(raw_path: str) -> str:
+    """Scan a stored solver log for the exact timeout marker in bounded memory."""
+    if not raw_path:
+        return ""
+    path = Path(raw_path).expanduser()
+    needle = _INTERNAL_TIMEOUT_MARKER.encode("utf-8")
+    overlap = b""
+    try:
+        with path.open("rb") as handle:
+            while chunk := handle.read(_OUTPUT_SCAN_BYTES):
+                combined = overlap + chunk
+                if needle in combined:
+                    return _INTERNAL_TIMEOUT_MARKER
+                overlap = combined[-(len(needle) - 1) :]
+    except OSError:
+        return ""
+    return ""
+
+
+def recorded_result_row(row: Mapping[str, str | None], timeout: float) -> str:
+    """Return the normalized result for one persisted result-TSV row."""
+    label = (row.get("result") or "").strip().lower()
+    try:
+        duration = float(row.get("time") or "")
+        raw_code = row.get("code") or ""
+        code = int(raw_code) if raw_code else None
+    except (TypeError, ValueError):
+        return label
+    output = ""
+    if label == "error" and code in _ABORT_SIGNAL_CODES:
+        output = _read_timeout_evidence((row.get("output_path") or "").strip())
+    return recorded_result(label, code, duration, timeout, output)
+
 
 # Result labels as recorded by smtbatch run in the task TSV (lowercase) and the
 # uppercase labels used for cross-solver consistency classification.
@@ -330,17 +459,33 @@ def classify_consistency(results: Iterable[str]) -> str:
     return "Other"
 
 
+def result_file_timeout(task_file: Path) -> float:
+    metadata_path = task_file.parent / "metadata.txt"
+    if not metadata_path.is_file():
+        return 0.0
+    try:
+        for line in metadata_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("timeout="):
+                timeout = float(line.split("=", 1)[1])
+                return timeout if math.isfinite(timeout) and timeout > 0 else 0.0
+    except (OSError, ValueError):
+        return 0.0
+    return 0.0
+
+
 def results_by_file(task_files: Sequence[Path]) -> dict[str, dict[str, str]]:
     """Group per-solver result labels by file path across task TSVs."""
     by_file: dict[str, dict[str, str]] = {}
     for task_file in task_files:
+        timeout = result_file_timeout(task_file)
         with task_file.open("r", encoding="utf-8", newline="") as handle:
             for row in csv.DictReader(handle, delimiter="\t"):
                 solver = (row.get("solver") or "").strip()
                 file_str = (row.get("file") or "").strip()
                 if not solver or not file_str:
                     continue
-                by_file.setdefault(file_str, {})[solver] = result_label(row.get("result") or "")
+                normalized = recorded_result_row(row, timeout)
+                by_file.setdefault(file_str, {})[solver] = result_label(normalized)
     return by_file
 
 

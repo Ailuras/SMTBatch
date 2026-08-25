@@ -15,6 +15,8 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
+from smtbatch.config import SolverSpec
+from smtbatch.report import load_entries
 from smtbatch.run import (
     ProgressTracker,
     JobResult,
@@ -28,7 +30,7 @@ from smtbatch.run import (
     solver_artifacts,
     solver_bundle_hash,
 )
-from smtbatch.task import JobSpec, load_jobs
+from smtbatch.task import JobSpec, classify_job_outcome, load_jobs, results_by_file
 
 
 class ResumeLogicTests(unittest.TestCase):
@@ -103,6 +105,29 @@ class ResumeLogicTests(unittest.TestCase):
         self.assertEqual(dict(by_solver["alpha"]), {"sat": 2})
         self.assertEqual(solved_seconds, {"alpha": 1.0})
         self.assertEqual(par2_seconds, {"alpha": 1.0})
+
+    def test_existing_timeout_error_is_normalized_for_resume_and_collect(self) -> None:
+        run_dir = self._make_run("legacy-timeout", completed=0, total=1)
+        output_path = run_dir / "logs" / "job_0000001.out"
+        output_path.parent.mkdir()
+        output_path.write_text("ForteSMT interrupted by timeout.\n", encoding="utf-8")
+        (run_dir / "results.tsv").write_text(
+            "job_id\tsolver\tfile\tresult\ttime\tcode\toutput_path\n"
+            f"1\talpha\t{self.formulas[0]}\terror\t10.2\t-6\t{output_path}\n",
+            encoding="utf-8",
+        )
+        completed, outcomes, by_solver, _, _ = _load_existing_results(
+            run_dir / "results.tsv", load_jobs(run_dir / "jobs.tsv"), 10
+        )
+        self.assertEqual(completed, {1})
+        self.assertEqual(outcomes, Counter({"timeout": 1}))
+        self.assertEqual(by_solver, {"alpha": Counter({"timeout": 1})})
+        self.assertEqual(
+            results_by_file([run_dir / "results.tsv"]),
+            {str(self.formulas[0]): {"alpha": "TIMEOUT"}},
+        )
+        entries = load_entries([run_dir / "results.tsv"], load_output=False)
+        self.assertEqual([(entry.status, entry.result) for entry in entries], [("TIMEOUT", "UNKNOWN")])
 
     def test_load_existing_results_rejects_truncated_or_mismatched_rows(self) -> None:
         run_dir = self._make_run("corrupt", completed=0)
@@ -341,6 +366,87 @@ class ResumeLogicTests(unittest.TestCase):
         with output.open("r", encoding="utf-8", newline="") as handle:
             rows = list(csv.DictReader(handle, delimiter="\t"))
         self.assertEqual(sorted(int(row["job_id"]) for row in rows), [1, 2])
+
+    def test_timeout_watchdog_is_ten_seconds_after_the_job_limit(self) -> None:
+        spec = SolverSpec(
+            "alpha",
+            self.binary,
+            ("{timeout}", "{timeout_ms}", "{timeout_watchdog}", "{binary}", "{input}"),
+            ("--version",),
+        )
+        rendered = spec.render(self.formulas[0], 1200)
+        self.assertEqual(rendered[0], "1200")
+        self.assertEqual(rendered[1], "1200000")
+        self.assertEqual(rendered[2], "1210")
+
+
+class TimeoutClassificationTests(unittest.TestCase):
+    def test_gnu_timeout_exit_codes_are_timeout(self) -> None:
+        for code in (124, 137, 143):
+            self.assertEqual(
+                classify_job_outcome(code, "", duration_sec=10.0, timeout=10.0),
+                "timeout",
+            )
+
+        for code in (137, 143):
+            self.assertEqual(
+                classify_job_outcome(code, "", duration_sec=1.0, timeout=10.0),
+                "error",
+            )
+
+    def test_kill_after_sigkill_at_limit_is_timeout(self) -> None:
+        self.assertEqual(
+            classify_job_outcome(-9, "ForteSMT interrupted by SIGTERM.\n", duration_sec=302.5, timeout=300.0),
+            "timeout",
+        )
+        self.assertEqual(
+            classify_job_outcome(-15, "", duration_sec=301.0, timeout=300.0),
+            "timeout",
+        )
+
+    def test_early_sigkill_stays_error(self) -> None:
+        self.assertEqual(
+            classify_job_outcome(-9, "", duration_sec=5.0, timeout=300.0),
+            "error",
+        )
+
+    def test_abort_requires_the_internal_timeout_marker(self) -> None:
+        self.assertEqual(
+            classify_job_outcome(
+                -6,
+                "ForteSMT interrupted by timeout.\n",
+                duration_sec=300.2,
+                timeout=300.0,
+            ),
+            "timeout",
+        )
+        self.assertEqual(
+            classify_job_outcome(
+                134,
+                "ForteSMT interrupted by timeout.\n",
+                duration_sec=0.2,
+                timeout=300.0,
+            ),
+            "timeout",
+        )
+        self.assertEqual(
+            classify_job_outcome(-6, "", duration_sec=300.2, timeout=300.0),
+            "error",
+        )
+        self.assertEqual(
+            classify_job_outcome(134, "Fatal assertion", duration_sec=300.2, timeout=300.0),
+            "error",
+        )
+
+    def test_zero_exit_still_reads_solver_status(self) -> None:
+        self.assertEqual(
+            classify_job_outcome(0, "unsat\n", duration_sec=1.0, timeout=300.0),
+            "unsat",
+        )
+        self.assertEqual(
+            classify_job_outcome(1, "boom\n", duration_sec=1.0, timeout=300.0),
+            "error",
+        )
 
 
 if __name__ == "__main__":

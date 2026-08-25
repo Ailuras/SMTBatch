@@ -19,10 +19,13 @@ Config schema:
 
 Placeholders allowed inside ``command`` tokens:
 
-    {binary}      absolute solver executable from the ``binary`` key
-    {input}       the .smt2 file for the current job (required exactly once)
-    {timeout}     per-job timeout in seconds
-    {timeout_ms}  per-job timeout in whole milliseconds
+    {binary}             absolute solver executable from the ``binary`` key
+    {input}              the .smt2 file for the current job (required exactly once)
+    {timeout}            per-job timeout in seconds
+    {timeout_ms}         per-job timeout in whole milliseconds
+    {timeout_watchdog}   {timeout} plus a short slack, for an outer GNU
+                         timeout(1) that must not fire at the same instant as
+                         the solver's own --tlimit
 """
 
 from __future__ import annotations
@@ -40,7 +43,10 @@ else:
 
 CONFIG_NAME = "smtbatch.toml"
 _PLACEHOLDER = re.compile(r"\{(\w+)\}")
-_ALLOWED_PLACEHOLDERS = {"binary", "input", "timeout", "timeout_ms"}
+_ALLOWED_PLACEHOLDERS = {"binary", "input", "timeout", "timeout_ms", "timeout_watchdog"}
+# Outer GNU timeout(1) must fire after the solver's --tlimit, otherwise SIGALRM
+# abort and SIGTERM race at the same wall-clock instant and produce two corpses.
+_WATCHDOG_SLACK_SECONDS = 10.0
 
 
 @dataclass(frozen=True)
@@ -56,11 +62,14 @@ class SolverSpec:
     def render(self, input_path: Path, timeout: float) -> list[str]:
         """Substitute placeholders for one concrete job invocation."""
         timeout_s = str(int(timeout)) if float(timeout).is_integer() else repr(timeout)
+        watchdog = timeout + _WATCHDOG_SLACK_SECONDS
+        watchdog_s = str(int(watchdog)) if float(watchdog).is_integer() else repr(watchdog)
         values = {
             "binary": str(self.binary),
             "input": str(input_path),
             "timeout": timeout_s,
             "timeout_ms": str(int(round(timeout * 1000))),
+            "timeout_watchdog": watchdog_s,
         }
         return [_PLACEHOLDER.sub(lambda match: values[match.group(1)], token) for token in self.command]
 
