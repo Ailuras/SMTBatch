@@ -174,17 +174,123 @@ def _formula_check_sat_progress(
     return _metric_int(result, "queries"), expected
 
 
-def _cactus_from_events(events: Sequence[tuple[float, int]], limit: float) -> list[dict[str, float]]:
+QUERY_CACTUS_CACHE = "query_cactus.json"
+QUERY_CACTUS_SYNC_MAX_FILES = 500
+SCATTER_POINT_LIMIT = 8000
+SCATTER_COVERAGE_OUTLIER = 0.02
+_EVENT_SOLVER_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _clamp_time(value: float, limit: float) -> float:
+    """Clip a runtime onto ``[0, limit]`` so GNU-timeout overshoot still counts."""
+    if not math.isfinite(value) or value < 0:
+        return 0.0
+    return limit if value > limit else value
+
+
+def _cactus_from_events(
+    events: Sequence[tuple[float, int]],
+    limit: float,
+    *,
+    max_points: int = 1200,
+) -> list[dict[str, float]]:
     cactus: list[dict[str, float]] = []
     seen = 0
-    for duration, group in itertools.groupby(sorted(events), key=lambda item: item[0]):
-        if duration > limit:
-            break
+    clamped = sorted(
+        ((_clamp_time(duration, limit), weight) for duration, weight in events if weight > 0),
+        key=lambda item: item[0],
+    )
+    for duration, group in itertools.groupby(clamped, key=lambda item: item[0]):
         seen += sum(weight for _, weight in group)
         cactus.append({"time": round(duration, 3), "solved": seen})
     if not cactus or cactus[-1]["time"] < limit:
         cactus.append({"time": round(limit, 3), "solved": seen})
-    return cactus
+    if len(cactus) <= max_points:
+        return cactus
+    return _resample_cactus(cactus, limit, max_points)
+
+
+def _resample_cactus(cactus: Sequence[Mapping[str, float]], limit: float, max_points: int) -> list[dict[str, float]]:
+    """Keep a monotone step function at uniform times, always including the timeout."""
+    if max_points < 2:
+        last = cactus[-1]
+        return [{"time": round(limit, 3), "solved": int(last["solved"])}]
+    sampled: list[dict[str, float]] = []
+    index = 0
+    last_index = len(cactus) - 1
+    for step in range(max_points):
+        time = limit * step / (max_points - 1)
+        while index < last_index and float(cactus[index + 1]["time"]) <= time:
+            index += 1
+        solved = int(cactus[index]["solved"]) if float(cactus[index]["time"]) <= time else 0
+        point = {"time": round(time, 3), "solved": solved}
+        if not sampled or sampled[-1]["solved"] != solved or step == max_points - 1:
+            sampled.append(point)
+    return sampled
+
+
+def _event_path(events_dir: Path, job_id: int, solver: str) -> Path:
+    safe = _EVENT_SOLVER_RE.sub("_", solver) or "solver"
+    return events_dir / f"job_{job_id:07d}.{safe}.tsv"
+
+
+def _event_file_count(events_dir: Path) -> int:
+    if not events_dir.is_dir():
+        return 0
+    with os.scandir(events_dir) as iterator:
+        return sum(1 for entry in iterator if entry.name.endswith(".tsv") and entry.is_file())
+
+
+def _solved_query_times(path: Path) -> list[float] | None:
+    """Elapsed seconds for sat/unsat events, or None if the file cannot be read."""
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            if handle.readline() == "":
+                return None
+            times: list[float] = []
+            for line in handle:
+                parts = line.split("\t")
+                if len(parts) < 4 or parts[3].strip() not in {"sat", "unsat"}:
+                    continue
+                try:
+                    times.append(int(parts[1]) / 1000.0)
+                except ValueError:
+                    continue
+            return times
+    except OSError:
+        return None
+
+
+def _select_scatter_points(
+    points: Sequence[Mapping[str, object]],
+    limit: int = SCATTER_POINT_LIMIT,
+) -> tuple[list[dict[str, object]], bool]:
+    """Keep coverage outliers, then stride the diagonal cloud down to ``limit``."""
+    materialized = [dict(point) for point in points]
+    total = len(materialized)
+    if total <= limit:
+        return materialized, False
+    outliers: list[dict[str, object]] = []
+    rest: list[dict[str, object]] = []
+    for point in materialized:
+        left = float(point.get("left_coverage") or 0)
+        right = float(point.get("right_coverage") or 0)
+        if (
+            abs(left - right) >= SCATTER_COVERAGE_OUTLIER
+            or point.get("left_solved") != point.get("right_solved")
+            or point.get("left_status") != point.get("right_status")
+        ):
+            outliers.append(point)
+        else:
+            rest.append(point)
+    if len(outliers) >= limit:
+        step = math.ceil(len(outliers) / limit)
+        return outliers[::step][:limit], True
+    remaining = limit - len(outliers)
+    if remaining >= len(rest):
+        return outliers + rest, False
+    step = math.ceil(len(rest) / remaining)
+    return outliers + rest[::step][:remaining], True
 
 
 class ExperimentManager:
@@ -202,6 +308,10 @@ class ExperimentManager:
         self._progress_cache: dict[str, tuple[tuple[int, int], dict[str, object]]] = {}
         self._run_cache: dict[str, tuple[tuple[int, int, int, int], dict[str, object]]] = {}
         self._history_cache: tuple[float, dict[tuple[str, str], float]] | None = None
+        self._query_cactus_lock = threading.Lock()
+        self._query_cactus_building: set[str] = set()
+        self._purge_lock = threading.Lock()
+        self._purge_threads: list[threading.Thread] = []
 
     def _solver_config(self) -> Config:
         """Return the current project config, reloading it when TOML changes."""
@@ -587,21 +697,55 @@ class ExperimentManager:
         return {"run_id": run_id, "status": "interrupting"}
 
     def delete_run(self, run_id: str) -> dict[str, object]:
-        """Delete one experiment directory after confirming that it is not active."""
+        """Hide one experiment immediately, then purge its files in the background.
+
+        History listing only looks at directories with ``progress.json``.  A
+        synchronous ``rmtree`` of ``logs/`` or ``events/`` can take minutes, which
+        used to freeze the confirm dialog and could leave a folder behind after
+        ``progress.json`` had already vanished from the card list.  Renaming to a
+        dotted trash path first removes the card; the slow unlink happens after
+        the HTTP response.
+        """
         run_dir = self._run_dir(run_id)
         if not run_dir.is_dir():
             raise ValueError("experiment not found")
         if self._run_is_live(run_id):
             raise ValueError("experiment is still running; cancel it before deleting")
 
+        trash = self._trash_path(run_id)
         try:
-            shutil.rmtree(run_dir)
+            run_dir.rename(trash)
         except FileNotFoundError:
             raise ValueError("experiment not found") from None
+        except OSError as exc:
+            raise OSError(f"unable to move experiment out of history: {exc}") from exc
 
         self._progress_cache.pop(run_id, None)
         _RUN_CACHE.pop(run_dir / "progress.json", None)
+        _RUN_CACHE.pop(trash / "progress.json", None)
+        self._schedule_purge(trash)
         return {"run_id": run_id, "status": "deleted"}
+
+    def _trash_path(self, run_id: str) -> Path:
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", run_id).strip("._") or "run"
+        return self.results_root / f".deleting-{safe}-{time.time_ns()}"
+
+    def _schedule_purge(self, path: Path) -> None:
+        thread = threading.Thread(target=_rmtree_force, args=(path,), name=f"purge-{path.name}", daemon=True)
+        with self._purge_lock:
+            self._purge_threads = [item for item in self._purge_threads if item.is_alive()]
+            self._purge_threads.append(thread)
+        thread.start()
+
+    def _await_purges(self, timeout: float = 5.0) -> None:
+        deadline = time.monotonic() + timeout
+        with self._purge_lock:
+            threads = list(self._purge_threads)
+        for thread in threads:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            thread.join(remaining)
 
     def resume(self, run_id: str, request: object) -> dict[str, object]:
         """Relaunch an interrupted or failed run, rerunning only its missing jobs."""
@@ -838,6 +982,152 @@ class ExperimentManager:
             self._run_cache[run_id] = (cache_key, payload)
         return payload
 
+    def _query_cactus_fingerprint(self, run_dir: Path) -> str:
+        results = run_dir / "results.tsv"
+        try:
+            stat = results.stat()
+            size, mtime_ns = stat.st_size, stat.st_mtime_ns
+        except OSError:
+            size, mtime_ns = 0, 0
+        return f"{size}:{mtime_ns}:{_event_file_count(run_dir / 'events')}"
+
+    def _read_query_cactus_cache(
+        self,
+        run_dir: Path,
+        timeout: float,
+        solvers: Sequence[str],
+    ) -> dict[str, object] | None:
+        path = run_dir / QUERY_CACTUS_CACHE
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        if payload.get("fingerprint") != self._query_cactus_fingerprint(run_dir):
+            return None
+        try:
+            cached_timeout = float(payload.get("timeout"))
+        except (TypeError, ValueError):
+            return None
+        if abs(cached_timeout - timeout) > 1e-9:
+            return None
+        by_solver = payload.get("by_solver")
+        if not isinstance(by_solver, dict):
+            return None
+        if any(solver not in by_solver for solver in solvers):
+            return None
+        return payload
+
+    def _build_query_cactus(self, run_id: str, timeout: float, solvers: Sequence[str]) -> dict[str, object]:
+        run_dir = self._run_dir(run_id)
+        events_dir = run_dir / "events"
+        buckets: dict[str, list[tuple[float, int]]] = {solver: [] for solver in solvers}
+        event_jobs = 0
+        fallback_jobs = 0
+        with (run_dir / "results.tsv").open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle, delimiter="\t")
+            if not results_header_ok(reader.fieldnames):
+                raise ValueError("invalid results header")
+            for row in reader:
+                solver = (row.get("solver") or "").strip()
+                if solver not in buckets:
+                    continue
+                try:
+                    decided = int(row.get("sat") or 0) + int(row.get("unsat") or 0)
+                    job_id = int(row.get("job_id") or "")
+                    file_time = float(row.get("time") or "")
+                except (TypeError, ValueError):
+                    continue
+                if decided <= 0:
+                    continue
+                times = _solved_query_times(_event_path(events_dir, job_id, solver))
+                if times:
+                    event_jobs += 1
+                    if len(times) > decided:
+                        times = times[:decided]
+                    buckets[solver].extend((elapsed, 1) for elapsed in times)
+                    rest = decided - len(times)
+                    if rest > 0:
+                        fallback_jobs += 1
+                        buckets[solver].append((file_time, rest))
+                else:
+                    fallback_jobs += 1
+                    buckets[solver].append((file_time, decided))
+        return {
+            "fingerprint": self._query_cactus_fingerprint(run_dir),
+            "timeout": timeout,
+            "cactus_credit": "query-events",
+            "event_jobs": event_jobs,
+            "fallback_jobs": fallback_jobs,
+            "by_solver": {solver: _cactus_from_events(buckets[solver], timeout) for solver in solvers},
+        }
+
+    def _write_query_cactus_cache(self, run_dir: Path, payload: Mapping[str, object]) -> None:
+        path = run_dir / QUERY_CACTUS_CACHE
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        try:
+            temporary.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
+            temporary.replace(path)
+        except OSError:
+            temporary.unlink(missing_ok=True)
+
+    def _schedule_query_cactus(self, run_id: str, timeout: float, solvers: Sequence[str]) -> None:
+        with self._query_cactus_lock:
+            if run_id in self._query_cactus_building:
+                return
+            self._query_cactus_building.add(run_id)
+
+        def worker() -> None:
+            try:
+                payload = self._build_query_cactus(run_id, timeout, list(solvers))
+                self._write_query_cactus_cache(self._run_dir(run_id), payload)
+            except (OSError, ValueError, csv.Error):
+                pass
+            finally:
+                with self._query_cactus_lock:
+                    self._query_cactus_building.discard(run_id)
+
+        threading.Thread(target=worker, name=f"query-cactus-{run_id}", daemon=True).start()
+
+    def _apply_query_cactus(
+        self,
+        run_id: str,
+        timeout: float,
+        by_solver: dict[str, dict[str, object]],
+        progress: Mapping[str, object],
+    ) -> tuple[str, str]:
+        solvers = list(by_solver)
+        run_dir = self._run_dir(run_id)
+        event_count = _event_file_count(run_dir / "events")
+        if event_count <= 0:
+            return "file-runtime", "unavailable"
+        if event_count <= QUERY_CACTUS_SYNC_MAX_FILES:
+            try:
+                payload = self._build_query_cactus(run_id, timeout, solvers)
+            except (OSError, ValueError, csv.Error):
+                return "file-runtime", "unavailable"
+            cached = payload.get("by_solver")
+            if isinstance(cached, dict):
+                for solver, summary in by_solver.items():
+                    cactus = cached.get(solver)
+                    if isinstance(cactus, list):
+                        summary["cactus"] = cactus
+            return "query-events", "ready"
+        cached = self._read_query_cactus_cache(run_dir, timeout, solvers)
+        if cached is not None:
+            series = cached.get("by_solver")
+            if isinstance(series, dict):
+                for solver, summary in by_solver.items():
+                    cactus = series.get(solver)
+                    if isinstance(cactus, list):
+                        summary["cactus"] = cactus
+            return "query-events", "ready"
+        if str(progress.get("status") or "") == "complete":
+            self._schedule_query_cactus(run_id, timeout, solvers)
+            return "file-runtime", "building"
+        return "file-runtime", "unavailable"
+
     def report_summary(self, run_id: str, state: str) -> dict[str, object]:
         data = self._run_data(run_id)
         solvers = data["solvers"]
@@ -949,9 +1239,13 @@ class ExperimentManager:
             summary["avg_solved_seconds"] = round(solved_seconds / solved_count, 3) if solved_count else None
             summary["avg_sat_seconds"] = round(summary["sat_seconds"] / sat_count, 3) if sat_count else None
             summary["avg_unsat_seconds"] = round(summary["unsat_seconds"] / unsat_count, 3) if unsat_count else None
-            solved_times = sorted(solved_times_by_solver[solver])
+            solved_times = sorted(_clamp_time(duration, timeout) for duration in solved_times_by_solver[solver])
             summary["file_cactus"] = _cactus_from_events([(duration, 1) for duration in solved_times], timeout)
             summary["cactus"] = _cactus_from_events(query_events_by_solver[solver], timeout)
+        cactus_credit = "file-runtime"
+        query_cactus_status = "unavailable"
+        if state == "all":
+            cactus_credit, query_cactus_status = self._apply_query_cactus(run_id, timeout, by_solver, progress)
         return {
             "run_id": run_id,
             "status": data["progress"].get("status", "unknown"),
@@ -960,6 +1254,8 @@ class ExperimentManager:
             "completed_pairs": sum(int(case["done"]) for case in cases),
             "solvers": solvers,
             "timeout": timeout,
+            "cactus_credit": cactus_credit,
+            "query_cactus_status": query_cactus_status,
             "by_solver": by_solver,
         }
 
@@ -1007,6 +1303,12 @@ class ExperimentManager:
             raise ValueError("choose two solvers from this run")
         if state not in {"all", "pending", "consistent", "conflict", "hard", "error", "other"}:
             raise ValueError("invalid formula state")
+        progress = data["progress"] if isinstance(data.get("progress"), dict) else {}
+        settings = progress.get("settings") or {}
+        try:
+            timeout = float(settings.get("timeout") or progress.get("timeout") or "")
+        except (TypeError, ValueError):
+            timeout = math.nan
         points: list[dict[str, object]] = []
         for case in data["cases"]:
             assert isinstance(case, dict)
@@ -1020,11 +1322,16 @@ class ExperimentManager:
             x, y = left_result.get("time"), right_result.get("time")
             if not isinstance(x, (int, float)) or not isinstance(y, (int, float)) or x < 0 or y < 0:
                 continue
+            if math.isfinite(timeout) and timeout > 0:
+                x = _clamp_time(float(x), timeout)
+                y = _clamp_time(float(y), timeout)
+            expected = _metric_int(left_result, "expected") or _metric_int(right_result, "expected") or _metric_int(case, "expected")
             points.append(
                 {
                     "file": case["file"],
                     "x": x,
                     "y": y,
+                    "expected": expected,
                     "left": left_result.get("result"),
                     "right": right_result.get("result"),
                     "left_coverage": round(_query_coverage(left_result), 4),
@@ -1038,11 +1345,17 @@ class ExperimentManager:
                 }
             )
         total = len(points)
-        limit = 5_000
-        if total > limit:
-            step = math.ceil(total / limit)
-            points = points[::step]
-        return {"left": left, "right": right, "total_points": total, "sampled": total > len(points), "points": points}
+        points, sampled = _select_scatter_points(points)
+        payload: dict[str, object] = {
+            "left": left,
+            "right": right,
+            "total_points": total,
+            "sampled": sampled,
+            "points": points,
+        }
+        if math.isfinite(timeout) and timeout > 0:
+            payload["timeout"] = timeout
+        return payload
 
     def example_file(self, run_id: str, path: str) -> Path:
         """Resolve a case file only if it belongs to the run's immutable queue."""
@@ -1472,6 +1785,24 @@ def _read_run_pid(path: Path) -> int | None:
     if " run " not in f" {completed.stdout} ":
         return None
     return pid
+
+
+def _rmtree_force(path: Path) -> None:
+    """Best-effort recursive delete; chmod and retry when a file is not writable."""
+
+    def onerror(func: Any, err_path: str, _exc_info: object) -> None:
+        try:
+            os.chmod(err_path, 0o700)
+            func(err_path)
+        except OSError:
+            return
+
+    try:
+        shutil.rmtree(path, onerror=onerror)
+    except FileNotFoundError:
+        return
+    except OSError:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def _run_lock_held(path: Path) -> bool:

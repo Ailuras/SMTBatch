@@ -29,7 +29,7 @@
       </section>
       <section class="panel">
         <div class="panel-head">
-          <div><h2>Cactus plot</h2><p id="cactus-caption">Cumulative solved check-sat answers vs file runtime, up to the timeout.</p></div>
+          <div><h2>Cactus plot</h2><p id="cactus-caption">Cumulative solved check-sat answers vs the time each PO was answered, clipped to the timeout.</p></div>
           <select id="cactus-metric" aria-label="Cactus metric"><option value="queries">check-sat</option><option value="files">files</option></select>
         </div>
         <svg class="chart" id="cactus" viewBox="0 0 580 330" role="img" aria-label="Cactus plot"></svg>
@@ -38,7 +38,7 @@
       </section>
       <section class="panel scatter-panel" id="scatter-panel">
         <div class="panel-head">
-          <div><h2>Solver comparison</h2><p id="scatter-caption">Coverage per file. The diagonal means equal coverage.</p></div>
+          <div><h2>Solver comparison</h2><p id="scatter-caption">Coverage per file. Color is who solved a larger share; size is expected check-sat; background is density.</p></div>
           <div class="filters">
             <select id="scatter-metric" aria-label="Scatter metric"><option value="coverage">Coverage</option><option value="time">Time</option></select>
             <select id="left-solver"></select>
@@ -263,9 +263,15 @@
 
     function renderCactus() {
       const metric = $("cactus-metric").value;
+      const credit = summary.cactus_credit === "query-events" ? "query" : "file";
+      const building = summary.query_cactus_status === "building";
       $("cactus-caption").textContent = metric === "files"
-        ? "Cumulative files whose last answer is sat/unsat vs runtime, up to the timeout."
-        : "Cumulative solved check-sat answers vs file runtime, up to the timeout. Truncated files still contribute the POs they answered.";
+        ? "Cumulative files whose last answer is sat/unsat vs runtime, clipped to the timeout."
+        : credit === "query"
+          ? "Cumulative solved check-sat answers vs the time each PO was answered, clipped to the timeout."
+          : building
+            ? "Cumulative solved check-sat answers vs file runtime (truncated files count at the wall). Building query-time cactus…"
+            : "Cumulative solved check-sat answers vs file runtime, clipped to the timeout. Truncated files still count at the wall.";
       $("cactus-empty").textContent = metric === "files"
         ? "No SAT or UNSAT file results match this filter."
         : "No solved check-sat answers match this filter.";
@@ -284,7 +290,7 @@
         hasPoints = true;
         let path = `M ${box.left} ${box.top + box.plotHeight}`;
         for (const point of item.points) {
-          path += ` L ${box.left + box.plotWidth * point.time / maxX} ${box.top + box.plotHeight * (1 - point.solved / maxY)}`;
+          path += ` L ${box.left + box.plotWidth * Math.min(1, Math.max(0, point.time / maxX))} ${box.top + box.plotHeight * (1 - point.solved / maxY)}`;
         }
         svg(chart, "path", {d: path, stroke: item.color, class: "line"});
       }
@@ -312,28 +318,36 @@
       right.value = summary.solvers.includes(oldRight) && oldRight !== left.value ? oldRight : summary.solvers[1] || summary.solvers[0] || "";
     }
 
-    function scatterPointColor(point) {
-      const statuses = [point.left_status, point.right_status];
-      if (statuses.includes("error")) return "rgba(139,154,171,.85)";
-      if (statuses.includes("timeout")) return "rgba(232,154,92,.85)";
-      if (statuses.includes("partial")) return "rgba(241,201,109,.8)";
-      if (statuses.every(status => status === "complete")) return "rgba(86,213,167,.75)";
-      return "rgba(128,188,255,.6)";
+    function scatterDeltaColor(delta) {
+      if (delta > 0.02) return "rgba(128,188,255,.9)";
+      if (delta < -0.02) return "rgba(86,213,167,.9)";
+      return "rgba(90,115,136,.28)";
     }
 
     function drawScatter(data) {
       const canvas = $("scatter"), empty = $("scatter-empty"), legend = $("scatter-legend"), context = canvas.getContext("2d");
       const metric = $("scatter-metric").value;
+      const leftName = data.left || $("left-solver").value, rightName = data.right || $("right-solver").value;
       $("scatter-caption").textContent = metric === "time"
-        ? "Log-time scatter. The diagonal means equal time."
-        : "Coverage per file. Green = both complete; yellow = partial; orange = timeout; gray = error.";
+        ? `Log-time scatter, times clipped to the file wall. Color is coverage difference (${rightName} minus ${leftName}).`
+        : `Coverage per file. Color = who solved a larger share; size = expected check-sat; background = density. Diagonal = equal.`;
       empty.textContent = metric === "time"
         ? "Choose two solvers with completed timing data."
         : "Choose two solvers with coverage data.";
-      const points = (data.points || []).map(point => metric === "coverage"
-        ? {x: Number(point.left_coverage ?? 0), y: Number(point.right_coverage ?? 0), color: scatterPointColor(point)}
-        : {x: Number(point.x), y: Number(point.y), color: scatterPointColor(point)}
-      ).filter(point => Number.isFinite(point.x) && Number.isFinite(point.y) && point.x >= 0 && point.y >= 0);
+      const timeout = Number(data.timeout || summary && summary.timeout || 0);
+      const points = (data.points || []).map(point => {
+        const expected = Number(point.expected || 0);
+        const leftCoverage = Number(point.left_coverage ?? 0);
+        const rightCoverage = Number(point.right_coverage ?? 0);
+        const delta = rightCoverage - leftCoverage;
+        return {
+          x: metric === "coverage" ? leftCoverage : Number(point.x),
+          y: metric === "coverage" ? rightCoverage : Number(point.y),
+          expected,
+          delta,
+          color: scatterDeltaColor(delta),
+        };
+      }).filter(point => Number.isFinite(point.x) && Number.isFinite(point.y) && point.x >= 0 && point.y >= 0);
       if (!points.length) {
         canvas.classList.add("hidden");
         empty.classList.remove("hidden");
@@ -352,7 +366,7 @@
         scaleY = value => top + plotHeight * (1 - Math.min(1, Math.max(0, value)));
       } else {
         const minimum = -3;
-        const maximum = Math.max(1, ...points.flatMap(point => [Math.log10(Math.max(point.x, 0.001)), Math.log10(Math.max(point.y, 0.001))]));
+        const maximum = Math.log10(Math.max(timeout || 1, ...points.map(point => Math.max(point.x, point.y, 0.001))));
         ticks = [0, 1, 2, 3, 4].map(step => 10 ** (minimum + (maximum - minimum) * step / 4));
         scaleX = value => left + plotWidth * (Math.log10(Math.max(value, 0.001)) - minimum) / (maximum - minimum);
         scaleY = value => top + plotHeight * (1 - (Math.log10(Math.max(value, 0.001)) - minimum) / (maximum - minimum));
@@ -374,23 +388,48 @@
         context.fillText(label, x - 14, height - 20);
         context.fillText(label, 4, y + 3);
       }
+      context.fillStyle = "#90a6b8";
+      context.fillText(leftName, left + plotWidth / 2 - 24, height - 6);
+      context.save();
+      context.translate(12, top + plotHeight / 2);
+      context.rotate(-Math.PI / 2);
+      context.fillText(rightName, -24, 0);
+      context.restore();
+      const cols = 28, rows = 16, cellW = plotWidth / cols, cellH = plotHeight / rows;
+      const bins = new Map();
+      let binMax = 1;
+      for (const point of points) {
+        const gx = Math.min(cols - 1, Math.max(0, Math.floor((scaleX(point.x) - left) / cellW)));
+        const gy = Math.min(rows - 1, Math.max(0, Math.floor((scaleY(point.y) - top) / cellH)));
+        const key = `${gx},${gy}`;
+        const next = (bins.get(key) || 0) + 1;
+        bins.set(key, next);
+        if (next > binMax) binMax = next;
+      }
+      for (const [key, count] of bins) {
+        const [gx, gy] = key.split(",").map(Number);
+        context.fillStyle = `rgba(128,188,255,${0.04 + 0.28 * count / binMax})`;
+        context.fillRect(left + gx * cellW, top + gy * cellH, cellW, cellH);
+      }
       context.strokeStyle = "rgba(240,201,108,.7)";
       context.beginPath();
       context.moveTo(scaleX(metric === "coverage" ? 0 : 0.001), scaleY(metric === "coverage" ? 0 : 0.001));
       context.lineTo(scaleX(metric === "coverage" ? 1 : ticks[4]), scaleY(metric === "coverage" ? 1 : ticks[4]));
       context.stroke();
-      for (const point of points) {
+      const maxExpected = Math.max(1, ...points.map(point => point.expected || 0));
+      const ordered = points.slice().sort((a, b) => Math.abs(a.delta) - Math.abs(b.delta));
+      for (const point of ordered) {
+        const radius = 1.5 + 2.6 * Math.log10(1 + (point.expected || 0)) / Math.log10(1 + maxExpected);
         context.fillStyle = point.color;
         context.beginPath();
-        context.arc(scaleX(point.x), scaleY(point.y), 2.4, 0, Math.PI * 2);
+        context.arc(scaleX(point.x), scaleY(point.y), radius, 0, Math.PI * 2);
         context.fill();
       }
       legend.replaceChildren(...[
-        ["complete", "rgba(86,213,167,.75)"],
-        ["partial", "rgba(241,201,109,.8)"],
-        ["timeout", "rgba(232,154,92,.85)"],
-        ["error", "rgba(139,154,171,.85)"],
-        ["other", "rgba(128,188,255,.6)"],
+        [`${leftName} better`, "rgba(86,213,167,.9)"],
+        ["equal coverage", "rgba(90,115,136,.6)"],
+        [`${rightName} better`, "rgba(128,188,255,.9)"],
+        ["density", "rgba(128,188,255,.35)"],
       ].map(([label, color]) => {
         const node = document.createElement("span"), dot = document.createElement("i");
         dot.style.background = color;
@@ -579,6 +618,28 @@
       }
     }
 
+    let cactusPoll = null;
+    async function maybeUpgradeCactus() {
+      if (cactusPoll) {
+        clearTimeout(cactusPoll);
+        cactusPoll = null;
+      }
+      if (!summary || summary.query_cactus_status !== "building") return;
+      cactusPoll = setTimeout(async () => {
+        cactusPoll = null;
+        try {
+          const response = await fetch(`/api/runs/${encodeURIComponent(runId)}/analysis/summary?state=${encodeURIComponent($("formula-state").value)}`, {cache: "no-store"});
+          if (!response.ok) return;
+          const next = await response.json();
+          summary = next;
+          renderCactus();
+          if (next.query_cactus_status === "building") maybeUpgradeCactus();
+        } catch (error) {
+          maybeUpgradeCactus();
+        }
+      }, 2000);
+    }
+
     async function loadSummary() {
       const response = await fetch(`/api/runs/${encodeURIComponent(runId)}/analysis/summary?state=${encodeURIComponent($("formula-state").value)}`, {cache: "no-store"});
       if (!response.ok) throw new Error(await response.text());
@@ -589,6 +650,7 @@
       renderCactus();
       populateSolvers();
       await Promise.all([loadScatter(), loadFormulas()]);
+      maybeUpgradeCactus();
     }
 
     async function refresh() {

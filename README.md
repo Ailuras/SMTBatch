@@ -131,9 +131,14 @@ This branch scores incremental files (many `push` / `check-sat` / `pop` in one
 `(sat+unsat)/expected`. Check-sat summaries show sat/unsat/unknown/error/unreached.
 The formula list gives each solver a check-sat column (PO tag plus
 `sat+unsat/expected`) and a files column (file label plus runtime). The cactus
-plot counts solved check-sat answers (truncated files still contribute); switch it
-to files for the old last-answer curve. The scatter plot defaults to per-file
-coverage.
+plot credits each decided check-sat at the time it was answered (`events/`
+elapsed_ms) when those files exist, and clips GNU-timeout overshoot onto the
+file wall so truncated files still count. If a run has many event files, the
+query-time curve is built once, cached as `query_cactus.json`, and the first
+report view may briefly show the file-runtime fallback. Switch the cactus to
+files for the old last-answer curve. The scatter plot defaults to per-file
+coverage, colored by coverage difference, with point size from the expected
+check-sat count.
 
 `jobs.tsv` records `expected` (the number of `check-sat` / `check-sat-assuming`
 commands) when the queue is built, so pending files do not need to be re-parsed.

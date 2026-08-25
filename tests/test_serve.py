@@ -4,8 +4,10 @@ import argparse
 import csv
 import json
 import os
+import shutil
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -109,6 +111,7 @@ command = ["{binary}", "{input}"]
         self.manager = ExperimentManager(self.results, self.inputs, root)
 
     def tearDown(self) -> None:
+        self.manager._await_purges()
         self.temp.cleanup()
 
     def test_positive_float_rejects_non_finite_values(self) -> None:
@@ -308,6 +311,144 @@ command = ["{binary}", "{input}"]
             alpha["file_cactus"],
             [{"time": 2.0, "solved": 1}, {"time": 30.0, "solved": 1}],
         )
+
+    def test_cactus_clips_timeout_overshoot(self) -> None:
+        run_dir = self.results / "overshoot-cactus-run"
+        run_dir.mkdir()
+        formula = self.inputs / "overshoot.smt2"
+        formula.write_text("(check-sat)\n" * 10, encoding="utf-8")
+        (run_dir / "jobs.tsv").write_text(jobs_tsv([(1, "alpha", formula, 10)]), encoding="utf-8")
+        write_results(
+            run_dir / "results.tsv",
+            [
+                result_row(
+                    job_id=1,
+                    solver="alpha",
+                    file=formula,
+                    result="timeout",
+                    time="30.2",
+                    code="124",
+                    queries=5,
+                    sat=4,
+                    unsat=1,
+                    first="sat",
+                    last="unsat",
+                    expected=10,
+                    complete="no",
+                    file_status="partial",
+                    timeout=1,
+                    unreached=4,
+                )
+            ],
+        )
+        (run_dir / "progress.json").write_text(
+            json.dumps({"status": "complete", "updated_at": "2026-01-01T00:00:00+00:00", "total_jobs": 1, "completed_jobs": 1}),
+            encoding="utf-8",
+        )
+        (run_dir / "metadata.txt").write_text("solvers=alpha\ntimeout=30\njobs=1\nlog=all\n", encoding="utf-8")
+        summary = self.manager.report_summary("overshoot-cactus-run", "all")
+        alpha = summary["by_solver"]["alpha"]
+        self.assertEqual(alpha["query_solved"], 5)
+        self.assertEqual(alpha["cactus"], [{"time": 30.0, "solved": 5}])
+        self.assertEqual(summary["cactus_credit"], "file-runtime")
+
+    def test_cactus_credits_query_event_times(self) -> None:
+        run_dir = self.results / "event-cactus-run"
+        run_dir.mkdir()
+        formula = self.inputs / "timed.smt2"
+        formula.write_text("(check-sat)\n(check-sat)\n", encoding="utf-8")
+        (run_dir / "jobs.tsv").write_text(jobs_tsv([(1, "alpha", formula, 2)]), encoding="utf-8")
+        write_results(
+            run_dir / "results.tsv",
+            [
+                result_row(
+                    job_id=1,
+                    solver="alpha",
+                    file=formula,
+                    result="unsat",
+                    time="30.0",
+                    sat=0,
+                    unsat=2,
+                    first="unsat",
+                    last="unsat",
+                    expected=2,
+                )
+            ],
+        )
+        events = run_dir / "events"
+        events.mkdir()
+        (events / "job_0000001.alpha.tsv").write_text(
+            "ordinal\telapsed_ms\tdelta_ms\toutcome\tsource\n"
+            "1\t1000\t1000\tunsat\tsolver\n"
+            "2\t25000\t24000\tunsat\tsolver\n",
+            encoding="utf-8",
+        )
+        (run_dir / "progress.json").write_text(
+            json.dumps({"status": "complete", "updated_at": "2026-01-01T00:00:00+00:00", "total_jobs": 1, "completed_jobs": 1}),
+            encoding="utf-8",
+        )
+        (run_dir / "metadata.txt").write_text("solvers=alpha\ntimeout=30\njobs=1\nlog=all\n", encoding="utf-8")
+        summary = self.manager.report_summary("event-cactus-run", "all")
+        alpha = summary["by_solver"]["alpha"]
+        self.assertEqual(summary["cactus_credit"], "query-events")
+        self.assertEqual(summary["query_cactus_status"], "ready")
+        self.assertEqual(
+            alpha["cactus"],
+            [{"time": 1.0, "solved": 1}, {"time": 25.0, "solved": 2}, {"time": 30.0, "solved": 2}],
+        )
+        self.assertEqual(alpha["file_cactus"], [{"time": 30.0, "solved": 1}])
+
+    def test_scatter_clips_time_and_keeps_coverage_outliers(self) -> None:
+        from smtbatch.serve import _select_scatter_points
+
+        cloud = [
+            {
+                "left_coverage": 0.1,
+                "right_coverage": 0.1,
+                "left_solved": 1,
+                "right_solved": 1,
+                "left_status": "partial",
+                "right_status": "partial",
+            }
+        ] * 9000
+        cloud.append(
+            {
+                "left_coverage": 0.1,
+                "right_coverage": 0.9,
+                "left_solved": 1,
+                "right_solved": 9,
+                "left_status": "timeout",
+                "right_status": "partial",
+            }
+        )
+        selected, sampled = _select_scatter_points(cloud, limit=8000)
+        self.assertTrue(sampled)
+        self.assertLessEqual(len(selected), 8000)
+        self.assertGreater(len(selected), 1000)
+        self.assertTrue(any(point["right_coverage"] == 0.9 for point in selected))
+
+        run_dir = self.results / "scatter-clamp-run"
+        run_dir.mkdir()
+        formula = self.inputs / "clamp.smt2"
+        formula.write_text("(check-sat)\n", encoding="utf-8")
+        (run_dir / "jobs.tsv").write_text(jobs_tsv([(1, "alpha", formula, 1), (2, "beta", formula, 1)]), encoding="utf-8")
+        write_results(
+            run_dir / "results.tsv",
+            [
+                result_row(job_id=1, solver="alpha", file=formula, result="timeout", time="301.0", code="124", queries=1, sat=1, complete="no", file_status="partial", timeout=1),
+                result_row(job_id=2, solver="beta", file=formula, result="sat", time="12.0"),
+            ],
+        )
+        (run_dir / "progress.json").write_text(
+            json.dumps({"status": "complete", "updated_at": "2026-01-01T00:00:00+00:00", "total_jobs": 2, "completed_jobs": 2}),
+            encoding="utf-8",
+        )
+        (run_dir / "metadata.txt").write_text("solvers=alpha,beta\ntimeout=300\njobs=1\nlog=all\n", encoding="utf-8")
+        scatter = self.manager.report_scatter("scatter-clamp-run", "alpha", "beta", "all")
+        self.assertEqual(scatter["timeout"], 300.0)
+        self.assertEqual(scatter["points"][0]["x"], 300.0)
+        self.assertEqual(scatter["points"][0]["y"], 12.0)
+        self.assertEqual(scatter["points"][0]["expected"], 1)
 
     def test_report_summary_single_solver(self) -> None:
         run_dir = self.results / "single-solver-run"
@@ -706,10 +847,32 @@ command = ["{binary}", "{input}"]
         (sibling / "marker.txt").write_text("keep\n", encoding="utf-8")
 
         response = self.manager.delete_run("sample-run")
+        self.manager._await_purges()
 
         self.assertEqual(response, {"run_id": "sample-run", "status": "deleted"})
         self.assertFalse((self.results / "sample-run").exists())
+        self.assertFalse(any(path.name.startswith(".deleting-") for path in self.results.iterdir()))
         self.assertTrue((sibling / "marker.txt").is_file())
+
+    def test_delete_run_hides_history_before_files_finish_removing(self) -> None:
+        released = threading.Event()
+        started = threading.Event()
+        original = shutil.rmtree
+
+        def blocked_rmtree(path, **kwargs):
+            started.set()
+            self.assertTrue(released.wait(timeout=2))
+            original(path, **kwargs)
+
+        with mock.patch("smtbatch.serve.shutil.rmtree", blocked_rmtree):
+            response = self.manager.delete_run("sample-run")
+            self.assertEqual(response["status"], "deleted")
+            self.assertFalse((self.results / "sample-run").exists())
+            self.assertFalse(any(run["run_id"] == "sample-run" for run in self.manager.runs()))
+            self.assertTrue(started.wait(timeout=2))
+            released.set()
+        self.manager._await_purges()
+        self.assertFalse(any(path.name.startswith(".deleting-") for path in self.results.iterdir()))
 
     def test_delete_run_rejects_active_experiment(self) -> None:
         run_dir = self._interrupted_run("active-run")
