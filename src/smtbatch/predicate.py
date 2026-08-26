@@ -6,6 +6,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -29,6 +30,59 @@ _CORRELATION_ENV = {
 }
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+# GNU timeout(1) exits 124. Python may instead see the wrapper die under
+# --kill-after as SIGKILL/SIGTERM. SIGABRT is a timeout only when ForteSMT
+# printed its SIGALRM marker; a plain assertion abort is still a crash.
+_GNU_TIMEOUT_CODE = 124
+_KILL_SIGNAL_CODES = frozenset(
+    {
+        -signal.SIGKILL,
+        -signal.SIGTERM,
+        128 + signal.SIGKILL,
+        128 + signal.SIGTERM,
+    }
+)
+_ABORT_SIGNAL_CODES = frozenset({-signal.SIGABRT, 128 + signal.SIGABRT})
+_INTERNAL_TIMEOUT_MARKER = b"ForteSMT interrupted by timeout."
+_LIMIT_TOLERANCE_SECONDS = 0.1
+
+
+def _as_bytes(blob: bytes | str) -> bytes:
+    return blob if isinstance(blob, bytes) else blob.encode("utf-8", errors="replace")
+
+
+def _has_marker_line(blob: bytes | str, marker: bytes) -> bool:
+    return any(line.strip() == marker for line in _as_bytes(blob).splitlines())
+
+
+def _near_limit(duration_sec: float, timeout: float) -> bool:
+    return (
+        math.isfinite(duration_sec)
+        and math.isfinite(timeout)
+        and timeout > 0
+        and duration_sec + _LIMIT_TOLERANCE_SECONDS >= timeout
+    )
+
+
+def is_timeout_exit(
+    code: int | None,
+    duration_sec: float = 0.0,
+    timeout: float = 0.0,
+    stdout: bytes | str = b"",
+    stderr: bytes | str = b"",
+) -> bool:
+    """True when the exit carries evidence that the solver time limit fired."""
+    if code is None:
+        return False
+    if code in _ABORT_SIGNAL_CODES:
+        return _has_marker_line(stdout, _INTERNAL_TIMEOUT_MARKER) or _has_marker_line(
+            stderr, _INTERNAL_TIMEOUT_MARKER
+        )
+    if code == _GNU_TIMEOUT_CODE:
+        return True
+    if code in _KILL_SIGNAL_CODES:
+        return _near_limit(duration_sec, timeout)
+    return False
 
 
 def _json_line(value: object) -> str:
@@ -371,6 +425,15 @@ def main(argv: list[str] | None = None) -> int:
                     timeout=args.solver_timeout + 1.0
                 )
                 returncode = process.returncode
+                runtime_sec = time.monotonic() - started
+                if is_timeout_exit(
+                    returncode, runtime_sec, args.solver_timeout, stdout, stderr
+                ):
+                    # Same corpse as the wrapper-enforced path, so a GNU 124
+                    # and a --kill-after SIGKILL still match as one timeout.
+                    timed_out = True
+                    returncode = _GNU_TIMEOUT_CODE
+                    error = "predicate solver timeout"
             except subprocess.TimeoutExpired:
                 timed_out = True
                 try:
@@ -378,7 +441,7 @@ def main(argv: list[str] | None = None) -> int:
                 except ProcessLookupError:
                     pass
                 stdout, stderr = process.communicate()
-                returncode = 124
+                returncode = _GNU_TIMEOUT_CODE
                 error = "predicate wrapper timeout"
         finally:
             for signum, handler in previous_handlers.items():

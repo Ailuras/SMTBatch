@@ -403,6 +403,152 @@ class PlanTests(ReductionFixture):
         self.assertTrue(finishes[0]["killed"])
         self.assertFalse(finishes[0]["timed_out"])
 
+    def test_gnu_timeout_exit_is_solver_timeout(self) -> None:
+        solver = self.root / "exit-124.py"
+        solver.write_text("import sys\nraise SystemExit(124)\n", encoding="utf-8")
+        journal = self.root / "gnu-timeout.jsonl"
+        candidate = self.root / "benchmarks" / "case.smt2"
+        code = predicate.main(
+            [
+                "--log", str(journal), "--phase", "reducer",
+                "--solver-timeout", "2", "--ignore-stdout", "--ignore-stderr",
+                "--", sys.executable, str(solver), str(candidate),
+            ]
+        )
+        finish = next(
+            json.loads(line)
+            for line in journal.read_text().splitlines()
+            if json.loads(line).get("event") == "finish"
+        )
+        self.assertEqual(code, 124)
+        self.assertTrue(finish["timed_out"])
+        self.assertEqual(finish["returncode"], 124)
+        self.assertEqual(finish["error"], "predicate solver timeout")
+
+    def test_sigkill_at_solver_limit_is_timeout(self) -> None:
+        solver = self.root / "kill-at-limit.py"
+        solver.write_text(
+            "import os, signal, sys, time\n"
+            "time.sleep(float(sys.argv[-1]))\n"
+            "os.kill(os.getpid(), signal.SIGKILL)\n",
+            encoding="utf-8",
+        )
+        journal = self.root / "kill-at-limit.jsonl"
+        candidate = self.root / "benchmarks" / "case.smt2"
+        code = predicate.main(
+            [
+                "--log", str(journal), "--phase", "reducer",
+                "--solver-timeout", "0.4", "--ignore-stdout", "--ignore-stderr",
+                "--", sys.executable, str(solver), str(candidate),
+            ]
+        )
+        finish = next(
+            json.loads(line)
+            for line in journal.read_text().splitlines()
+            if json.loads(line).get("event") == "finish"
+        )
+        self.assertEqual(code, 124)
+        self.assertTrue(finish["timed_out"])
+        self.assertEqual(finish["returncode"], 124)
+
+    def test_early_sigkill_is_not_timeout(self) -> None:
+        solver = self.root / "kill-early.py"
+        solver.write_text(
+            "import os, signal\nos.kill(os.getpid(), signal.SIGKILL)\n",
+            encoding="utf-8",
+        )
+        journal = self.root / "kill-early.jsonl"
+        candidate = self.root / "benchmarks" / "case.smt2"
+        code = predicate.main(
+            [
+                "--log", str(journal), "--phase", "reducer",
+                "--solver-timeout", "2", "--ignore-stdout", "--ignore-stderr",
+                "--", sys.executable, str(solver), str(candidate),
+            ]
+        )
+        finish = next(
+            json.loads(line)
+            for line in journal.read_text().splitlines()
+            if json.loads(line).get("event") == "finish"
+        )
+        self.assertNotEqual(code, 124)
+        self.assertFalse(finish["timed_out"])
+        self.assertIn(finish["returncode"], {-signal.SIGKILL, 128 + signal.SIGKILL})
+
+    def test_abort_with_internal_marker_is_timeout(self) -> None:
+        solver = self.root / "abort-timeout.py"
+        solver.write_text(
+            "import os, signal, sys\n"
+            "sys.stdout.write('ForteSMT interrupted by timeout.\\n')\n"
+            "sys.stdout.flush()\n"
+            "os.kill(os.getpid(), signal.SIGABRT)\n",
+            encoding="utf-8",
+        )
+        journal = self.root / "abort-timeout.jsonl"
+        candidate = self.root / "benchmarks" / "case.smt2"
+        code = predicate.main(
+            [
+                "--log", str(journal), "--phase", "reducer",
+                "--solver-timeout", "2", "--ignore-stdout", "--ignore-stderr",
+                "--", sys.executable, str(solver), str(candidate),
+            ]
+        )
+        finish = next(
+            json.loads(line)
+            for line in journal.read_text().splitlines()
+            if json.loads(line).get("event") == "finish"
+        )
+        self.assertEqual(code, 124)
+        self.assertTrue(finish["timed_out"])
+        self.assertEqual(finish["returncode"], 124)
+
+    def test_abort_without_marker_is_not_timeout(self) -> None:
+        solver = self.root / "abort-crash.py"
+        solver.write_text(
+            "import os, signal, sys\n"
+            "sys.stdout.write('Fatal assertion\\n')\n"
+            "sys.stdout.flush()\n"
+            "os.kill(os.getpid(), signal.SIGABRT)\n",
+            encoding="utf-8",
+        )
+        journal = self.root / "abort-crash.jsonl"
+        candidate = self.root / "benchmarks" / "case.smt2"
+        code = predicate.main(
+            [
+                "--log", str(journal), "--phase", "reducer",
+                "--solver-timeout", "2", "--ignore-stdout", "--ignore-stderr",
+                "--", sys.executable, str(solver), str(candidate),
+            ]
+        )
+        finish = next(
+            json.loads(line)
+            for line in journal.read_text().splitlines()
+            if json.loads(line).get("event") == "finish"
+        )
+        self.assertFalse(finish["timed_out"])
+        self.assertIn(finish["returncode"], {-signal.SIGABRT, 128 + signal.SIGABRT})
+        self.assertEqual(code, finish["returncode"])
+
+    def test_gnu_timeout_exit_marks_reducer_timed_out(self) -> None:
+        result = reduce._run_command(
+            [sys.executable, "-c", "raise SystemExit(124)"],
+            cwd=self.root,
+            timeout=2.0,
+            grace=0.05,
+        )
+        self.assertTrue(result["timed_out"])
+        self.assertEqual(result["returncode"], 124)
+
+    def test_early_sigkill_does_not_mark_reducer_timed_out(self) -> None:
+        result = reduce._run_command(
+            [sys.executable, "-c", "import os, signal; os.kill(os.getpid(), signal.SIGKILL)"],
+            cwd=self.root,
+            timeout=2.0,
+            grace=0.05,
+        )
+        self.assertFalse(result["timed_out"])
+        self.assertIn(result["returncode"], {-signal.SIGKILL, 128 + signal.SIGKILL})
+
     def test_sealed_trajectory_uses_final_replay_quality(self) -> None:
         output = b"(check-sat)\n"
         output_sha256 = hashlib.sha256(output).hexdigest()

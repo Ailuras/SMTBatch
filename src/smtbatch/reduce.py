@@ -32,6 +32,7 @@ from typing import Iterable, Mapping, Sequence
 
 from .config import Config, ReducerSpec, load_config, validate_target_branch
 from . import provenance
+from .predicate import is_timeout_exit
 
 
 SCHEMA_VERSION = 3
@@ -902,10 +903,13 @@ def _run_command(
     try:
         try:
             stdout, stderr = process.communicate(timeout=timeout)
+            wall_sec = time.monotonic() - started
             return {
                 "returncode": process.returncode,
-                "timed_out": False,
-                "wall_sec": time.monotonic() - started,
+                "timed_out": is_timeout_exit(
+                    process.returncode, wall_sec, timeout, stdout, stderr
+                ),
+                "wall_sec": wall_sec,
                 "cleanup_wall_sec": 0.0,
                 "stdout": stdout,
                 "stderr": stderr,
