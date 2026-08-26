@@ -774,7 +774,8 @@ class ExperimentManager:
         synchronous ``rmtree`` of ``logs/`` can take minutes on a 30k-file run,
         which used to freeze the confirm dialog. Renaming to a dotted trash
         path first removes the card; the slow unlink happens after the HTTP
-        response.
+        response. The dashboard launcher log sits beside the run directory and
+        is removed with the experiment.
         """
         run_dir = self._run_dir(run_id)
         if not run_dir.is_dir():
@@ -795,6 +796,10 @@ class ExperimentManager:
             self._metrics_cache.pop(run_id, None)
         _RUN_CACHE.pop(run_dir / "progress.json", None)
         _RUN_CACHE.pop(trash / "progress.json", None)
+        try:
+            (self.results_root / f".{run_id}.controller.log").unlink(missing_ok=True)
+        except OSError:
+            pass
         self._schedule_purge(trash)
         return {"run_id": run_id, "status": "deleted"}
 

@@ -525,12 +525,18 @@ command = ["{binary}", "{input}"]
         sibling = self.results / "keep-run"
         sibling.mkdir()
         (sibling / "marker.txt").write_text("keep\n", encoding="utf-8")
+        launcher = self.results / ".sample-run.controller.log"
+        keeper = self.results / ".keep-run.controller.log"
+        launcher.write_text("sample launcher\n", encoding="utf-8")
+        keeper.write_text("keep launcher\n", encoding="utf-8")
 
         response = self.manager.delete_run("sample-run")
 
         self.assertEqual(response, {"run_id": "sample-run", "status": "deleted"})
         self.assertFalse((self.results / "sample-run").exists())
+        self.assertFalse(launcher.exists())
         self.assertTrue((sibling / "marker.txt").is_file())
+        self.assertEqual(keeper.read_text(encoding="utf-8"), "keep launcher\n")
 
     def test_delete_run_hides_history_before_files_finish_removing(self) -> None:
         started = threading.Event()
@@ -542,10 +548,13 @@ command = ["{binary}", "{input}"]
             self.assertTrue(release.wait(2))
             return original(path, **kwargs)
 
+        launcher = self.results / ".sample-run.controller.log"
+        launcher.write_text("sample launcher\n", encoding="utf-8")
         with mock.patch("smtbatch.serve.shutil.rmtree", blocked_rmtree):
             response = self.manager.delete_run("sample-run")
             self.assertEqual(response["status"], "deleted")
             self.assertFalse((self.results / "sample-run").exists())
+            self.assertFalse(launcher.exists())
             self.assertTrue(started.wait(2))
             self.assertTrue(any(path.name.startswith(".deleting-") for path in self.results.iterdir()))
             release.set()
