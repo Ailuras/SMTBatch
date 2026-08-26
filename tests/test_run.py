@@ -16,7 +16,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from smtbatch.config import load_config, validate_target_branch
+from smtbatch.config import SolverSpec, load_config, validate_target_branch
 
 from smtbatch.run import (
     ProgressTracker,
@@ -37,7 +37,7 @@ from smtbatch.run import (
     write_progress_snapshot,
     _main_locked,
 )
-from smtbatch.task import RESULT_FIELDS, JobSpec, load_jobs
+from smtbatch.task import RESULT_FIELDS, JobSpec, is_timeout_exit, load_jobs
 from tests.tsvutil import jobs_tsv, result_row, write_results
 
 
@@ -641,6 +641,44 @@ class ResumeLogicTests(unittest.TestCase):
         self.assertEqual(payload["phase"], "count")
         self.assertEqual(snapshot["counted_files"], 2)
         self.assertFalse((output / "jobs.tsv").exists())
+
+
+class TimeoutClassificationTests(unittest.TestCase):
+    def test_gnu_timeout_124_is_always_timeout(self) -> None:
+        self.assertTrue(is_timeout_exit(124, duration_sec=10.0, timeout=10.0))
+        self.assertTrue(is_timeout_exit(124, duration_sec=1.0, timeout=10.0))
+
+    def test_kill_after_sigkill_at_limit_is_timeout(self) -> None:
+        self.assertTrue(is_timeout_exit(-9, 302.5, 300.0, "ForteSMT interrupted by SIGTERM.\n"))
+        self.assertTrue(is_timeout_exit(-15, 301.0, 300.0))
+        self.assertFalse(is_timeout_exit(-9, 5.0, 300.0))
+        self.assertFalse(is_timeout_exit(137, 1.0, 10.0))
+        self.assertTrue(is_timeout_exit(137, 10.0, 10.0))
+
+    def test_abort_requires_the_internal_timeout_marker(self) -> None:
+        self.assertTrue(is_timeout_exit(-6, 300.2, 300.0, "ForteSMT interrupted by timeout.\n"))
+        self.assertTrue(is_timeout_exit(134, 0.2, 300.0, "ForteSMT interrupted by timeout.\n"))
+        self.assertFalse(is_timeout_exit(-6, 300.2, 300.0, ""))
+        self.assertFalse(is_timeout_exit(134, 300.2, 300.0, "Fatal assertion"))
+
+
+class WatchdogPlaceholderTests(unittest.TestCase):
+    def test_timeout_watchdog_is_ten_seconds_after_the_job_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            binary = root / "alpha"
+            binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            binary.chmod(0o755)
+            spec = SolverSpec(
+                "alpha",
+                binary,
+                ("{timeout}", "{timeout_ms}", "{timeout_watchdog}", "{binary}", "{input}"),
+                ("--version",),
+            )
+            rendered = spec.render(root / "f.smt2", 1200)
+            self.assertEqual(rendered[0], "1200")
+            self.assertEqual(rendered[1], "1200000")
+            self.assertEqual(rendered[2], "1210")
 
 
 if __name__ == "__main__":

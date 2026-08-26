@@ -51,10 +51,12 @@ from .task import (
     incremental_from_row,
     incremental_stats,
     incremental_tsv_fields,
+    is_timeout_exit,
     load_jobs,
     optional_nonneg_int,
     outcome_from_line,
     parse_outcomes,
+    _read_timeout_evidence,
     results_header_ok,
     summarize_performance,
     write_jobs,
@@ -830,7 +832,14 @@ def run_job(
             reader.join()
             if consume_error:
                 raise consume_error[0]
-            if timed_out or code in {124, 137, 143}:
+            output = tail.decode("utf-8", errors="replace")
+            duration_sec = time.perf_counter() - start
+            evidence = output
+            if log_path is not None:
+                marker = _read_timeout_evidence(str(log_path))
+                if marker and marker not in evidence:
+                    evidence = marker + "\n" + evidence
+            if timed_out or is_timeout_exit(code, duration_sec, timeout, evidence):
                 result = "timeout"
             elif code == 0:
                 result = outcomes[-1] if outcomes else "error"

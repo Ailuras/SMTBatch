@@ -39,6 +39,7 @@ from .task import (
     classify_file_outcome,
     incremental_from_row,
     load_jobs,
+    recorded_result_row,
     result_label,
     results_header_ok,
 )
@@ -899,6 +900,13 @@ class ExperimentManager:
         except (OSError, ValueError) as exc:
             raise ValueError(f"unable to read experiment queue: {exc}") from None
 
+        try:
+            timeout = float(_metadata(run_dir / "metadata.txt").get("timeout") or "")
+        except ValueError:
+            timeout = 0.0
+        if not math.isfinite(timeout) or timeout <= 0:
+            timeout = 0.0
+
         results: dict[int, dict[str, object]] = {}
         if results_path.is_file():
             try:
@@ -910,7 +918,7 @@ class ExperimentManager:
                         job_id = int(row.get("job_id") or "")
                         output_path = (row.get("output_path") or "").strip()
                         record: dict[str, object] = {
-                            "result": row.get("result") or "error",
+                            "result": recorded_result_row(row, timeout),
                             "time": float(row.get("time") or ""),
                             "log_url": _data_url(output_path, self.results_root),
                             **incremental_from_row(row),
