@@ -174,6 +174,13 @@ class _MetricsState:
         }
 
 
+def _clamp_time(value: float, limit: float) -> float:
+    """Clip a runtime onto ``[0, limit]`` so GNU-timeout overshoot still counts."""
+    if not math.isfinite(value) or value < 0:
+        return 0.0
+    return limit if value > limit else value
+
+
 class ExperimentManager:
     """Validate local UI requests and launch the regular batch CLI without a shell."""
 
@@ -193,6 +200,8 @@ class ExperimentManager:
         self._smt2_lock = threading.Lock()
         self._metrics_lock = threading.Lock()
         self._metrics_cache: dict[str, _MetricsState] = {}
+        self._purge_lock = threading.Lock()
+        self._purge_threads: list[threading.Thread] = []
 
     def _solver_config(self) -> Config:
         """Return the current project config, reloading it when TOML changes."""
@@ -759,23 +768,56 @@ class ExperimentManager:
         return {"run_id": run_id, "status": "interrupting"}
 
     def delete_run(self, run_id: str) -> dict[str, object]:
-        """Delete one experiment directory after confirming that it is not active."""
+        """Hide one experiment immediately, then purge its files in the background.
+
+        History listing only looks at directories with ``progress.json``. A
+        synchronous ``rmtree`` of ``logs/`` can take minutes on a 30k-file run,
+        which used to freeze the confirm dialog. Renaming to a dotted trash
+        path first removes the card; the slow unlink happens after the HTTP
+        response.
+        """
         run_dir = self._run_dir(run_id)
         if not run_dir.is_dir():
             raise ValueError("experiment not found")
         if self._run_is_live(run_id):
             raise ValueError("experiment is still running; cancel it before deleting")
 
+        trash = self._trash_path(run_id)
         try:
-            shutil.rmtree(run_dir)
+            run_dir.rename(trash)
         except FileNotFoundError:
             raise ValueError("experiment not found") from None
+        except OSError as exc:
+            raise OSError(f"unable to move experiment out of history: {exc}") from exc
 
         self._progress_cache.pop(run_id, None)
         with self._metrics_lock:
             self._metrics_cache.pop(run_id, None)
         _RUN_CACHE.pop(run_dir / "progress.json", None)
+        _RUN_CACHE.pop(trash / "progress.json", None)
+        self._schedule_purge(trash)
         return {"run_id": run_id, "status": "deleted"}
+
+    def _trash_path(self, run_id: str) -> Path:
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", run_id).strip("._") or "run"
+        return self.results_root / f".deleting-{safe}-{time.time_ns()}"
+
+    def _schedule_purge(self, path: Path) -> None:
+        thread = threading.Thread(target=_rmtree_force, args=(path,), name=f"purge-{path.name}", daemon=True)
+        with self._purge_lock:
+            self._purge_threads = [item for item in self._purge_threads if item.is_alive()]
+            self._purge_threads.append(thread)
+        thread.start()
+
+    def _await_purges(self, timeout: float = 5.0) -> None:
+        deadline = time.monotonic() + timeout
+        with self._purge_lock:
+            threads = list(self._purge_threads)
+        for thread in threads:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            thread.join(remaining)
 
     def resume(self, run_id: str, request: object) -> dict[str, object]:
         """Relaunch an interrupted or failed run, rerunning only its missing jobs."""
@@ -1062,13 +1104,11 @@ class ExperimentManager:
             summary["avg_solved_seconds"] = round(solved_seconds / solved_count, 3) if solved_count else None
             summary["avg_sat_seconds"] = round(summary["sat_seconds"] / sat_count, 3) if sat_count else None
             summary["avg_unsat_seconds"] = round(summary["unsat_seconds"] / unsat_count, 3) if unsat_count else None
-            solved_times = sorted(solved_times_by_solver[solver])
+            solved_times = sorted(_clamp_time(duration, timeout) for duration in solved_times_by_solver[solver])
             limit = timeout
             cactus: list[dict[str, float]] = []
             seen = 0
             for duration, group in itertools.groupby(solved_times):
-                if duration > limit:
-                    break
                 seen += sum(1 for _ in group)
                 cactus.append({"time": round(duration, 3), "solved": seen})
             if not cactus or cactus[-1]["time"] < limit:
@@ -1636,6 +1676,24 @@ def _read_run_pid(path: Path) -> int | None:
     if " run " not in f" {completed.stdout} ":
         return None
     return pid
+
+
+def _rmtree_force(path: Path) -> None:
+    """Best-effort recursive delete; chmod and retry when a file is not writable."""
+
+    def onerror(func: Any, err_path: str, _exc_info: object) -> None:
+        try:
+            os.chmod(err_path, 0o700)
+            func(err_path)
+        except OSError:
+            return
+
+    try:
+        shutil.rmtree(path, onerror=onerror)
+    except FileNotFoundError:
+        return
+    except OSError:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def _run_lock_held(path: Path) -> bool:

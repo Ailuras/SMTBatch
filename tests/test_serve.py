@@ -4,7 +4,9 @@ import argparse
 import csv
 import json
 import os
+import shutil
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -68,6 +70,7 @@ command = ["{binary}", "{input}"]
         self.manager = ExperimentManager(self.results, self.inputs, root)
 
     def tearDown(self) -> None:
+        self.manager._await_purges()
         self.temp.cleanup()
 
     def test_positive_float_rejects_non_finite_values(self) -> None:
@@ -140,6 +143,36 @@ command = ["{binary}", "{input}"]
         self.assertEqual(beta["solved"], 1)
         self.assertEqual(beta["unique_solved"], 0)
         self.assertEqual(beta["avg_solved_seconds"], 15.0)
+
+    def test_cactus_counts_watchdog_overshoot_at_the_time_limit(self) -> None:
+        run_dir = self.results / "overshoot-run"
+        run_dir.mkdir()
+        formula = self.inputs / "overshoot.smt2"
+        formula.write_text("(check-sat)\n", encoding="utf-8")
+        (run_dir / "jobs.tsv").write_text(f"job_id\tsolver\tfile\n1\talpha\t{formula}\n", encoding="utf-8")
+        (run_dir / "results.tsv").write_text(
+            "job_id\tsolver\tfile\tresult\ttime\tcode\toutput_path\n"
+            f"1\talpha\t{formula}\tsat\t30.4\t0\t\n",
+            encoding="utf-8",
+        )
+        (run_dir / "progress.json").write_text(
+            json.dumps(
+                {
+                    "status": "complete",
+                    "updated_at": "2026-01-01T00:00:00+00:00",
+                    "total_jobs": 1,
+                    "completed_jobs": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (run_dir / "metadata.txt").write_text("solvers=alpha\ntimeout=30\njobs=1\nlog=all\n", encoding="utf-8")
+        summary = self.manager.report_summary("overshoot-run", "all")
+        self.assertEqual(summary["by_solver"]["alpha"]["solved"], 1)
+        self.assertEqual(
+            summary["by_solver"]["alpha"]["cactus"],
+            [{"time": 30.0, "solved": 1}],
+        )
 
     def test_report_summary_single_solver(self) -> None:
         run_dir = self.results / "single-solver-run"
@@ -498,6 +531,25 @@ command = ["{binary}", "{input}"]
         self.assertEqual(response, {"run_id": "sample-run", "status": "deleted"})
         self.assertFalse((self.results / "sample-run").exists())
         self.assertTrue((sibling / "marker.txt").is_file())
+
+    def test_delete_run_hides_history_before_files_finish_removing(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+        original = shutil.rmtree
+
+        def blocked_rmtree(path, **kwargs):
+            started.set()
+            self.assertTrue(release.wait(2))
+            return original(path, **kwargs)
+
+        with mock.patch("smtbatch.serve.shutil.rmtree", blocked_rmtree):
+            response = self.manager.delete_run("sample-run")
+            self.assertEqual(response["status"], "deleted")
+            self.assertFalse((self.results / "sample-run").exists())
+            self.assertTrue(started.wait(2))
+            self.assertTrue(any(path.name.startswith(".deleting-") for path in self.results.iterdir()))
+            release.set()
+        self.manager._await_purges()
 
     def test_delete_run_rejects_active_experiment(self) -> None:
         run_dir = self._interrupted_run("active-run")
