@@ -21,6 +21,8 @@ from smtbatch.config import SolverSpec, load_config, validate_target_branch
 from smtbatch.run import (
     ProgressTracker,
     JobResult,
+    RUN_CONTROL_PAUSED,
+    RUN_CONTROL_RUNNING,
     _RunLock,
     _count_check_sat_files,
     _load_existing_results,
@@ -35,6 +37,7 @@ from smtbatch.run import (
     solver_artifacts,
     solver_bundle_hash,
     write_progress_snapshot,
+    write_run_control,
     _main_locked,
 )
 from smtbatch.task import RESULT_FIELDS, JobSpec, is_timeout_exit, load_jobs
@@ -503,13 +506,22 @@ class ResumeLogicTests(unittest.TestCase):
         output = self.root / "results" / "cancel.tsv"
         jobs = [JobSpec(index, "alpha", self.formulas[index - 1]) for index in range(1, 4)]
 
+        started = threading.Event()
+
         def slow_result(_spec, job, _timeout, _outer_timeout, **_kwargs):
+            started.set()
+            time.sleep(0.15)
+            return JobResult(job, 0.15, "sat", 0, "sat\n")
             time.sleep(0.15)
             return JobResult(job, 0.15, "sat", 0, "sat\n")
 
-        timer = threading.Timer(0.03, lambda: os.kill(os.getpid(), signal.SIGINT))
+        def interrupt() -> None:
+            self.assertTrue(started.wait(2))
+            os.kill(os.getpid(), signal.SIGINT)
+
+        worker = threading.Thread(target=interrupt, daemon=True)
         with mock.patch.object(run_module, "run_job", side_effect=slow_result):
-            timer.start()
+            worker.start()
             try:
                 with self.assertRaises(KeyboardInterrupt):
                     run_queue(
@@ -524,10 +536,112 @@ class ResumeLogicTests(unittest.TestCase):
                         results_path=output,
                     )
             finally:
-                timer.cancel()
+                worker.join(1)
         with output.open("r", encoding="utf-8", newline="") as handle:
             rows = list(csv.DictReader(handle, delimiter="\t"))
         self.assertEqual(sorted(int(row["job_id"]) for row in rows), [1, 2])
+
+    def test_pause_control_stops_fill_and_keeps_in_flight(self) -> None:
+        import smtbatch.run as run_module
+
+        output = self.root / "results" / "pause-fill"
+        output.mkdir()
+        jobs = [JobSpec(index, "alpha", self.formulas[index - 1]) for index in range(1, 4)]
+        started = threading.Event()
+
+        def slow_result(_spec, job, _timeout, _outer_timeout, **_kwargs):
+            started.set()
+            time.sleep(0.15)
+            return JobResult(job, 0.15, "sat", 0, "sat\n")
+
+        def pause() -> None:
+            self.assertTrue(started.wait(2))
+            write_run_control(output, RUN_CONTROL_PAUSED)
+
+        worker = threading.Thread(target=pause, daemon=True)
+        with mock.patch.object(run_module, "run_job", side_effect=slow_result):
+            worker.start()
+            try:
+                with self.assertRaises(KeyboardInterrupt):
+                    run_queue(
+                        jobs,
+                        {"alpha": run_module.load_config().solvers["alpha"]},
+                        timeout=1,
+                        workers=2,
+                        logs_dir=self.root / "logs",
+                        log_policy="none",
+                        checkpoint_every=1,
+                        tracker=None,
+                        results_path=output / "results.tsv",
+                    )
+            finally:
+                worker.join(1)
+        with (output / "results.tsv").open("r", encoding="utf-8", newline="") as handle:
+            rows = list(csv.DictReader(handle, delimiter="\t"))
+        self.assertEqual(sorted(int(row["job_id"]) for row in rows), [1, 2])
+
+    def test_unpause_control_resumes_fill_in_same_process(self) -> None:
+        import smtbatch.run as run_module
+
+        output = self.root / "results" / "pause-resume"
+        output.mkdir()
+        jobs = [JobSpec(index, "alpha", self.formulas[index - 1]) for index in range(1, 4)]
+        started = threading.Event()
+
+        def slow_result(_spec, job, _timeout, _outer_timeout, **_kwargs):
+            started.set()
+            time.sleep(0.2)
+            return JobResult(job, 0.2, "sat", 0, "sat\n")
+
+        def pause_then_resume() -> None:
+            self.assertTrue(started.wait(2))
+            write_run_control(output, RUN_CONTROL_PAUSED)
+            time.sleep(0.05)
+            write_run_control(output, RUN_CONTROL_RUNNING)
+
+        worker = threading.Thread(target=pause_then_resume, daemon=True)
+        with mock.patch.object(run_module, "run_job", side_effect=slow_result):
+            worker.start()
+            try:
+                run_queue(
+                    jobs,
+                    {"alpha": run_module.load_config().solvers["alpha"]},
+                    timeout=1,
+                    workers=2,
+                    logs_dir=self.root / "logs",
+                    log_policy="none",
+                    checkpoint_every=1,
+                    tracker=None,
+                    results_path=output / "results.tsv",
+                )
+            finally:
+                worker.join(1)
+        with (output / "results.tsv").open("r", encoding="utf-8", newline="") as handle:
+            rows = list(csv.DictReader(handle, delimiter="\t"))
+        self.assertEqual(sorted(int(row["job_id"]) for row in rows), [1, 2, 3])
+
+    def test_pause_with_empty_inflight_exits_interrupted(self) -> None:
+        import smtbatch.run as run_module
+
+        output = self.root / "results" / "pause-empty.tsv"
+        jobs = [JobSpec(index, "alpha", self.formulas[index - 1]) for index in range(1, 4)]
+        with mock.patch.object(run_module, "read_run_control", return_value=RUN_CONTROL_PAUSED):
+            with mock.patch.object(run_module, "run_job", side_effect=AssertionError("paused queue must not submit jobs")):
+                with self.assertRaises(KeyboardInterrupt):
+                    run_queue(
+                        jobs,
+                        {"alpha": run_module.load_config().solvers["alpha"]},
+                        timeout=1,
+                        workers=2,
+                        logs_dir=self.root / "logs",
+                        log_policy="none",
+                        checkpoint_every=1,
+                        tracker=None,
+                        results_path=output,
+                    )
+        with output.open("r", encoding="utf-8", newline="") as handle:
+            rows = list(csv.DictReader(handle, delimiter="\t"))
+        self.assertEqual(rows, [])
 
     def test_run_queue_streams_solver_logs(self) -> None:
         results_path = self.root / "results" / "logged.tsv"

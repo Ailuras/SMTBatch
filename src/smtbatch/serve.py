@@ -33,7 +33,7 @@ from typing import Any, Mapping, Sequence
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from .config import Config, branch_status, find_config_path, load_config
-from .run import write_progress_snapshot
+from .run import RUN_CONTROL_PAUSED, RUN_CONTROL_RUNNING, write_progress_snapshot, write_run_control
 from .task import (
     classify_consistency,
     classify_file_outcome,
@@ -442,8 +442,8 @@ class ExperimentManager:
             run_id = str(run.get("run_id") or "")
             status = str(run.get("status") or "unknown")
             # Completed history is the common case; avoid pid/lock probes for it.
-            live = status in {"running", "starting", "cancelling", "interrupted", "failed"} and self._run_is_live(run_id)
-            if not live and status in {"running", "starting", "cancelling"}:
+            live = status in {"running", "starting", "cancelling", "paused", "interrupted", "failed"} and self._run_is_live(run_id)
+            if not live and status in {"running", "starting", "cancelling", "paused"}:
                 # The dashboard writes starting before the child creates .run.pid.
                 # Keep a fresh starting card visible across that handoff.
                 if status == "starting" and _recent_timestamp(run.get("updated_at") or run.get("started_at"), now):
@@ -673,29 +673,19 @@ class ExperimentManager:
         return {"run_id": run_id, "status": "starting", "warning": warning}
 
     def cancel_run(self, run_id: str) -> dict[str, object]:
-        """Gracefully interrupt a running experiment by signalling its batch process.
+        """Pause filling the worker queue; in-flight jobs keep running.
 
-        The run controller marks progress.json as interrupted and lets the small
-        number of in-flight solver jobs drain, preserving their results. The pid
-        comes from the ``.run.pid`` file written by the run process, so cancelling
-        works even after the dashboard itself restarted.
+        The controller polls ``.run.control``. Pause does not send SIGINT, so a
+        later resume can start filling the same process again. If every in-flight
+        job finishes while paused, the controller exits as interrupted.
         """
         run_dir = self._run_dir(run_id)
-        pid = _read_run_pid(run_dir / ".run.pid")
-        if pid is None:
-            # The run may still be initializing before it writes its pid file; fall back
-            # to the process handle this dashboard itself launched.
-            with self._process_lock:
-                process = self.processes.get(run_id)
-                if process is not None and process.poll() is None:
-                    pid = process.pid
-        if pid is None:
+        if not run_dir.is_dir():
+            raise ValueError("experiment not found")
+        if not self._run_is_live(run_id):
             raise ValueError("experiment has no active run process")
-        try:
-            os.kill(pid, signal.SIGINT)
-        except ProcessLookupError:
-            raise ValueError("run process has already exited") from None
-        return {"run_id": run_id, "status": "interrupting"}
+        write_run_control(run_dir, RUN_CONTROL_PAUSED)
+        return {"run_id": run_id, "status": "paused"}
 
     def delete_run(self, run_id: str) -> dict[str, object]:
         """Hide one experiment immediately, then purge its files in the background.
@@ -712,7 +702,7 @@ class ExperimentManager:
         if not run_dir.is_dir():
             raise ValueError("experiment not found")
         if self._run_is_live(run_id):
-            raise ValueError("experiment is still running; cancel it before deleting")
+            raise ValueError("experiment is still running; pause it and wait for in-flight jobs to finish before deleting")
 
         trash = self._trash_path(run_id)
         try:
@@ -797,12 +787,9 @@ class ExperimentManager:
         ]
         controller_log = self.results_root / f".{run_id}.controller.log"
         with self._process_lock:
-            if (
-                self._managed_process_alive(run_id)
-                or _read_run_pid(run_dir / ".run.pid") is not None
-                or _run_lock_held(run_dir / ".run.lock")
-            ):
-                raise ValueError("experiment is still running")
+            if self._run_is_live(run_id) or self._managed_process_alive(run_id):
+                write_run_control(run_dir, RUN_CONTROL_RUNNING)
+                return {"run_id": run_id, "status": "resuming"}
             try:
                 status = self._progress(run_id).get("status")
             except ValueError as exc:
