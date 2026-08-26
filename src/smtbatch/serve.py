@@ -705,7 +705,8 @@ class ExperimentManager:
         used to freeze the confirm dialog and could leave a folder behind after
         ``progress.json`` had already vanished from the card list.  Renaming to a
         dotted trash path first removes the card; the slow unlink happens after
-        the HTTP response.
+        the HTTP response.  The dashboard launcher log sits beside the run
+        directory and is removed with the experiment.
         """
         run_dir = self._run_dir(run_id)
         if not run_dir.is_dir():
@@ -724,6 +725,10 @@ class ExperimentManager:
         self._progress_cache.pop(run_id, None)
         _RUN_CACHE.pop(run_dir / "progress.json", None)
         _RUN_CACHE.pop(trash / "progress.json", None)
+        try:
+            (self.results_root / f".{run_id}.controller.log").unlink(missing_ok=True)
+        except OSError:
+            pass
         self._schedule_purge(trash)
         return {"run_id": run_id, "status": "deleted"}
 
