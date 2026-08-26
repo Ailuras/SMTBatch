@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from smtbatch.run import _RunLock
+from smtbatch.run import RUN_CONTROL_PAUSED, RUN_CONTROL_RUNNING, _RunLock, write_run_control
 from smtbatch.serve import ExperimentManager, scan_runs
 from smtbatch.task import RESULT_FIELDS
 
@@ -442,8 +442,11 @@ command = ["{binary}", "{input}"]
         try:
             run = next(item for item in self.manager.runs() if item["run_id"] == "locked-run")
             self.assertEqual(run["status"], "running")
-            with self.assertRaisesRegex(ValueError, "still running"):
-                self.manager.resume("locked-run", {"jobs": 2})
+            self.assertNotIn("locked-run", self.manager.processes)
+            response = self.manager.resume("locked-run", {"jobs": 2})
+            self.assertEqual(response["status"], "resuming")
+            self.assertNotIn("locked-run", self.manager.processes)
+            self.assertEqual((run_dir / ".run.control").read_text(encoding="utf-8").strip(), RUN_CONTROL_RUNNING)
         finally:
             lock.release()
 
@@ -508,14 +511,55 @@ command = ["{binary}", "{input}"]
         self.assertIn(str(run_dir), command)
         self.assertIn("--output", command)
 
-    def test_resume_rejects_duplicate_request_before_pid_file_exists(self) -> None:
-        self._interrupted_run("interrupted-run")
+    def test_resume_unpauses_managed_process_without_second_popen(self) -> None:
+        run_dir = self._interrupted_run("interrupted-run")
         with mock.patch("smtbatch.serve.subprocess.Popen") as popen:
             popen.return_value.poll.return_value = None
             self.manager.resume("interrupted-run", {"jobs": 2})
-            with self.assertRaisesRegex(ValueError, "still running"):
-                self.manager.resume("interrupted-run", {"jobs": 2})
+            response = self.manager.resume("interrupted-run", {"jobs": 2})
         self.assertEqual(popen.call_count, 1)
+        self.assertEqual(response["status"], "resuming")
+        self.assertEqual((run_dir / ".run.control").read_text(encoding="utf-8").strip(), RUN_CONTROL_RUNNING)
+
+    def test_cancel_writes_paused_control_without_signal(self) -> None:
+        run_dir = self._interrupted_run("live-run")
+        (run_dir / "progress.json").write_text(
+            json.dumps({"status": "running", "updated_at": "2026-01-01T00:00:00+00:00"}),
+            encoding="utf-8",
+        )
+        lock = _RunLock(run_dir)
+        lock.acquire()
+        try:
+            response = self.manager.cancel_run("live-run")
+            self.assertEqual(response, {"run_id": "live-run", "status": "paused"})
+            self.assertEqual((run_dir / ".run.control").read_text(encoding="utf-8").strip(), RUN_CONTROL_PAUSED)
+        finally:
+            lock.release()
+
+    def test_paused_live_run_stays_paused_in_history(self) -> None:
+        run_dir = self._interrupted_run("paused-run")
+        (run_dir / "progress.json").write_text(
+            json.dumps({"status": "paused", "updated_at": "2026-01-01T00:00:00+00:00"}),
+            encoding="utf-8",
+        )
+        lock = _RunLock(run_dir)
+        lock.acquire()
+        try:
+            run = next(item for item in self.manager.runs() if item["run_id"] == "paused-run")
+            self.assertEqual(run["status"], "paused")
+        finally:
+            lock.release()
+
+    def test_stale_paused_without_pid_is_interrupted(self) -> None:
+        self._interrupted_run("stale-paused")
+        run_dir = self.results / "stale-paused"
+        (run_dir / "progress.json").write_text(
+            json.dumps({"status": "paused", "updated_at": "2026-01-01T00:00:00+00:00"}),
+            encoding="utf-8",
+        )
+        run = next(item for item in self.manager.runs() if item["run_id"] == "stale-paused")
+        self.assertEqual(run["status"], "interrupted")
+        self.assertEqual(run["stale_status"], "paused")
 
     def test_cancel_requires_active_process(self) -> None:
         with self.assertRaisesRegex(ValueError, "no active run process"):

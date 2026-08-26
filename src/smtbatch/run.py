@@ -47,6 +47,33 @@ from .task import (
 
 RESULT_ORDER = ("sat", "unsat", "unknown", "timeout", "error")
 SOLVER_BUNDLE_SCHEMA = "linked-artifacts-v1"
+RUN_CONTROL_NAME = ".run.control"
+RUN_CONTROL_PAUSED = "paused"
+RUN_CONTROL_RUNNING = "running"
+
+
+def run_control_path(output_dir: Path) -> Path:
+    return output_dir / RUN_CONTROL_NAME
+
+
+def read_run_control(output_dir: Path) -> str:
+    """Return paused or running; missing or unknown files mean running."""
+    try:
+        value = run_control_path(output_dir).read_text(encoding="utf-8").strip().lower()
+    except OSError:
+        return RUN_CONTROL_RUNNING
+    return RUN_CONTROL_PAUSED if value == RUN_CONTROL_PAUSED else RUN_CONTROL_RUNNING
+
+
+def write_run_control(output_dir: Path, state: str) -> None:
+    path = run_control_path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(f"{state}\n", encoding="utf-8")
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 @contextmanager
@@ -911,40 +938,71 @@ def run_queue(
                         tracker.finish(item, log_path)
 
         interrupted = False
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="solver-job") as executor:
-            fill_workers(executor)
+        output_dir = results_path.parent
+        write_run_control(output_dir, RUN_CONTROL_RUNNING)
+        sigint_pause = False
+
+        def paused() -> bool:
+            return read_run_control(output_dir) == RUN_CONTROL_PAUSED
+
+        def apply_pause() -> None:
+            nonlocal sigint_pause
+            sigint_pause = False
+            write_run_control(output_dir, RUN_CONTROL_PAUSED)
             if tracker is not None:
+                tracker.status = "paused"
                 tracker.render(force=True)
-            try:
-                while in_flight:
-                    done, _ = concurrent.futures.wait(
-                        in_flight,
-                        timeout=0.25,
-                        return_when=concurrent.futures.FIRST_COMPLETED,
-                    )
-                    if not done:
+
+        def apply_running_status() -> None:
+            if tracker is not None and tracker.status != "running":
+                tracker.status = "running"
+                tracker.render(force=True)
+
+        def _on_sigint(_signum: int, _frame: object) -> None:
+            nonlocal sigint_pause
+            sigint_pause = True
+
+        previous_handler = signal.getsignal(signal.SIGINT)
+        try:
+            signal.signal(signal.SIGINT, _on_sigint)
+        except ValueError:
+            previous_handler = None
+
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="solver-job") as executor:
+                while True:
+                    try:
+                        if sigint_pause:
+                            apply_pause()
+                        if paused():
+                            if tracker is not None and tracker.status != "paused":
+                                tracker.status = "paused"
+                                tracker.render(force=True)
+                        else:
+                            apply_running_status()
+                            fill_workers(executor)
+                        if not in_flight:
+                            if paused():
+                                interrupted = True
+                            break
+                        done, _ = concurrent.futures.wait(
+                            in_flight,
+                            timeout=0.25,
+                            return_when=concurrent.futures.FIRST_COMPLETED,
+                        )
+                        if not done:
+                            if tracker is not None:
+                                tracker.render()
+                            continue
+                        persist_finished(done)
                         if tracker is not None:
                             tracker.render()
+                    except KeyboardInterrupt:
+                        apply_pause()
                         continue
-                    persist_finished(done)
-                    fill_workers(executor)
-                    if tracker is not None:
-                        tracker.render()
-            except KeyboardInterrupt:
-                interrupted = True
-                if tracker is not None:
-                    tracker.status = "cancelling"
-                    tracker.render(force=True)
-                # Do not submit any more work. Drain only the already-running jobs and
-                # persist their results before reporting the interruption.
-                while in_flight:
-                    done, _ = concurrent.futures.wait(
-                        in_flight,
-                        return_when=concurrent.futures.FIRST_COMPLETED,
-                    )
-                    persist_finished(done)
-                    if tracker is not None:
-                        tracker.render()
+        finally:
+            if previous_handler is not None:
+                signal.signal(signal.SIGINT, previous_handler)
         handle.flush()
         os.fsync(handle.fileno())
     if interrupted:
