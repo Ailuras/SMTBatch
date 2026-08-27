@@ -14,6 +14,7 @@ from pathlib import Path
 import random
 import re
 import secrets
+import shutil
 import signal
 import subprocess
 import sys
@@ -191,6 +192,8 @@ class ReductionManager:
         self._refresh_config()
         self.processes: dict[str, subprocess.Popen[str]] = {}
         self._process_lock = threading.RLock()
+        self._purge_lock = threading.Lock()
+        self._purge_threads: list[threading.Thread] = []
         self._catalog_cache: tuple[tuple[object, ...], dict[str, object]] | None = None
         self._trajectory_cache: OrderedDict[tuple[str, str], tuple[object, dict[str, object]]] = OrderedDict()
         self._trajectory_lock = threading.Lock()
@@ -860,6 +863,65 @@ class ReductionManager:
                     pass
         return {"run_id": run_id, **request}
 
+    def pause(self, run_id: str) -> dict[str, object]:
+        run_dir, _ = self._load_run(run_id)
+        if not self._run_live(run_id, run_dir):
+            raise ValueError("experiment has no active run process")
+        reduction.request_stop(run_dir, "pause")
+        return {"run_id": run_id, "status": "paused"}
+
+    def delete_run(self, run_id: str) -> dict[str, object]:
+        """Hide one run immediately, then purge its files in the background."""
+        run_dir = self._run_dir(run_id)
+        if not run_dir.is_dir():
+            raise ValueError("experiment not found")
+        if self._run_live(run_id, run_dir):
+            raise ValueError(
+                "experiment is still running; pause it and wait for in-flight jobs to finish before deleting"
+            )
+        trash = self._trash_path(run_id)
+        try:
+            run_dir.rename(trash)
+        except FileNotFoundError:
+            raise ValueError("experiment not found") from None
+        except OSError as exc:
+            raise OSError(f"unable to move experiment out of history: {exc}") from exc
+        self._drop_run_caches(run_id, run_dir, trash)
+        self._schedule_purge(trash)
+        return {"run_id": run_id, "status": "deleted"}
+
+    def _trash_path(self, run_id: str) -> Path:
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", run_id).strip("._") or "run"
+        return self.results_root / f".deleting-{safe}-{time.time_ns()}"
+
+    def _drop_run_caches(self, run_id: str, *directories: Path) -> None:
+        with self._cache_lock:
+            self._plan_cache.pop(run_id, None)
+            for directory in directories:
+                self._results_cache.pop(str(directory), None)
+        with self._trajectory_lock:
+            for key in [item for item in self._trajectory_cache if item[0] == run_id]:
+                self._trajectory_cache.pop(key, None)
+
+    def _schedule_purge(self, path: Path) -> None:
+        thread = threading.Thread(
+            target=_rmtree_force, args=(path,), name=f"purge-{path.name}", daemon=True,
+        )
+        with self._purge_lock:
+            self._purge_threads = [item for item in self._purge_threads if item.is_alive()]
+            self._purge_threads.append(thread)
+        thread.start()
+
+    def _await_purges(self, timeout: float = 5.0) -> None:
+        deadline = time.monotonic() + timeout
+        with self._purge_lock:
+            threads = list(self._purge_threads)
+        for thread in threads:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            thread.join(remaining)
+
     def resume(self, run_id: str, body: object) -> dict[str, object]:
         if body not in ({}, None):
             raise ValueError("resume does not accept execution parameters")
@@ -871,7 +933,8 @@ class ReductionManager:
         if state == "complete":
             raise ValueError("run is already complete")
         if self._run_live(run_id, run_dir):
-            raise ValueError("run is still active")
+            reduction.clear_control_for_resume(run_dir)
+            return {"run_id": run_id, "status": "resuming"}
         return self._launch(run_id, run_dir) | {"status": "resuming"}
 
     @staticmethod
@@ -1175,7 +1238,7 @@ class ReductionManager:
         progress = self._progress(run_dir)
         state = str(progress.get("status", "prepared"))
         live = self._run_live(run_id, run_dir)
-        if state in {"running", "starting", "stopping", "aborting"} and not live:
+        if state in {"running", "starting", "stopping", "aborting", "paused", "resuming"} and not live:
             stale_status = state
             state = "interrupted"
         else:
@@ -1299,7 +1362,11 @@ class ReductionManager:
         self.results_root.mkdir(parents=True, exist_ok=True)
         records = []
         for path in sorted(self.results_root.iterdir()):
-            if not path.is_dir() or path.is_symlink() or not (path / "plan.json").is_file():
+            if (
+                not path.is_dir() or path.is_symlink()
+                or path.name.startswith(".")
+                or not (path / "plan.json").is_file()
+            ):
                 continue
             run_id = path.name
             try:
@@ -1383,9 +1450,31 @@ def handler_factory(manager: ReductionManager):
                 if match:
                     _json_response(self, manager.stop(unquote(match.group(1)), body))
                     return
+                match = re.fullmatch(r"/api/runs/([^/]+)/pause", path)
+                if match:
+                    try:
+                        _json_response(self, manager.pause(unquote(match.group(1))))
+                    except ValueError as exc:
+                        self._error(exc, HTTPStatus.CONFLICT)
+                    return
                 match = re.fullmatch(r"/api/runs/([^/]+)/resume", path)
                 if match:
-                    _json_response(self, manager.resume(unquote(match.group(1)), body), HTTPStatus.ACCEPTED)
+                    try:
+                        _json_response(
+                            self, manager.resume(unquote(match.group(1)), body),
+                            HTTPStatus.ACCEPTED,
+                        )
+                    except ValueError as exc:
+                        self._error(exc, HTTPStatus.CONFLICT)
+                    return
+                match = re.fullmatch(r"/api/runs/([^/]+)/delete", path)
+                if match:
+                    try:
+                        _json_response(self, manager.delete_run(unquote(match.group(1))))
+                    except ValueError as exc:
+                        self._error(exc, HTTPStatus.CONFLICT)
+                    except OSError as exc:
+                        self._error(exc, HTTPStatus.INTERNAL_SERVER_ERROR)
                     return
                 raise ValueError("not found")
             except ValueError as exc:
@@ -1413,6 +1502,24 @@ def _read_pid(path: Path) -> int | None:
     except OSError:
         return None
     return pid
+
+
+def _rmtree_force(path: Path) -> None:
+    """Best-effort recursive delete; chmod and retry when a file is not writable."""
+
+    def onerror(func: object, err_path: str, _exc_info: object) -> None:
+        try:
+            os.chmod(err_path, 0o700)
+            func(err_path)  # type: ignore[operator]
+        except OSError:
+            return
+
+    try:
+        shutil.rmtree(path, onerror=onerror)
+    except FileNotFoundError:
+        return
+    except OSError:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def _stop_process(pid: int, timeout: float = 5.0) -> None:

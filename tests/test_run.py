@@ -6,6 +6,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -734,6 +735,84 @@ class PlanTests(ReductionFixture):
             original_handlers,
         )
 
+
+class PauseControlTests(ReductionFixture):
+    def test_control_mode_paused_is_not_immediate(self) -> None:
+        output = self.root / "results" / "control-mode"
+        reduce.prepare(self.study_path, output, reducers=["r1"])
+        request = reduce.request_stop(output, "pause")
+        self.assertEqual(request["mode"], "paused")
+        self.assertEqual(reduce._control_mode(output), "paused")
+        reduce._write_json(output / "control.json", {"mode": "unknown"})
+        self.assertEqual(reduce._control_mode(output), "immediate")
+
+    def test_pause_control_stops_fill_and_keeps_in_flight(self) -> None:
+        output = self.root / "results" / "pause-fill"
+        reduce.prepare(self.study_path, output, reducers=["r1"], outer_jobs=2)
+        started = threading.Event()
+        submitted: list[object] = []
+
+        def slow_job(_output, _plan, job):
+            submitted.append(job["job_id"])
+            started.set()
+            time.sleep(0.2)
+            return {"job_id": job["job_id"]}
+
+        def pause() -> None:
+            self.assertTrue(started.wait(2))
+            reduce.request_stop(output, "pause")
+
+        worker = threading.Thread(target=pause, daemon=True)
+        with mock.patch.object(reduce, "_execute_job", side_effect=slow_job):
+            worker.start()
+            try:
+                reduce.run(output)
+            finally:
+                worker.join(1)
+        self.assertEqual(len(submitted), 1)
+        self.assertEqual(reduce.status(output)["status"], "interrupted")
+
+    def test_unpause_control_resumes_fill_in_same_process(self) -> None:
+        output = self.root / "results" / "pause-resume"
+        reduce.prepare(self.study_path, output, reducers=["r1"], outer_jobs=2)
+        started = threading.Event()
+        submitted: list[object] = []
+
+        def slow_job(_output, _plan, job):
+            submitted.append(job["job_id"])
+            started.set()
+            time.sleep(0.2)
+            return {"job_id": job["job_id"]}
+
+        def pause_then_resume() -> None:
+            self.assertTrue(started.wait(2))
+            reduce.request_stop(output, "pause")
+            time.sleep(0.05)
+            reduce.clear_control_for_resume(output)
+
+        worker = threading.Thread(target=pause_then_resume, daemon=True)
+        with mock.patch.object(reduce, "_execute_job", side_effect=slow_job):
+            worker.start()
+            try:
+                reduce.run(output)
+            finally:
+                worker.join(1)
+        self.assertEqual(len(submitted), 2)
+        self.assertEqual(reduce.status(output)["status"], "complete")
+
+    def test_pause_with_empty_inflight_exits_interrupted(self) -> None:
+        output = self.root / "results" / "pause-empty"
+        reduce.prepare(self.study_path, output, reducers=["r1"], outer_jobs=2)
+        with mock.patch.object(reduce, "_control_mode", return_value="paused"):
+            with mock.patch.object(
+                reduce, "_execute_job",
+                side_effect=AssertionError("paused queue must not submit jobs"),
+            ):
+                reduce.run(output)
+        self.assertEqual(reduce.status(output)["status"], "interrupted")
+
+
+class PredicateContextTests(ReductionFixture):
     def test_predicate_rejects_partial_or_inconsistent_correlation(self) -> None:
         with self.assertRaisesRegex(ValueError, "requires SMTBATCH_PREDICATE_CALL_ID"):
             predicate._internal_context({"SMTBATCH_STRATEGY": "ddmin"})

@@ -121,7 +121,7 @@
     const seconds=v=>{const n=Number(v)||0;return n<60?n.toFixed(1)+'s':Math.floor(n/60)+'m '+String(Math.round(n%60)).padStart(2,'0')+'s'};
     const COLORS=['#47d7a1','#80bcff','#f0c96c','#d8a4ff','#ff827a','#66d9e8'];
     function bucketCounts(statuses){const b={completed:0,truncated:0,invalid:0};for(const[k,n]of Object.entries(statuses||{}))b[k in b?k:'invalid']+=Number(n)||0;return b}
-    function badge(s){const c=['complete','completed'].includes(s)?'ok':['running','starting','resuming','stopping','aborting'].includes(s)?'live':s==='truncated'?'warn':['failed','invalid','interrupted'].includes(s)?'bad':'';return `<span class="badge ${c}">${esc(s||'unknown')}</span>`}
+    function badge(s){const c=['complete','completed'].includes(s)?'ok':['running','starting','resuming','stopping','aborting','paused'].includes(s)?'live':s==='truncated'?'warn':['failed','invalid','interrupted'].includes(s)?'bad':'';return `<span class="badge ${c}">${esc(s||'unknown')}</span>`}
     async function api(url,opt){const r=await fetch(url,opt),d=await r.json();if(!r.ok)throw new Error(d.error||r.statusText);return d}
     function reducerColor(id){const ids=Object.keys((state.summary||{}).by_reducer||{id:0});const i=Math.max(0,ids.indexOf(id));return COLORS[i%COLORS.length]}
 

@@ -74,8 +74,11 @@ RESULT_FIELDS = [
     "output_bytes", "size_ratio", "trial_wall_sec", "cleanup_wall_sec",
     "predicate_calls", "accepted_moves", "attempt", "output",
 ]
-RUNNING_STATES = {"starting", "running", "stopping", "aborting", "resuming"}
+RUNNING_STATES = {"starting", "running", "stopping", "aborting", "resuming", "paused"}
 FINAL_STATES = {"complete", "interrupted", "failed"}
+CONTROL_MODES = {"paused", "graceful", "immediate"}
+STOP_REQUESTS = {"pause", "paused", "graceful", "immediate"}
+_CONTROL_RANK = {"": 0, "paused": 1, "graceful": 2, "immediate": 3}
 
 
 class ReductionError(RuntimeError):
@@ -1398,6 +1401,14 @@ def _control_path(output: Path) -> Path:
     return output / "control.json"
 
 
+def _stored_control_mode(mode: str) -> str:
+    if mode in {"pause", "paused"}:
+        return "paused"
+    if mode in {"graceful", "immediate"}:
+        return mode
+    raise ReductionError("stop mode must be pause, graceful, or immediate")
+
+
 def _control_mode(output: Path) -> str:
     path = _control_path(output)
     if not path.is_file():
@@ -1407,19 +1418,20 @@ def _control_mode(output: Path) -> str:
     except ReductionError:
         return "immediate"
     mode = value.get("mode")
-    return str(mode) if mode in {"graceful", "immediate"} else "immediate"
+    return str(mode) if mode in CONTROL_MODES else "immediate"
 
 
 def request_stop(output: Path, mode: str) -> dict[str, object]:
-    if mode not in {"graceful", "immediate"}:
-        raise ReductionError("stop mode must be graceful or immediate")
+    if mode not in STOP_REQUESTS:
+        raise ReductionError("stop mode must be pause, graceful, or immediate")
     output = output.expanduser().resolve()
     plan = load_plan(output)
     version, _ = _schema_identity(plan, "plan")
     if version != SCHEMA_VERSION:
         raise ReductionError("reduction-v2 plans are read-only and cannot be stopped")
+    requested = _stored_control_mode(mode)
     current = _control_mode(output)
-    effective = "immediate" if "immediate" in {current, mode} else "graceful"
+    effective = requested if _CONTROL_RANK[requested] >= _CONTROL_RANK.get(current, 0) else current
     request = {
         "schema_version": SCHEMA_VERSION,
         "mode": effective,
@@ -1431,7 +1443,7 @@ def request_stop(output: Path, mode: str) -> dict[str, object]:
     return request
 
 
-def _clear_control_for_resume(output: Path) -> None:
+def clear_control_for_resume(output: Path) -> None:
     path = _control_path(output)
     if path.is_file():
         try:
@@ -1726,7 +1738,7 @@ def _run_locked(output: Path, plan: Mapping[str, object]) -> list[dict[str, obje
     # still needs the concrete run directory identity.
     plan = dict(plan)
     plan["run_id"] = output.name
-    _clear_control_for_resume(output)
+    clear_control_for_resume(output)
     workers = int(plan["execution"]["outer_jobs"])
     _append_resume(
         output, "run_started", outer_jobs=workers,
@@ -1738,6 +1750,15 @@ def _run_locked(output: Path, plan: Mapping[str, object]) -> list[dict[str, obje
 
     def signal_stop(signum: int, _frame: object) -> None:
         request_stop(output, "graceful" if signum == signal.SIGINT else "immediate")
+
+    def progress_status(mode: str) -> str:
+        if stopped == "immediate":
+            return "aborting"
+        if stopped == "graceful":
+            return "stopping"
+        if mode == "paused":
+            return "paused"
+        return "running"
 
     previous_int = signal.getsignal(signal.SIGINT)
     previous_term = signal.getsignal(signal.SIGTERM)
@@ -1760,12 +1781,16 @@ def _run_locked(output: Path, plan: Mapping[str, object]) -> list[dict[str, obje
             ) as executor:
                 while active or not exhausted:
                     mode = _control_mode(output)
-                    if mode:
-                        stopped = mode
                     if mode == "immediate":
+                        stopped = "immediate"
                         _progress(output, plan, "aborting", list(active.values()))
                         PROCESS_REGISTRY.terminate_all(float(plan["limits"]["termination_grace_sec"]))
-                    while not stopped and len(active) < workers and not exhausted:
+                    elif mode == "graceful":
+                        stopped = "graceful"
+                    while (
+                        not stopped and mode != "paused"
+                        and len(active) < workers and not exhausted
+                    ):
                         try:
                             job = next(pending_iter)
                         except StopIteration:
@@ -1774,11 +1799,10 @@ def _run_locked(output: Path, plan: Mapping[str, object]) -> list[dict[str, obje
                         future = executor.submit(_execute_job, output, plan, job)
                         active[future] = job
                     if not active:
+                        if mode == "paused":
+                            stopped = "paused"
                         break
-                    _progress(
-                        output, plan, "stopping" if stopped == "graceful" else "running",
-                        list(active.values()),
-                    )
+                    _progress(output, plan, progress_status(mode), list(active.values()))
                     done, _ = concurrent.futures.wait(
                         active, timeout=0.2, return_when=concurrent.futures.FIRST_COMPLETED
                     )

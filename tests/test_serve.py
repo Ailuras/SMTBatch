@@ -318,6 +318,10 @@ class HttpTests(ReductionFixture):
         self.assertIn("FREEZE RUN PLAN", html)
         self.assertIn("run-card", html)
         self.assertIn("run-card-body", html)
+        self.assertIn('data-action="pause"', html)
+        self.assertIn('data-action="delete"', html)
+        self.assertIn("deleteDialog", html)
+        self.assertNotIn("Stop scheduling", html)
         self.assertIn("branch_error", html)
         self.assertIn("Launch gated", html)
         self.assertNotIn('<a class="run-card"', html)
@@ -351,6 +355,7 @@ class HttpTests(ReductionFixture):
         self.assertIn("case-layout", html)
         self.assertIn("trajSeq", html)
         self.assertIn("state.summary.live", html)
+        self.assertIn("'paused'", html)
         self.assertIn("Paired comparisons", html)
         self.assertIn("completed_avg_bytes", html)
         self.assertIn('data-sort="bytes"', html)
@@ -388,6 +393,87 @@ class HttpTests(ReductionFixture):
             with self.subTest(path=path):
                 status, _, _ = self.request("GET", path)
                 self.assertEqual(status, 404)
+
+    def test_http_delete_rejects_escaped_run_id(self) -> None:
+        status, _, data = self.request("POST", "/api/runs/..%2Foutside/delete")
+        self.assertEqual(status, 409)
+        self.assertIn("invalid run_id", json.loads(data)["error"])
+
+    def test_http_pause_rejects_idle_run(self) -> None:
+        reduce.prepare(
+            self.study_path, self.root / "results" / "idle-pause", reducers=["r1"],
+        )
+        status, _, data = self.request("POST", "/api/runs/idle-pause/pause")
+        self.assertEqual(status, 409)
+        self.assertIn("no active run process", json.loads(data)["error"])
+
+
+class DeleteAndPauseTests(ReductionFixture):
+    def setUp(self) -> None:
+        super().setUp()
+        self.manager = ReductionManager(self.root)
+
+    def _prepared_run(self, name: str) -> Path:
+        output = self.root / "results" / name
+        reduce.prepare(self.study_path, output, reducers=["r1"])
+        return output
+
+    def test_delete_hides_run_immediately_and_spares_siblings(self) -> None:
+        target = self._prepared_run("delete-me")
+        sibling = self._prepared_run("keep-me")
+        (sibling / "marker.txt").write_text("safe", encoding="utf-8")
+        blocked = threading.Event()
+        released = threading.Event()
+
+        def hang(_path: Path) -> None:
+            blocked.set()
+            released.wait(2)
+
+        with mock.patch("smtbatch.reduction_serve._rmtree_force", side_effect=hang):
+            result = self.manager.delete_run("delete-me")
+            self.assertEqual(result["status"], "deleted")
+            self.assertTrue(blocked.wait(1))
+            ids = {item["run_id"] for item in self.manager.runs()}
+            self.assertNotIn("delete-me", ids)
+            self.assertIn("keep-me", ids)
+            self.assertFalse(target.exists())
+            self.assertTrue(sibling.is_dir())
+            self.assertEqual((sibling / "marker.txt").read_text(encoding="utf-8"), "safe")
+            released.set()
+        self.manager._await_purges()
+
+    def test_delete_rejects_live_and_escaped_paths(self) -> None:
+        self._prepared_run("live-run")
+        with mock.patch.object(self.manager, "_run_live", return_value=True):
+            with self.assertRaisesRegex(ValueError, "still running"):
+                self.manager.delete_run("live-run")
+        with self.assertRaisesRegex(ValueError, "invalid run_id"):
+            self.manager.delete_run("../outside")
+
+    def test_pause_requires_live_process(self) -> None:
+        self._prepared_run("idle")
+        with self.assertRaisesRegex(ValueError, "no active run"):
+            self.manager.pause("idle")
+
+    def test_live_resume_clears_control_without_launch(self) -> None:
+        output = self._prepared_run("paused-live")
+        reduce.request_stop(output, "pause")
+        with (
+            mock.patch.object(self.manager, "_run_live", return_value=True),
+            mock.patch.object(self.manager, "_launch", side_effect=AssertionError("must not launch")),
+        ):
+            result = self.manager.resume("paused-live", {})
+        self.assertEqual(result["status"], "resuming")
+        self.assertFalse((output / "control.json").is_file())
+
+    def test_runs_skip_deleting_directories(self) -> None:
+        trash = self.root / "results" / ".deleting-hidden-1"
+        trash.mkdir(parents=True)
+        (trash / "plan.json").write_text("{}\n", encoding="utf-8")
+        self._prepared_run("visible")
+        ids = {item["run_id"] for item in self.manager.runs()}
+        self.assertIn("visible", ids)
+        self.assertNotIn(trash.name, ids)
 
 
 if __name__ == "__main__":

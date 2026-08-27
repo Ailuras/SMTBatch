@@ -202,6 +202,14 @@
       <div class="dialog-actions"><button id="confirmCancel" class="secondary-button" type="button">Cancel</button><button id="confirmGo" class="primary-button" type="button">Start run</button></div>
     </div>
   </dialog>
+  <dialog id="deleteDialog" class="reduction-dialog">
+    <div class="dialog-content">
+      <div class="eyebrow">DELETE RUN</div>
+      <h2 id="deleteTitle">Delete this run?</h2>
+      <p id="deleteText">The entire results folder will be permanently deleted. This cannot be undone.</p>
+      <div class="dialog-actions"><button id="deleteCancel" class="secondary-button" type="button">Cancel</button><button id="deleteConfirm" class="danger-button" type="button">Delete</button></div>
+    </div>
+  </dialog>
   <script>
     const $=function(id){return document.getElementById(id)};
     const state={config:null,catalog:null,runs:[],catalogInitialized:false,formInitialized:false,refreshing:false};
@@ -280,7 +288,7 @@
       state.catalogInitialized=true;
       updateSelectionSummary();
     }
-    function statusClass(status){return ['running','starting','resuming','stopping','aborting'].includes(status)?'live':(['complete','verified'].includes(status)?'ok':(['failed','interrupted','invalid'].includes(status)?'bad':''))}
+    function statusClass(status){return ['running','starting','resuming','stopping','aborting','paused'].includes(status)?'live':(['complete','verified'].includes(status)?'ok':(['failed','interrupted','invalid'].includes(status)?'bad':''))}
     function stat(label,value,title,wide){return '<span'+(wide?' style="grid-column:1/-1"':'')+(title?' title="'+esc(title)+'"':'')+'>'+esc(label)+' <b>'+value+'</b></span>'}
     function resultMetric(label,value,kind,title){return '<div class="result-metric'+(kind?' '+kind:'')+'"'+(title?' title="'+esc(title)+'"':'')+'><span>'+esc(label)+'</span><strong>'+value+'</strong></div>'}
     function perfMetric(label,value,title){return '<div class="performance-metric"'+(title?' title="'+esc(title)+'"':'')+'><span>'+esc(label)+'</span><strong>'+value+'</strong></div>'}
@@ -296,7 +304,13 @@
         const reducers=Object.values(run.by_reducer||{}).map(function(item){return item.label||item.id}).join(' · ')||'—';
         const created=run.created_at?new Date(run.created_at).toLocaleString():'unknown';
         const elapsed=run.elapsed_sec==null?'—':duration(run.elapsed_sec);
-        const buttons=live?'<button class="run-action" data-action="stop" data-mode="graceful" data-run-id="'+esc(run.run_id)+'">Stop scheduling</button><button class="run-action danger" data-action="stop" data-mode="immediate" data-run-id="'+esc(run.run_id)+'">Abort</button>':(['interrupted','failed'].includes(status)&&state.config&&state.config.can_launch?'<button class="run-action resume" data-action="resume" data-run-id="'+esc(run.run_id)+'">Resume</button>':'');
+        let buttons='';
+        if(live&&status!=='paused')buttons='<button class="run-action" data-action="pause" data-run-id="'+esc(run.run_id)+'">Pause</button><button class="run-action danger" data-action="stop" data-mode="immediate" data-run-id="'+esc(run.run_id)+'">Abort</button>';
+        else if(live)buttons='<button class="run-action resume" data-action="resume" data-run-id="'+esc(run.run_id)+'">Resume</button><button class="run-action danger" data-action="stop" data-mode="immediate" data-run-id="'+esc(run.run_id)+'">Abort</button>';
+        else{
+          if(['interrupted','failed'].includes(status)&&state.config&&state.config.can_launch)buttons+='<button class="run-action resume" data-action="resume" data-run-id="'+esc(run.run_id)+'">Resume</button>';
+          buttons+='<button class="run-action danger" data-action="delete" data-run-id="'+esc(run.run_id)+'">Delete</button>';
+        }
         return '<article class="run-card"><div class="run-execution"><a class="run-card-body" href="'+url+'">'+
           '<div class="run-row"><span class="run-name">'+esc(run.run_id)+'</span></div>'+
           '<div class="run-summary">'+esc(reducers)+' · '+esc(created)+' · '+esc(elapsed)+'</div>'+
@@ -352,20 +366,52 @@
         location.href='/runs/'+encodeURIComponent(run.run_id)+'/report';
       }catch(error){setMessage(error.message||String(error),true);updateHeader()}
     }
+    async function pauseRun(id){
+      try{await api('/api/runs/'+encodeURIComponent(id)+'/pause',{method:'POST'});setMessage('Pause request sent. In-flight trials will finish; Resume can refill this scheduler.');await refresh()}
+      catch(error){setMessage(error.message||String(error),true)}
+    }
     async function stopRun(id,mode){
       if(mode==='immediate'&&!window.confirm('Abort in-flight reducer process groups and preserve partial attempts?'))return;
       try{await api('/api/runs/'+encodeURIComponent(id)+'/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:mode})});setMessage('Stop request sent.');await refresh()}
       catch(error){setMessage(error.message||String(error),true)}
     }
     async function resumeRun(id){
-      try{await api('/api/runs/'+encodeURIComponent(id)+'/resume',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});setMessage('Resume request sent.');await refresh()}
+      const run=(state.runs||[]).find(function(item){return item.run_id===id})||{};
+      try{await api('/api/runs/'+encodeURIComponent(id)+'/resume',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});setMessage(run.live&&run.status==='paused'?'Resuming the same scheduler; it will start filling the queue again.':'Resume request sent.');await refresh()}
       catch(error){setMessage(error.message||String(error),true)}
+    }
+    let pendingDelete=null;
+    function openDelete(run){
+      pendingDelete=run.run_id;
+      $('deleteTitle').textContent='Delete '+run.run_id+'?';
+      $('deleteText').textContent=run.live?'This run is still active. Pause it and wait for in-flight jobs to finish before deleting its results.':'The entire results folder will be permanently deleted. This cannot be undone.';
+      $('deleteDialog').showModal();
+    }
+    async function confirmDelete(){
+      if(!pendingDelete)return;
+      const id=pendingDelete,button=$('deleteConfirm');
+      button.disabled=true;
+      try{
+        await api('/api/runs/'+encodeURIComponent(id)+'/delete',{method:'POST'});
+        $('deleteDialog').close();
+        pendingDelete=null;
+        state.runs=state.runs.filter(function(run){return run.run_id!==id});
+        renderRuns();
+        setMessage('Deleted '+id+'.');
+      }catch(error){setMessage(error.message||String(error),true)}
+      finally{button.disabled=false}
     }
     $('runs').addEventListener('click',function(event){
       const button=event.target.closest('[data-action]');if(!button)return;
       const id=button.getAttribute('data-run-id');
-      if(button.getAttribute('data-action')==='stop')stopRun(id,button.getAttribute('data-mode'));else if(button.getAttribute('data-action')==='resume')resumeRun(id);
+      const action=button.getAttribute('data-action');
+      if(action==='pause')pauseRun(id);
+      else if(action==='stop')stopRun(id,button.getAttribute('data-mode'));
+      else if(action==='resume')resumeRun(id);
+      else if(action==='delete')openDelete((state.runs||[]).find(function(item){return item.run_id===id})||{run_id:id});
     });
+    $('deleteCancel').onclick=function(){$('deleteDialog').close();pendingDelete=null};
+    $('deleteConfirm').onclick=confirmDelete;
     $('toggleGroups').onclick=function(){
       const inputs=Array.from(document.querySelectorAll('#categories input'));
       const all=inputs.length>0&&inputs.every(function(input){return input.checked});
