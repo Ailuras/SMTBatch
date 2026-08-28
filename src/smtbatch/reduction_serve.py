@@ -141,6 +141,26 @@ def _stat_signature(path: Path) -> tuple[int, int] | None:
     return stat.st_ino, stat.st_size ^ stat.st_mtime_ns
 
 
+def _git_generation(root: Path) -> tuple[str, str]:
+    """HEAD plus dirty fingerprint so a commit cannot reuse a stale catalog."""
+    head = reduction.provenance._git(
+        ["rev-parse", "HEAD"], cwd=root, check=False,
+    )
+    status = reduction.provenance._git(
+        ["status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=root, check=False,
+    )
+    head_text = (
+        head.stdout.decode("ascii", errors="replace").strip()
+        if head.returncode == 0 else ""
+    )
+    dirty = (
+        hashlib.sha256(status.stdout).hexdigest()
+        if status.returncode == 0 else ""
+    )
+    return head_text, dirty
+
+
 def _parse_iso(value: object) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -298,12 +318,11 @@ class ReductionManager:
         }
 
     def _benchmark_catalog(self) -> dict[str, object]:
-        """Build the project benchmark catalogue from the frozen database.
+        """Build the project benchmark catalogue from the live database.
 
-        The generated manifest is kept under results as an internal source
-        snapshot.  A run copies the normalized catalogue into its immutable
-        study/plan artifacts, so the generated file is only a convenient
-        bridge between the project database and the generic reduction engine.
+        The cache key includes the project Git generation, so a new commit
+        cannot keep a serve-start identity.  A run then copies this catalogue
+        into its immutable study/plan artifacts.
         """
         self._refresh_config()
         category_specs = self.config.benchmark_categories or {
@@ -333,6 +352,7 @@ class ReductionManager:
             input_signature,
             str(template_path) if template_path else "", _stat_signature(template_path) if template_path else None,
             str(self.config.path), _stat_signature(self.config.path),
+            _git_generation(self.project_root),
             self.config.benchmark_identity_command,
             tuple(
                 (name, spec.label, spec.description, spec.min_bytes, spec.max_bytes,
@@ -688,6 +708,8 @@ class ReductionManager:
             raise ValueError(
                 "request must contain categories, reducers, timeout_seconds, outer_jobs, max_files, and repeats"
             )
+        # A new run freezes the live tree. Never reuse a serve-start catalog.
+        self._catalog_cache = None
         catalog = self._benchmark_catalog()
         if not catalog.get("valid"):
             raise ValueError(str(catalog.get("error", "invalid benchmark catalogue")))

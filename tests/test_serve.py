@@ -74,6 +74,33 @@ class ManagerTests(ReductionFixture):
         self.assertEqual(last_run["repeats"], 3)
         self.assertIn("saved_at", last_run)
 
+    def test_create_run_freezes_live_identity_after_source_commit(self) -> None:
+        first = self.manager.benchmark_catalog()
+        self.assertEqual(first["identity"]["stdout"], "fixture-identity-v1\n")
+        identity = self.root / "identity.sh"
+        identity.write_text("#!/bin/sh\nprintf 'fixture-identity-v2\\n'\n", encoding="utf-8")
+        identity.chmod(0o755)
+        subprocess.run(["git", "add", "identity.sh"], cwd=self.root, check=True)
+        subprocess.run(
+            [
+                "git", "-c", "user.name=Test", "-c", "user.email=test@example.com",
+                "commit", "-m", "identity v2",
+            ],
+            cwd=self.root, check=True, stdout=subprocess.DEVNULL,
+        )
+        with mock.patch.object(self.manager, "_launch", return_value={"run_id": "live-identity"}):
+            self.manager.create_run({
+                "categories": ["compact"], "reducers": ["r1"],
+                "timeout_seconds": 30, "outer_jobs": 1, "max_files": 0, "repeats": 1,
+            })
+        catalog = self.manager.benchmark_catalog()
+        self.assertEqual(catalog["identity"]["stdout"], "fixture-identity-v2\n")
+        run_dirs = [path for path in (self.root / "results").iterdir() if path.is_dir()]
+        self.assertEqual(len(run_dirs), 1)
+        plan = reduce.load_plan(run_dirs[0])
+        self.assertEqual(plan["catalog"]["identity"]["stdout"], "fixture-identity-v2\n")
+        reduce._validate_live_provenance(plan)
+
     def test_create_run_validates_exact_request(self) -> None:
         invalid = [
             {"study_id": "fixture"},

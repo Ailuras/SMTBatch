@@ -212,7 +212,7 @@
   </dialog>
   <script>
     const $=function(id){return document.getElementById(id)};
-    const state={config:null,catalog:null,runs:[],catalogInitialized:false,formInitialized:false,refreshing:false};
+    const state={config:null,catalog:null,runs:[],catalogInitialized:false,formInitialized:false,refreshing:false,stickyError:''};
     const esc=function(value){return String(value==null?'':value).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})};
     const fmt=function(value){if(value===null||value===undefined||value==='')return '—';const n=Number(value);return Number.isFinite(n)?n.toLocaleString():esc(value)};
     const count=function(run,key){return Number(run&&run[key]||0)};
@@ -361,10 +361,10 @@
         if(!Number.isInteger(payload.max_files)||payload.max_files<0)throw new Error('Maximum benchmark files must be a non-negative integer (0 means all)');
         if(!Number.isInteger(payload.repeats)||payload.repeats<=0)throw new Error('Repeats must be a positive integer');
         if(!await confirmRun(payload))return;
-        $('start').disabled=true;setMessage('Submitting the frozen run plan…');
+        $('start').disabled=true;state.stickyError='';setMessage('Submitting the frozen run plan…');
         const run=await api('/api/runs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
         location.href='/runs/'+encodeURIComponent(run.run_id)+'/report';
-      }catch(error){setMessage(error.message||String(error),true);updateHeader()}
+      }catch(error){state.stickyError=error.message||String(error);setMessage(state.stickyError,true);updateHeader()}
     }
     async function pauseRun(id){
       try{await api('/api/runs/'+encodeURIComponent(id)+'/pause',{method:'POST'});setMessage('Pause request sent. In-flight trials will finish; Resume can refill this scheduler.');await refresh()}
@@ -438,6 +438,7 @@
         renderRuns();updateHeader();
         const gated=gateMessage();
         if(gated)setMessage(gated,true);
+        else if(state.stickyError)setMessage(state.stickyError,true);
         else setMessage('');
       }catch(error){setMessage(error.message||String(error),true);updateHeader()}
       finally{state.refreshing=false}
