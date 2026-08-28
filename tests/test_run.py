@@ -31,6 +31,7 @@ from smtbatch.run import (
     _results_writer_fields,
     load_files_from,
     parse_args,
+    require_fresh_output,
     main,
     retain_job_log,
     run_queue,
@@ -304,10 +305,39 @@ class ResumeLogicTests(unittest.TestCase):
         self.assertIn("target_branch=main\n", metadata)
         self.assertIn("smtbatch_branch=main\n", metadata)
         self.assertIn("query_events=yes\n", metadata)
+        self.assertIn(
+            f"solver_config_sha256={hashlib.sha256(self.config_path.read_bytes()).hexdigest()}\n",
+            metadata,
+        )
+        self.assertIn("runner_script_sha256=", metadata)
+        self.assertIn("platform=", metadata)
+        self.assertIn("python_version=", metadata)
         self.assertTrue(plan.query_events)
         self.assertEqual(plan.pair_count, 4)
         jobs = load_jobs(output / "jobs.tsv")
         self.assertEqual([job.expected for job in jobs], [1, 1, 1, 1])
+
+    def test_prepare_fresh_refuses_to_overwrite_prior_run(self) -> None:
+        output = self.root / "results" / "immutable-run"
+        output.mkdir()
+        metadata = output / "metadata.txt"
+        metadata.write_text("sentinel=keep\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "refusing to overwrite existing run data"):
+            require_fresh_output(output)
+        self.assertEqual("sentinel=keep\n", metadata.read_text(encoding="utf-8"))
+
+    def test_main_refuses_before_mutating_prior_progress(self) -> None:
+        output = self.root / "results" / "immutable-main"
+        output.mkdir()
+        (output / "metadata.txt").write_text("sentinel=metadata\n", encoding="utf-8")
+        progress = output / "progress.json"
+        progress.write_text('{"sentinel":"progress"}\n', encoding="utf-8")
+        exit_code = main(["--output", str(output)])
+        self.assertEqual(2, exit_code)
+        self.assertEqual(
+            '{"sentinel":"progress"}\n',
+            progress.read_text(encoding="utf-8"),
+        )
 
     def test_files_from_preserves_order_resolves_relative_paths_and_deduplicates(self) -> None:
         manifest = self.root / "probe.txt"
@@ -688,6 +718,33 @@ class ResumeLogicTests(unittest.TestCase):
         with event_path.open("r", encoding="utf-8", newline="") as handle:
             rows = list(csv.DictReader(handle, delimiter="\t"))
         self.assertEqual([(row["ordinal"], row["outcome"], row["source"]) for row in rows], [("1", "sat", "solver")])
+
+    def test_run_queue_provides_isolated_incsmt_event_environment(self) -> None:
+        self.binary.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' \"$INCSMT_SESSION_ID\" > \"$INCSMT_EVENT_FILE\"\n"
+            "echo sat\n",
+            encoding="utf-8",
+        )
+        self.binary.chmod(0o755)
+        results_path = self.root / "results" / "obe-event-results.tsv"
+        events_dir = self.root / "results" / "obe-events"
+        job = JobSpec(1, "alpha", self.formulas[0], 1)
+        run_queue(
+            [job],
+            {"alpha": load_config().solvers["alpha"]},
+            timeout=5,
+            workers=1,
+            logs_dir=self.root / "unused-logs",
+            events_dir=events_dir,
+            log_policy="none",
+            checkpoint_every=1,
+            tracker=None,
+            results_path=results_path,
+        )
+        sidecar = events_dir / "job_0000001.alpha.obe.jsonl"
+        self.assertTrue(sidecar.is_file())
+        self.assertEqual(str(self.formulas[0]), sidecar.read_text(encoding="utf-8").strip())
 
     def test_count_check_sat_files_matches_per_file_counts(self) -> None:
         from smtbatch.task import count_check_sat

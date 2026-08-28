@@ -27,6 +27,7 @@ import json
 import math
 import multiprocessing
 import os
+import platform
 import re
 import shutil
 import signal
@@ -64,6 +65,7 @@ from .task import (
 
 LOG_TAIL_BYTES = 16 * 1024
 _LOG_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+_BUILD_HASH_RE = re.compile(r"\bbuild hashcode ([0-9a-f]{40})\b")
 
 
 RESULT_ORDER = ("sat", "unsat", "unknown", "timeout", "error")
@@ -498,7 +500,7 @@ def solver_provenance(
         artifacts = solver_artifacts(spec.binary)
         if artifact_cache is not None:
             artifact_cache[spec.binary] = artifacts
-    return {
+    result = {
         "solver_binary": str(spec.binary),
         "solver_binary_sha256": sha256_path(spec.binary),
         "solver_artifacts_json": json.dumps(artifacts, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
@@ -507,6 +509,33 @@ def solver_provenance(
         "solver_version": version,
         "solver_command_json": json.dumps(list(spec.command), ensure_ascii=False, separators=(",", ":")),
     }
+    version_revision = _BUILD_HASH_RE.search(version)
+    result["solver_version_revision"] = version_revision.group(1) if version_revision else ""
+    cmake_cache = spec.binary.parent / "CMakeCache.txt"
+    if cmake_cache.is_file():
+        cache_values: dict[str, str] = {}
+        for line in cmake_cache.read_text(encoding="utf-8", errors="replace").splitlines():
+            key_type, separator, value = line.partition("=")
+            if not separator:
+                continue
+            key = key_type.partition(":")[0]
+            if key in {"CMAKE_BUILD_TYPE", "CMAKE_CXX_COMPILER"}:
+                cache_values[key] = value
+        result["solver_cmake_cache"] = str(cmake_cache.resolve())
+        result["solver_cmake_cache_sha256"] = sha256_path(cmake_cache)
+        result["solver_build_type"] = cache_values.get("CMAKE_BUILD_TYPE", "")
+        compiler = cache_values.get("CMAKE_CXX_COMPILER", "")
+        result["solver_cxx_compiler"] = compiler
+        if compiler:
+            compiler_version = subprocess.run(
+                [compiler, "--version"], text=True, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, timeout=30, check=False,
+            )
+            result["solver_cxx_compiler_version"] = (
+                compiler_version.stdout.splitlines()[0].strip()
+                if compiler_version.stdout.splitlines() else ""
+            )
+    return result
 
 
 def _git_provenance(root: Path) -> dict[str, str]:
@@ -538,6 +567,11 @@ def repository_provenance() -> dict[str, str]:
         "repository_dirty": project["dirty"],
         "runner_repository_commit": runner["commit"],
         "runner_repository_dirty": runner["dirty"],
+        "runner_script_sha256": sha256_path(Path(__file__).resolve()),
+        "working_directory": str(Path.cwd().resolve()),
+        "platform": platform.platform(),
+        "libc": " ".join(part for part in platform.libc_ver() if part),
+        "python_version": platform.python_version(),
     }
 
 
@@ -830,6 +864,14 @@ def run_job(
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             start_new_session=True,
+            env=(
+                {
+                    **os.environ,
+                    "INCSMT_EVENT_FILE": str(event_path.with_suffix(".obe.jsonl")),
+                    "INCSMT_SESSION_ID": str(job.file_path),
+                }
+                if event_path is not None else None
+            ),
         )
         if process.stdout is None:
             raise RuntimeError("solver stdout pipe was not created")
@@ -975,6 +1017,25 @@ def clean_previous_outputs(output_dir: Path) -> None:
             raise ValueError(f"refusing to remove symlinked batch output path: {path}")
         if path.is_dir():
             shutil.rmtree(path)
+
+
+def require_fresh_output(output_dir: Path) -> None:
+    """Refuse to overwrite material data from a prior run; use --resume instead."""
+    material = [
+        output_dir / name
+        for name in (
+            "jobs.tsv", "results.tsv", "input_hashes.tsv", "metadata.txt",
+            "progress.json", "resume_history.jsonl", "manifest.tsv", "logs",
+            "events", "tsv", "summary", "failures",
+        )
+        if (output_dir / name).exists()
+    ]
+    if material:
+        rendered = ", ".join(path.name for path in material)
+        raise ValueError(
+            f"refusing to overwrite existing run data in {output_dir}: {rendered}; "
+            "choose a new output directory or use --resume"
+        )
 
 
 def write_metadata(output_dir: Path, metadata: dict[str, str]) -> None:
@@ -1251,11 +1312,16 @@ class _RunPlan:
 def _prepare_fresh(
     args: argparse.Namespace,
     progress: Callable[..., None] | None = None,
+    *,
+    fresh_output_reserved: bool = False,
 ) -> _RunPlan:
     if not args.solver or (not args.input and not args.files_from):
         raise ValueError("--solver and either --input or --files-from are required unless --resume is used")
     if args.input and args.files_from:
         raise ValueError("--input and --files-from cannot be combined")
+    output_dir = args.output.expanduser().resolve()
+    if not fresh_output_reserved:
+        require_fresh_output(output_dir)
     if progress is not None:
         progress("config", "Loading solver configuration")
     config = load_config()
@@ -1294,7 +1360,6 @@ def _prepare_fresh(
 
     expected_by_file = _count_check_sat_files(files, progress=_count_progress)
     pair_count = len(files) * len(solvers)
-    output_dir = args.output.expanduser().resolve()
     logs_dir = output_dir / "logs"
     events_dir = output_dir / "events"
     if progress is not None:
@@ -1332,6 +1397,7 @@ def _prepare_fresh(
         "files_from": str(args.files_from.expanduser().resolve()) if args.files_from else "",
         "files_from_sha256": sha256_path(args.files_from.expanduser().resolve()) if args.files_from else "",
         "solver_config": str(config.path),
+        "solver_config_sha256": sha256_path(config.path),
         "incremental": "yes",
         "target_branch": config.target_branch,
         "smtbatch_branch": smtbatch_branch,
@@ -1620,12 +1686,17 @@ def _main_locked(args: argparse.Namespace) -> int:
         )
 
     if not args.resume:
+        try:
+            require_fresh_output(output_dir)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
         note("preparing", "Preparing the job queue")
     try:
         plan = (
             _prepare_resume(args)
             if args.resume
-            else _prepare_fresh(args, progress=note)
+            else _prepare_fresh(args, progress=note, fresh_output_reserved=True)
         )
     except KeyboardInterrupt:
         if not args.resume:

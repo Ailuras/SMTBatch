@@ -98,9 +98,13 @@ check-sat count per file), `results.tsv` (streaming results), `progress.json`
 solver-output file per retained job. Resumed runs additionally contain append-only
 `resume_history.jsonl`, preserving each resume attempt and its worker count.
 Solver provenance in `metadata.txt` includes the resolved artifact inventory
-and a path-independent bundle hash. It also records the commit and dirty state
-of both the project being measured and the SMTBatch runner repository. The
-Excel export contains only log paths.
+and a path-independent bundle hash, solver version/revision, CMake cache digest,
+build type, and compiler identity when available. It also records the commit and
+dirty state of both the project being measured and the SMTBatch runner repository,
+the runner-script digest, platform, libc, Python, and solver-configuration digest.
+A run directory containing material output is never silently overwritten; use a
+new directory, or `--resume` for its immutable queue. The Excel export contains
+only log paths.
 
 ## Incremental SMT-LIB files
 
@@ -160,4 +164,7 @@ Independently of that log policy, `events/job_<id>.<solver>.tsv` records
 `ordinal elapsed_ms delta_ms outcome source` as answers arrive. A killed or
 failed in-flight query gets one final `source=synthetic` timeout/error event;
 later queries remain `unreached` in `results.tsv`. Use `--no-query-events` to
-disable these files for a new run.
+disable these files for a new run. IncSMT jobs additionally receive a unique
+`events/job_<id>.<solver>.obe.jsonl` path through their environment. This
+versioned solver-side stream records OBE decisions and active-time state without
+changing stdout/stderr; external solvers simply ignore the environment variables.
