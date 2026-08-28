@@ -488,6 +488,29 @@ class SolverProvenanceCache:
     compiler_versions: dict[str, str] = field(default_factory=dict)
 
 
+_LEGACY_PROVENANCE_CACHE_KEY = object()
+
+
+def _normalize_provenance_cache(
+    cache: SolverProvenanceCache | dict[object, object] | None,
+) -> SolverProvenanceCache:
+    if cache is None:
+        return SolverProvenanceCache()
+    if isinstance(cache, SolverProvenanceCache):
+        return cache
+    shared = cache.get(_LEGACY_PROVENANCE_CACHE_KEY)
+    if isinstance(shared, SolverProvenanceCache):
+        return shared
+    artifacts = {
+        key: value
+        for key, value in cache.items()
+        if isinstance(key, Path) and isinstance(value, dict)
+    }
+    shared = SolverProvenanceCache(artifacts=artifacts)
+    cache[_LEGACY_PROVENANCE_CACHE_KEY] = shared
+    return shared
+
+
 def _solver_version(spec: SolverSpec, cache: SolverProvenanceCache) -> str:
     key = (spec.binary, spec.version_args)
     cached = cache.versions.get(key)
@@ -547,9 +570,9 @@ def _solver_build_metadata(binary: Path, cache: SolverProvenanceCache) -> dict[s
 
 def solver_provenance(
     spec: SolverSpec,
-    cache: SolverProvenanceCache | None = None,
+    cache: SolverProvenanceCache | dict[object, object] | None = None,
 ) -> dict[str, str]:
-    cache = cache or SolverProvenanceCache()
+    cache = _normalize_provenance_cache(cache)
     version = _solver_version(spec, cache)
     artifacts = cache.artifacts.get(spec.binary)
     if artifacts is None:

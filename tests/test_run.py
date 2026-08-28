@@ -13,6 +13,7 @@ import time
 import unittest
 from collections import Counter
 from contextlib import redirect_stdout
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -374,6 +375,30 @@ class ResumeLogicTests(unittest.TestCase):
         self.assertNotEqual(
             alpha_provenance["solver_command_json"],
             beta_provenance["solver_command_json"],
+        )
+
+    def test_solver_provenance_upgrades_legacy_artifact_cache(self) -> None:
+        alpha = SolverSpec(
+            name="alpha", binary=self.binary,
+            command=("{binary}", "--alpha", "{input}"),
+            version_args=("--version",),
+        )
+        beta = replace(alpha, name="beta", command=("{binary}", "--beta", "{input}"))
+        legacy_cache: dict[object, object] = {}
+        real_artifacts = solver_artifacts
+        with (
+            mock.patch("smtbatch.run.solver_artifacts", wraps=real_artifacts) as artifacts,
+            mock.patch("smtbatch.run.subprocess.run", wraps=subprocess.run) as run_process,
+        ):
+            solver_provenance(alpha, legacy_cache)
+            solver_provenance(beta, legacy_cache)
+        self.assertEqual(1, artifacts.call_count)
+        self.assertEqual(
+            1,
+            sum(
+                call.args[0] == [str(self.binary), "--version"]
+                for call in run_process.call_args_list
+            ),
         )
 
     def test_prepare_fresh_refuses_to_overwrite_prior_run(self) -> None:
