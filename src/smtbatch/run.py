@@ -480,10 +480,19 @@ def solver_bundle_hash(artifacts: dict[str, dict[str, str]]) -> str:
     return digest.hexdigest()
 
 
-def solver_provenance(
-    spec: SolverSpec,
-    artifact_cache: dict[Path, dict[str, dict[str, str]]] | None = None,
-) -> dict[str, str]:
+@dataclass
+class SolverProvenanceCache:
+    artifacts: dict[Path, dict[str, dict[str, str]]] = field(default_factory=dict)
+    versions: dict[tuple[Path, tuple[str, ...]], str] = field(default_factory=dict)
+    build_metadata: dict[Path, dict[str, str]] = field(default_factory=dict)
+    compiler_versions: dict[str, str] = field(default_factory=dict)
+
+
+def _solver_version(spec: SolverSpec, cache: SolverProvenanceCache) -> str:
+    key = (spec.binary, spec.version_args)
+    cached = cache.versions.get(key)
+    if cached is not None:
+        return cached
     completed = subprocess.run(
         [str(spec.binary), *spec.version_args],
         text=True,
@@ -495,23 +504,16 @@ def solver_provenance(
     if completed.returncode != 0:
         raise RuntimeError(f"solver version query failed for {spec.name}: {completed.stdout.strip()}")
     version = completed.stdout.splitlines()[0].strip() if completed.stdout.splitlines() else ""
-    artifacts = None if artifact_cache is None else artifact_cache.get(spec.binary)
-    if artifacts is None:
-        artifacts = solver_artifacts(spec.binary)
-        if artifact_cache is not None:
-            artifact_cache[spec.binary] = artifacts
-    result = {
-        "solver_binary": str(spec.binary),
-        "solver_binary_sha256": sha256_path(spec.binary),
-        "solver_artifacts_json": json.dumps(artifacts, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
-        "solver_bundle_schema": SOLVER_BUNDLE_SCHEMA,
-        "solver_bundle_sha256": solver_bundle_hash(artifacts),
-        "solver_version": version,
-        "solver_command_json": json.dumps(list(spec.command), ensure_ascii=False, separators=(",", ":")),
-    }
-    version_revision = _BUILD_HASH_RE.search(version)
-    result["solver_version_revision"] = version_revision.group(1) if version_revision else ""
-    cmake_cache = spec.binary.parent / "CMakeCache.txt"
+    cache.versions[key] = version
+    return version
+
+
+def _solver_build_metadata(binary: Path, cache: SolverProvenanceCache) -> dict[str, str]:
+    cached = cache.build_metadata.get(binary)
+    if cached is not None:
+        return cached
+    result: dict[str, str] = {}
+    cmake_cache = binary.parent / "CMakeCache.txt"
     if cmake_cache.is_file():
         cache_values: dict[str, str] = {}
         for line in cmake_cache.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -527,14 +529,44 @@ def solver_provenance(
         compiler = cache_values.get("CMAKE_CXX_COMPILER", "")
         result["solver_cxx_compiler"] = compiler
         if compiler:
-            compiler_version = subprocess.run(
-                [compiler, "--version"], text=True, stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, timeout=30, check=False,
-            )
-            result["solver_cxx_compiler_version"] = (
-                compiler_version.stdout.splitlines()[0].strip()
-                if compiler_version.stdout.splitlines() else ""
-            )
+            compiler_version = cache.compiler_versions.get(compiler)
+            if compiler_version is None:
+                completed = subprocess.run(
+                    [compiler, "--version"], text=True, stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, timeout=30, check=False,
+                )
+                compiler_version = (
+                    completed.stdout.splitlines()[0].strip()
+                    if completed.stdout.splitlines() else ""
+                )
+                cache.compiler_versions[compiler] = compiler_version
+            result["solver_cxx_compiler_version"] = compiler_version
+    cache.build_metadata[binary] = result
+    return result
+
+
+def solver_provenance(
+    spec: SolverSpec,
+    cache: SolverProvenanceCache | None = None,
+) -> dict[str, str]:
+    cache = cache or SolverProvenanceCache()
+    version = _solver_version(spec, cache)
+    artifacts = cache.artifacts.get(spec.binary)
+    if artifacts is None:
+        artifacts = solver_artifacts(spec.binary)
+        cache.artifacts[spec.binary] = artifacts
+    result = {
+        "solver_binary": str(spec.binary),
+        "solver_binary_sha256": artifacts["binary"]["sha256"],
+        "solver_artifacts_json": json.dumps(artifacts, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+        "solver_bundle_schema": SOLVER_BUNDLE_SCHEMA,
+        "solver_bundle_sha256": solver_bundle_hash(artifacts),
+        "solver_version": version,
+        "solver_command_json": json.dumps(list(spec.command), ensure_ascii=False, separators=(",", ":")),
+    }
+    version_revision = _BUILD_HASH_RE.search(version)
+    result["solver_version_revision"] = version_revision.group(1) if version_revision else ""
+    result.update(_solver_build_metadata(spec.binary, cache))
     return result
 
 
@@ -1334,9 +1366,9 @@ def _prepare_fresh(
     smtbatch_branch = validate_target_branch(config)
     solvers = normalize_solvers(args.solver, config)
     specs = {name: config.solvers[name] for name in solvers}
-    artifact_cache: dict[Path, dict[str, dict[str, str]]] = {}
+    provenance_cache = SolverProvenanceCache()
     provenance = {
-        name: solver_provenance(spec, artifact_cache) for name, spec in specs.items()
+        name: solver_provenance(spec, provenance_cache) for name, spec in specs.items()
     }
     if progress is not None:
         progress("discover", "Scanning benchmark files")

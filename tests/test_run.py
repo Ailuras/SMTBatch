@@ -24,6 +24,7 @@ from smtbatch.run import (
     RUN_CONTROL_PAUSED,
     RUN_CONTROL_RUNNING,
     _RunLock,
+    SolverProvenanceCache,
     _count_check_sat_files,
     _load_existing_results,
     _prepare_fresh,
@@ -35,8 +36,10 @@ from smtbatch.run import (
     main,
     retain_job_log,
     run_queue,
+    sha256_path,
     solver_artifacts,
     solver_bundle_hash,
+    solver_provenance,
     write_progress_snapshot,
     write_run_control,
     _main_locked,
@@ -316,6 +319,62 @@ class ResumeLogicTests(unittest.TestCase):
         self.assertEqual(plan.pair_count, 4)
         jobs = load_jobs(output / "jobs.tsv")
         self.assertEqual([job.expected for job in jobs], [1, 1, 1, 1])
+
+    def test_solver_provenance_caches_shared_binary_facts(self) -> None:
+        cmake_cache = self.binary.parent / "CMakeCache.txt"
+        cmake_cache.write_text(
+            "CMAKE_BUILD_TYPE:STRING=Release\n"
+            "CMAKE_CXX_COMPILER:FILEPATH=/bin/echo\n",
+            encoding="utf-8",
+        )
+        alpha = SolverSpec(
+            name="alpha", binary=self.binary,
+            command=("{binary}", "--alpha", "{input}"),
+            version_args=("--version",),
+        )
+        beta = SolverSpec(
+            name="beta", binary=self.binary,
+            command=("{binary}", "--beta", "{input}"),
+            version_args=("--version",),
+        )
+        cache = SolverProvenanceCache()
+        real_artifacts = solver_artifacts
+
+        with (
+            mock.patch("smtbatch.run.solver_artifacts", wraps=real_artifacts) as artifacts,
+            mock.patch("smtbatch.run.sha256_path", wraps=sha256_path) as hashes,
+            mock.patch("smtbatch.run.subprocess.run", wraps=subprocess.run) as run_process,
+        ):
+            alpha_provenance = solver_provenance(alpha, cache)
+            beta_provenance = solver_provenance(beta, cache)
+
+        self.assertEqual(1, artifacts.call_count)
+        self.assertEqual(
+            1,
+            sum(call.args[0] == self.binary for call in hashes.call_args_list),
+        )
+        self.assertEqual(
+            1,
+            sum(
+                call.args[0] == [str(self.binary), "--version"]
+                for call in run_process.call_args_list
+            ),
+        )
+        self.assertEqual(
+            1,
+            sum(
+                call.args[0] == ["/bin/echo", "--version"]
+                for call in run_process.call_args_list
+            ),
+        )
+        self.assertEqual(
+            alpha_provenance["solver_binary_sha256"],
+            beta_provenance["solver_binary_sha256"],
+        )
+        self.assertNotEqual(
+            alpha_provenance["solver_command_json"],
+            beta_provenance["solver_command_json"],
+        )
 
     def test_prepare_fresh_refuses_to_overwrite_prior_run(self) -> None:
         output = self.root / "results" / "immutable-run"
