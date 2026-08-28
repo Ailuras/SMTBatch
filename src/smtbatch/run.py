@@ -868,7 +868,13 @@ def run_job(
                 {
                     **os.environ,
                     "INCSMT_EVENT_FILE": str(event_path.with_suffix(".obe.jsonl")),
-                    "INCSMT_SESSION_ID": str(job.file_path),
+                    # A formula path is not a session identifier: the same input
+                    # is intentionally run by several arms (and across several
+                    # immutable runs).  Include the resolved per-job sidecar so
+                    # merged event audits cannot splice independent controllers.
+                    "INCSMT_SESSION_ID": (
+                        f"{event_path.resolve().with_suffix('')}::{job.file_path.resolve()}"
+                    ),
                 }
                 if event_path is not None else None
             ),

@@ -744,7 +744,53 @@ class ResumeLogicTests(unittest.TestCase):
         )
         sidecar = events_dir / "job_0000001.alpha.obe.jsonl"
         self.assertTrue(sidecar.is_file())
-        self.assertEqual(str(self.formulas[0]), sidecar.read_text(encoding="utf-8").strip())
+        self.assertEqual(
+            f"{(events_dir / 'job_0000001.alpha').resolve()}::{self.formulas[0].resolve()}",
+            sidecar.read_text(encoding="utf-8").strip(),
+        )
+
+    def test_run_queue_session_ids_are_unique_across_arms(self) -> None:
+        self.binary.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' \"$INCSMT_SESSION_ID\" > \"$INCSMT_EVENT_FILE\"\n"
+            "echo sat\n",
+            encoding="utf-8",
+        )
+        self.binary.chmod(0o755)
+        results_path = self.root / "results" / "multi-arm-event-results.tsv"
+        events_dir = self.root / "results" / "multi-arm-events"
+        alpha = load_config().solvers["alpha"]
+        specs = {
+            "alpha": alpha,
+            "beta": SolverSpec(
+                name="beta",
+                binary=alpha.binary,
+                command=alpha.command,
+                version_args=alpha.version_args,
+                label="beta",
+            ),
+        }
+        jobs = [
+            JobSpec(1, "alpha", self.formulas[0], 1),
+            JobSpec(2, "beta", self.formulas[0], 1),
+        ]
+        run_queue(
+            jobs,
+            specs,
+            timeout=5,
+            workers=1,
+            logs_dir=self.root / "unused-logs",
+            events_dir=events_dir,
+            log_policy="none",
+            checkpoint_every=1,
+            tracker=None,
+            results_path=results_path,
+        )
+        sessions = {
+            path.read_text(encoding="utf-8").strip()
+            for path in events_dir.glob("*.obe.jsonl")
+        }
+        self.assertEqual(len(sessions), 2)
 
     def test_count_check_sat_files_matches_per_file_counts(self) -> None:
         from smtbatch.task import count_check_sat
