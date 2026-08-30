@@ -904,6 +904,37 @@ command = ["{binary}", "{input}"]
         self.assertTrue((sibling / "marker.txt").is_file())
         self.assertEqual(keeper.read_text(encoding="utf-8"), "keep launcher\n")
 
+    def test_delete_run_removes_inside_controller_log_with_the_folder(self) -> None:
+        (self.run / "controller.log").write_text("inside launcher\n", encoding="utf-8")
+        sidecar = self.results / ".sample-run.controller.log"
+        sidecar.write_text("legacy sidecar\n", encoding="utf-8")
+
+        response = self.manager.delete_run("sample-run")
+        self.manager._await_purges()
+
+        self.assertEqual(response, {"run_id": "sample-run", "status": "deleted"})
+        self.assertFalse(self.run.exists())
+        self.assertFalse(sidecar.exists())
+        self.assertFalse(any(path.name.startswith(".deleting-") for path in self.results.iterdir()))
+
+    def test_manager_sweeps_stale_delete_leftovers(self) -> None:
+        trash = self.results / ".deleting-old-123"
+        trash.mkdir()
+        (trash / "gone.txt").write_text("stale\n", encoding="utf-8")
+        orphan = self.results / ".missing-run.controller.log"
+        orphan.write_text("orphan\n", encoding="utf-8")
+        keeper = self.results / ".sample-run.controller.log"
+        keeper.write_text("keep sidecar\n", encoding="utf-8")
+
+        manager = ExperimentManager(self.results, self.inputs, Path(self.temp.name))
+        try:
+            manager._await_purges()
+            self.assertFalse(trash.exists())
+            self.assertFalse(orphan.exists())
+            self.assertEqual(keeper.read_text(encoding="utf-8"), "keep sidecar\n")
+        finally:
+            manager._await_purges()
+
     def test_delete_run_hides_history_before_files_finish_removing(self) -> None:
         released = threading.Event()
         started = threading.Event()
@@ -1042,6 +1073,8 @@ command = ["{binary}", "{input}"]
         listed = next(item for item in self.manager.runs() if item["run_id"] == "startup-run")
         self.assertEqual(listed["status"], "starting")
         self.assertIn("Launching", listed.get("startup_note", ""))
+        self.assertTrue((run_dir / "controller.log").is_file())
+        self.assertFalse((self.results / ".startup-run.controller.log").exists())
         summary = self.manager.report_summary("startup-run", "all")
         self.assertEqual(summary["status"], "starting")
         self.assertEqual(summary["timeout"], 30)

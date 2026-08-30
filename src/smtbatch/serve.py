@@ -313,6 +313,7 @@ class ExperimentManager:
         self._query_cactus_building: set[str] = set()
         self._purge_lock = threading.Lock()
         self._purge_threads: list[threading.Thread] = []
+        self._sweep_delete_leftovers()
 
     def _solver_config(self) -> Config:
         """Return the current project config, reloading it when TOML changes."""
@@ -624,7 +625,6 @@ class ExperimentManager:
         ]
         for solver in solvers:
             command.extend(("--solver", solver))
-        controller_log = self.results_root / f".{run_id}.controller.log"
         with self._process_lock:
             if output_dir.exists() or self._managed_process_alive(run_id):
                 raise ValueError(f"experiment already exists: {run_id}")
@@ -638,7 +638,7 @@ class ExperimentManager:
                 by_solver={name: {} for name in solvers},
             )
             try:
-                with controller_log.open("w", encoding="utf-8") as log_handle:
+                with self._controller_log(run_id, output_dir).open("w", encoding="utf-8") as log_handle:
                     process = subprocess.Popen(
                         command,
                         cwd=self.host_cwd,
@@ -695,8 +695,10 @@ class ExperimentManager:
         used to freeze the confirm dialog and could leave a folder behind after
         ``progress.json`` had already vanished from the card list.  Renaming to a
         dotted trash path first removes the card; the slow unlink happens after
-        the HTTP response.  The dashboard launcher log sits beside the run
-        directory and is removed with the experiment.
+        the HTTP response.  Launcher output lives in ``controller.log`` inside
+        the run directory, matching feat/reduction, so Delete has one folder to
+        remove.  A leftover ``.{run_id}.controller.log`` sidecar from older
+        dashboards is unlinked with the experiment.
         """
         run_dir = self._run_dir(run_id)
         if not run_dir.is_dir():
@@ -712,15 +714,58 @@ class ExperimentManager:
         except OSError as exc:
             raise OSError(f"unable to move experiment out of history: {exc}") from exc
 
-        self._progress_cache.pop(run_id, None)
-        _RUN_CACHE.pop(run_dir / "progress.json", None)
-        _RUN_CACHE.pop(trash / "progress.json", None)
+        self._drop_run_caches(run_id, run_dir, trash)
         try:
-            (self.results_root / f".{run_id}.controller.log").unlink(missing_ok=True)
+            self._legacy_controller_log(run_id).unlink(missing_ok=True)
         except OSError:
             pass
         self._schedule_purge(trash)
         return {"run_id": run_id, "status": "deleted"}
+
+    def _legacy_controller_log(self, run_id: str) -> Path:
+        return self.results_root / f".{run_id}.controller.log"
+
+    def _controller_log(self, run_id: str, run_dir: Path) -> Path:
+        """Keep launcher output inside the run directory.
+
+        Older dashboards wrote ``.{run_id}.controller.log`` beside results/.
+        Move that sidecar into the run so Delete only has to purge one folder.
+        """
+        inside = run_dir / "controller.log"
+        sidecar = self._legacy_controller_log(run_id)
+        if sidecar.is_file() and not inside.exists():
+            try:
+                sidecar.replace(inside)
+            except OSError:
+                return sidecar
+        return inside
+
+    def _drop_run_caches(self, run_id: str, *directories: Path) -> None:
+        self._progress_cache.pop(run_id, None)
+        for directory in directories:
+            _RUN_CACHE.pop(directory / "progress.json", None)
+
+    def _sweep_delete_leftovers(self) -> None:
+        """Purge incomplete deletes and orphaned sidecar logs on dashboard start."""
+        if not self.results_root.is_dir():
+            return
+        suffix = ".controller.log"
+        try:
+            entries = list(self.results_root.iterdir())
+        except OSError:
+            return
+        for path in entries:
+            name = path.name
+            if path.is_dir() and name.startswith(".deleting-"):
+                self._schedule_purge(path)
+                continue
+            if path.is_file() and name.startswith(".") and name.endswith(suffix):
+                run_id = name[1:-len(suffix)]
+                if run_id and not (self.results_root / run_id).exists():
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
 
     def _trash_path(self, run_id: str) -> Path:
         safe = re.sub(r"[^A-Za-z0-9._-]+", "_", run_id).strip("._") or "run"
@@ -785,7 +830,6 @@ class ExperimentManager:
             "--log",
             log,
         ]
-        controller_log = self.results_root / f".{run_id}.controller.log"
         with self._process_lock:
             if self._run_is_live(run_id) or self._managed_process_alive(run_id):
                 write_run_control(run_dir, RUN_CONTROL_RUNNING)
@@ -798,7 +842,7 @@ class ExperimentManager:
                 raise ValueError("experiment is already complete")
             # A running/starting/cancelling snapshot without a live controller is stale
             # state left by an ungraceful exit and is therefore safe to resume.
-            with controller_log.open("a", encoding="utf-8") as log_handle:
+            with self._controller_log(run_id, run_dir).open("a", encoding="utf-8") as log_handle:
                 log_handle.write(f"\n[dashboard] resume requested at {datetime.now(timezone.utc).isoformat()}\n")
                 log_handle.flush()
                 process = subprocess.Popen(
