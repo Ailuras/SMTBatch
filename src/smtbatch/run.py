@@ -1080,8 +1080,42 @@ def clean_previous_outputs(output_dir: Path) -> None:
             shutil.rmtree(path)
 
 
+def _launching_placeholder(output_dir: Path) -> bool:
+    """True when the directory only has a dashboard starting card, not a real run.
+
+    The dashboard writes ``progress.json`` before it execs ``smtbatch run``, so a
+    fresh launch must be allowed to continue from that placeholder.  Any job
+    queue, results, or metadata means a previous controller already started.
+    """
+    if not output_dir.is_dir():
+        return True
+    for name in (
+        "jobs.tsv", "results.tsv", "input_hashes.tsv", "metadata.txt",
+        "resume_history.jsonl", "manifest.tsv", "logs",
+        "events", "tsv", "summary", "failures",
+    ):
+        if (output_dir / name).exists():
+            return False
+    progress = output_dir / "progress.json"
+    if not progress.is_file():
+        return True
+    try:
+        payload = json.loads(progress.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    try:
+        total_jobs = int(payload.get("total_jobs") or 0)
+    except (TypeError, ValueError):
+        return False
+    return payload.get("status") in {"starting", "interrupted", "failed"} and total_jobs == 0
+
+
 def require_fresh_output(output_dir: Path) -> None:
     """Refuse to overwrite material data from a prior run; use --resume instead."""
+    if _launching_placeholder(output_dir):
+        return
     material = [
         output_dir / name
         for name in (

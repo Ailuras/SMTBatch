@@ -927,6 +927,31 @@ class ResumeLogicTests(unittest.TestCase):
         self.assertEqual(payload["status"], "interrupted")
         self.assertEqual(payload["completed_jobs"], 2)
 
+    def test_require_fresh_output_allows_dashboard_starting_card(self) -> None:
+        output = self.root / "results" / "starting-only"
+        write_progress_snapshot(
+            output,
+            status="starting",
+            phase="launching",
+            startup_note="Launching controller",
+            timeout=1200,
+            jobs=200,
+            by_solver={"incsmt": {}},
+        )
+        (output / "controller.log").write_text("starting\n", encoding="utf-8")
+        require_fresh_output(output)
+
+    def test_require_fresh_output_still_protects_a_real_queue(self) -> None:
+        output = self.root / "results" / "real-run"
+        output.mkdir(parents=True)
+        (output / "jobs.tsv").write_text("job_id\n", encoding="utf-8")
+        (output / "progress.json").write_text(
+            json.dumps({"status": "interrupted", "total_jobs": 4}),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ValueError, "jobs.tsv"):
+            require_fresh_output(output)
+
     def test_write_progress_snapshot_creates_starting_card(self) -> None:
         output = self.root / "results" / "startup"
         snapshot = write_progress_snapshot(

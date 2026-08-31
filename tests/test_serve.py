@@ -831,6 +831,36 @@ command = ["{binary}", "{input}"]
         self.assertIn(str(run_dir), command)
         self.assertIn("--output", command)
 
+    def test_resume_retries_unfinished_launch_without_metadata(self) -> None:
+        run_dir = self.results / "unfinished-launch"
+        run_dir.mkdir()
+        (run_dir / "progress.json").write_text(
+            json.dumps(
+                {
+                    "status": "starting",
+                    "phase": "launching",
+                    "timeout": 1200,
+                    "jobs": 200,
+                    "limit": 0,
+                    "input": str(self.inputs),
+                    "total_jobs": 0,
+                    "by_solver": {"incsmt": {}, "incsmt_oneshot": {}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        with mock.patch("smtbatch.serve.subprocess.Popen") as popen:
+            popen.return_value.poll.return_value = None
+            response = self.manager.resume("unfinished-launch", {"jobs": 200})
+        self.assertEqual(response["status"], "resuming")
+        command = popen.call_args.args[0]
+        self.assertNotIn("--resume", command)
+        self.assertEqual(command[command.index("--input") + 1], str(self.inputs))
+        self.assertEqual(command[command.index("--timeout") + 1], "1200")
+        self.assertIn("--solver", command)
+        self.assertIn("incsmt", command)
+        self.assertIn("incsmt_oneshot", command)
+
     def test_resume_unpauses_managed_process_without_second_popen(self) -> None:
         run_dir = self._interrupted_run("interrupted-run")
         with mock.patch("smtbatch.serve.subprocess.Popen") as popen:

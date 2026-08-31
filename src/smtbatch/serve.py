@@ -635,6 +635,8 @@ class ExperimentManager:
                 startup_note="Launching controller",
                 timeout=timeout,
                 jobs=jobs,
+                limit=limit,
+                input=str(input_dir),
                 by_solver={name: {} for name in solvers},
             )
             try:
@@ -801,12 +803,18 @@ class ExperimentManager:
         if initial_status == "complete":
             raise ValueError("experiment is already complete")
         metadata = _metadata(run_dir / "metadata.txt")
+        progress = self._progress(run_id)
+        last_run = self._read_last_run()
         solvers = [name for name in (metadata.get("solvers") or "").split(",") if name]
+        if not solvers:
+            solvers = [name for name in (progress.get("by_solver") or {}) if name]
+        if not solvers and isinstance(last_run.get("solvers"), list):
+            solvers = [name for name in last_run["solvers"] if isinstance(name, str) and name]
         if not solvers:
             raise ValueError("no solver list recorded in experiment metadata")
         try:
-            timeout = float(metadata.get("timeout") or "")
-        except ValueError:
+            timeout = float(metadata.get("timeout") or progress.get("timeout") or last_run.get("timeout") or "")
+        except (TypeError, ValueError):
             raise ValueError("experiment metadata has an invalid timeout") from None
         if not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("experiment metadata has no valid timeout")
@@ -817,19 +825,49 @@ class ExperimentManager:
         if log not in {"all", "fail", "none"}:
             raise ValueError("experiment metadata has an invalid log policy")
 
-        command = [
-            sys.executable,
-            "-m",
-            "smtbatch",
-            "run",
-            "--resume",
-            "--output",
-            str(run_dir),
-            "--jobs",
-            str(jobs),
-            "--log",
-            log,
-        ]
+        if (run_dir / "jobs.tsv").is_file():
+            command = [
+                sys.executable,
+                "-m",
+                "smtbatch",
+                "run",
+                "--resume",
+                "--output",
+                str(run_dir),
+                "--jobs",
+                str(jobs),
+                "--log",
+                log,
+            ]
+        else:
+            # Dashboard starting card only: retry a launch that never built the queue.
+            input_dir = progress.get("input") or last_run.get("input") or ""
+            if not isinstance(input_dir, str) or not input_dir:
+                raise ValueError("no input directory recorded for this unfinished launch")
+            try:
+                limit = int(progress.get("limit") if progress.get("limit") is not None else last_run.get("limit") or 0)
+            except (TypeError, ValueError):
+                raise ValueError("unfinished launch has an invalid formula limit") from None
+            command = [
+                sys.executable,
+                "-m",
+                "smtbatch",
+                "run",
+                "--input",
+                str(input_dir),
+                "--output",
+                str(run_dir),
+                "--timeout",
+                f"{timeout:g}",
+                "--jobs",
+                str(jobs),
+                "--limit",
+                str(limit),
+                "--log",
+                log,
+            ]
+            for solver in solvers:
+                command.extend(("--solver", solver))
         with self._process_lock:
             if self._run_is_live(run_id) or self._managed_process_alive(run_id):
                 write_run_control(run_dir, RUN_CONTROL_RUNNING)
