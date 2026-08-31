@@ -133,6 +133,18 @@ def _read_json_body(handler: BaseHTTPRequestHandler) -> object:
         raise ValueError(f"invalid JSON body: {exc}") from None
 
 
+def _byte_counts(items: list[dict[str, object]]) -> list[int]:
+    sizes: list[int] = []
+    for item in items:
+        quality = item.get("output_quality") or {}
+        if not isinstance(quality, dict):
+            continue
+        size = quality.get("byte_count")
+        if size is not None:
+            sizes.append(int(size))
+    return sizes
+
+
 def _stat_signature(path: Path) -> tuple[int, int] | None:
     try:
         stat = path.stat()
@@ -1277,21 +1289,13 @@ class ReductionManager:
             completed_items = [item for item in selected if str(item.get("status")) == "completed"]
             truncated_items = [item for item in selected if str(item.get("status")) == "truncated"]
             completed_times = [float(item.get("trial_wall_sec", 0) or 0) for item in completed_items if float(item.get("trial_wall_sec", 0) or 0) > 0]
-            truncated_sizes = []
-            for item in truncated_items:
-                quality = item.get("output_quality") or {}
-                size = quality.get("byte_count")
-                if size is not None:
-                    truncated_sizes.append(int(size))
-            completed_sizes = []
-            for item in completed_items:
-                quality = item.get("output_quality") or {}
-                size = quality.get("byte_count")
-                if size is not None:
-                    completed_sizes.append(int(size))
+            completed_sizes = _byte_counts(completed_items)
+            truncated_sizes = _byte_counts(truncated_items)
+            reported_sizes = completed_sizes + truncated_sizes
             by_reducer[str(reducer["id"])] = {
                 "id": reducer["id"], "label": reducer["label"],
                 "completed_avg_sec": (sum(completed_times) / len(completed_times)) if completed_times else None,
+                "avg_bytes": (sum(reported_sizes) / len(reported_sizes)) if reported_sizes else None,
                 "completed_avg_bytes": (sum(completed_sizes) / len(completed_sizes)) if completed_sizes else None,
                 "truncated_avg_bytes": (sum(truncated_sizes) / len(truncated_sizes)) if truncated_sizes else None,
                 "predicate_calls": sum(int(item.get("predicate_calls", 0) or 0) for item in selected),

@@ -161,6 +161,7 @@ class ManagerTests(ReductionFixture):
         self.assertEqual(cases["cases"][0]["status"], "pending")
         self.assertEqual(summary["comparisons"], [])
         self.assertIsNone(summary["by_reducer"]["r1"]["completed_avg_bytes"])
+        self.assertIsNone(summary["by_reducer"]["r1"]["avg_bytes"])
 
     def test_path_traversal_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
@@ -202,7 +203,38 @@ class ManagerTests(ReductionFixture):
         self.assertEqual(pair["left_label"], "Reducer one")
         self.assertEqual(pair["paired_cases"], 0)
         self.assertIsNone(summary["by_reducer"]["r1"]["completed_avg_bytes"])
+        self.assertIsNone(summary["by_reducer"]["r1"]["avg_bytes"])
         self.assertIn("completed_avg_bytes", summary["by_reducer"]["r1"])
+        self.assertIn("avg_bytes", summary["by_reducer"]["r1"])
+
+    def test_summary_avg_bytes_includes_truncated_outputs(self) -> None:
+        output = self.root / "results" / "sized"
+        reduce.prepare(
+            self.study_path, output, reducers=["r1"], timeout_seconds=70, outer_jobs=1,
+        )
+        fake = [
+            {
+                "reducer_id": "r1", "repeat": 1, "status": "completed",
+                "predicate_calls": 1, "accepted_moves": 1, "trial_wall_sec": 1.0,
+                "output_quality": {"byte_count": 100},
+            },
+            {
+                "reducer_id": "r1", "repeat": 1, "status": "truncated",
+                "predicate_calls": 2, "accepted_moves": 0, "trial_wall_sec": 70.0,
+                "output_quality": {"byte_count": 300},
+            },
+            {
+                "reducer_id": "r1", "repeat": 1, "status": "invalid",
+                "predicate_calls": 0, "accepted_moves": 0, "trial_wall_sec": 1.0,
+                "output_quality": {"byte_count": 99999},
+            },
+        ]
+        with mock.patch.object(self.manager, "_completed_results", return_value=fake):
+            summary = self.manager.summary("sized")
+        stats = summary["by_reducer"]["r1"]
+        self.assertEqual(stats["completed_avg_bytes"], 100)
+        self.assertEqual(stats["truncated_avg_bytes"], 300)
+        self.assertEqual(stats["avg_bytes"], 200)
 
     def test_case_list_status_and_winner_bytes(self) -> None:
         rows = [
@@ -384,6 +416,7 @@ class HttpTests(ReductionFixture):
         self.assertIn("state.summary.live", html)
         self.assertIn("'paused'", html)
         self.assertIn("Paired comparisons", html)
+        self.assertIn("avg_bytes", html)
         self.assertIn("completed_avg_bytes", html)
         self.assertIn('data-sort="bytes"', html)
         self.assertIn("case-reducers", html)

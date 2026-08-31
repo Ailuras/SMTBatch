@@ -137,7 +137,7 @@
       return {
         truncated:win(reducers.map(v=>bucketCounts(v.statuses).truncated)),
         time:win(reducers.map(v=>v.completed_avg_sec)),
-        size:win(reducers.map(v=>v.completed_avg_bytes)),
+        size:win(reducers.map(v=>v.avg_bytes ?? v.completed_avg_bytes)),
       };
     }
     function renderComparisons(){
@@ -171,9 +171,10 @@
       $('reducerRows').innerHTML=reducers.map(v=>{
         const b=bucketCounts(v.statuses);
         const timeText=v.completed_avg_sec==null?'—':seconds(v.completed_avg_sec);
-        const sizeText=v.completed_avg_bytes==null?'—':fmt(Math.round(v.completed_avg_bytes));
+        const sizeValue=v.avg_bytes ?? v.completed_avg_bytes;
+        const sizeText=sizeValue==null?'—':fmt(Math.round(sizeValue));
         const truncTitle=v.truncated_avg_bytes==null?'':'Mean final bytes of truncated trials: '+fmt(Math.round(v.truncated_avg_bytes));
-        return `<tr><td>${esc(v.label)}</td><td class="num">${fmt(b.completed)}</td><td class="num">${boldIf(winners.time.has(v.id),timeText)}</td><td class="num" title="Mean final bytes of completed trials">${boldIf(winners.size.has(v.id),sizeText)}</td><td class="num"${truncTitle?` title="${esc(truncTitle)}"`:''}>${boldIf(winners.truncated.has(v.id),fmt(b.truncated))}</td><td class="num">${fmt(b.invalid)}</td><td class="num">${fmt(v.predicate_calls)}</td><td class="num">${fmt(v.accepted_moves)}</td></tr>`;
+        return `<tr><td>${esc(v.label)}</td><td class="num">${fmt(b.completed)}</td><td class="num">${boldIf(winners.time.has(v.id),timeText)}</td><td class="num" title="Mean final bytes of completed and truncated trials">${boldIf(winners.size.has(v.id),sizeText)}</td><td class="num"${truncTitle?` title="${esc(truncTitle)}"`:''}>${boldIf(winners.truncated.has(v.id),fmt(b.truncated))}</td><td class="num">${fmt(b.invalid)}</td><td class="num">${fmt(v.predicate_calls)}</td><td class="num">${fmt(v.accepted_moves)}</td></tr>`;
       }).join('')||'<tr><td class="muted">No reducers in this run.</td></tr>';
       renderComparisons();
       const selectedReducer=$('reducer').value;
