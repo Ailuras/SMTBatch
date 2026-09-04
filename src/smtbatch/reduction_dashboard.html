@@ -176,6 +176,7 @@
           </section>
           <section class="field-grid">
             <label class="field">Per-case timeout<input id="timeout" type="number" min="0.001" step="1"><span class="field-note">Maximum wall-clock seconds for one benchmark × reducer × repeat.</span></label>
+            <label class="field">Predicate timeout<input id="predicateTimeout" type="number" min="0.001" step="1"><span class="field-note">Seconds for one oracle/solver call. Independent of the per-case trial wall.</span></label>
             <label class="field">Parallel jobs<input id="jobs" type="number" min="1" step="1"><span class="field-note">Outer jobs in the frozen schedule.</span></label>
             <label class="field">Maximum files<input id="maxFiles" type="number" min="0" step="1" value="0"><span class="field-note">0 = all selected cases; otherwise a random sample cap.</span></label>
             <label class="field">Repeats<input id="repeats" type="number" min="1" step="1"><span class="field-note">Repeat the same sample for comparison.</span></label>
@@ -279,6 +280,7 @@
       document.querySelectorAll('#categories input,#reducers input').forEach(function(input){input.addEventListener('change',updateSelectionSummary)});
       if(!state.formInitialized){
         $('timeout').value=lastRun.timeout_seconds??catalog.default_timeout_seconds;
+        $('predicateTimeout').value=lastRun.predicate_timeout_seconds??catalog.predicate_timeout_seconds;
         $('jobs').value=lastRun.outer_jobs??catalog.default_outer_jobs;
         $('maxFiles').value=lastRun.max_files??0;
         $('repeats').value=lastRun.repeats??catalog.default_repeats;
@@ -333,7 +335,7 @@
       updateHeader();
     }
     function renderConfirmation(payload){
-      const catalog=state.catalog||{},sample=sampleCount(poolSize(),payload.max_files),waves=payload.reducers.length*payload.repeats,batchesPerWave=sample?Math.ceil(sample/payload.outer_jobs):0,executionBatches=waves*batchesPerWave,estimatedSeconds=executionBatches*payload.timeout_seconds,predicatePasses=Number(catalog.preflight_repeats||1)+Number(catalog.verification_repeats||1),worstPerTrial=payload.timeout_seconds+Number(catalog.termination_grace_seconds||5)+predicatePasses*Number(catalog.predicate_timeout_seconds||25),worstSeconds=executionBatches*worstPerTrial;
+      const catalog=state.catalog||{},sample=sampleCount(poolSize(),payload.max_files),waves=payload.reducers.length*payload.repeats,batchesPerWave=sample?Math.ceil(sample/payload.outer_jobs):0,executionBatches=waves*batchesPerWave,estimatedSeconds=executionBatches*payload.timeout_seconds,predicatePasses=Number(catalog.preflight_repeats||1)+Number(catalog.verification_repeats||1),predicateTimeout=Number(payload.predicate_timeout_seconds||catalog.predicate_timeout_seconds||25),worstPerTrial=payload.timeout_seconds+Number(catalog.termination_grace_seconds||5)+predicatePasses*predicateTimeout,worstSeconds=executionBatches*worstPerTrial;
       $('confirmBody').innerHTML=metric('Planned trials',fmt(sample*payload.reducers.length*payload.repeats))+metric('Execution batches',fmt(executionBatches))+metric('Estimated completion',duration(estimatedSeconds))+metric('Worst-case completion',duration(worstSeconds));
     }
     function confirmRun(payload){
@@ -348,7 +350,7 @@
       });
     }
     function payloadFromForm(){
-      return {categories:checked('categories'),reducers:selectedReducers(),timeout_seconds:Number($('timeout').value),outer_jobs:Number($('jobs').value),max_files:Number($('maxFiles').value),repeats:Number($('repeats').value)};
+      return {categories:checked('categories'),reducers:selectedReducers(),timeout_seconds:Number($('timeout').value),predicate_timeout_seconds:Number($('predicateTimeout').value),outer_jobs:Number($('jobs').value),max_files:Number($('maxFiles').value),repeats:Number($('repeats').value)};
     }
     async function startRun(){
       try{
@@ -357,6 +359,7 @@
         if(!payload.categories.length)throw new Error('Select at least one benchmark group');
         if(!payload.reducers.length)throw new Error('Select at least one reducer');
         if(!Number.isFinite(payload.timeout_seconds)||payload.timeout_seconds<=0)throw new Error('Trial timeout must be positive');
+        if(!Number.isFinite(payload.predicate_timeout_seconds)||payload.predicate_timeout_seconds<=0)throw new Error('Predicate timeout must be positive');
         if(!Number.isInteger(payload.outer_jobs)||payload.outer_jobs<=0)throw new Error('Parallel jobs must be a positive integer');
         if(!Number.isInteger(payload.max_files)||payload.max_files<0)throw new Error('Maximum benchmark files must be a non-negative integer (0 means all)');
         if(!Number.isInteger(payload.repeats)||payload.repeats<=0)throw new Error('Repeats must be a positive integer');

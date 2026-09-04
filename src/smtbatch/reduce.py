@@ -531,6 +531,7 @@ def _plan_reducer(spec: ReducerSpec, root: Path) -> dict[str, object]:
 def build_plan(
     study: Mapping[str, object], *, config: Config | None = None,
     reducers: Sequence[str] | None = None, timeout_seconds: float | None = None,
+    predicate_timeout_seconds: float | None = None,
     outer_jobs: int | None = None, benchmark_ids: Sequence[str] | None = None,
     repeats: int | None = None, selection: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
@@ -562,6 +563,10 @@ def build_plan(
     )
     limits = dict(study["limits"])
     limits["trial_wall_sec"] = trial_timeout
+    if predicate_timeout_seconds is not None:
+        limits["predicate_timeout_sec"] = _positive_number(
+            predicate_timeout_seconds, "predicate_timeout_seconds"
+        )
     execution = {"outer_jobs": workers, "schedule": "strict-wave"}
     configured_comparisons = list(config.comparisons) or list(study["comparisons"])
     comparisons = [
@@ -733,7 +738,9 @@ def _validate_live_provenance(plan: Mapping[str, object]) -> None:
 
 def prepare(
     study_path: Path, output: Path, *, reducers: Sequence[str] | None = None,
-    timeout_seconds: float | None = None, outer_jobs: int | None = None,
+    timeout_seconds: float | None = None,
+    predicate_timeout_seconds: float | None = None,
+    outer_jobs: int | None = None,
     benchmark_ids: Sequence[str] | None = None, repeats: int | None = None,
     selection: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
@@ -745,7 +752,9 @@ def prepare(
         raise ReductionError(str(exc)) from None
     plan = build_plan(
         study, config=project_config, reducers=reducers,
-        timeout_seconds=timeout_seconds, outer_jobs=outer_jobs,
+        timeout_seconds=timeout_seconds,
+        predicate_timeout_seconds=predicate_timeout_seconds,
+        outer_jobs=outer_jobs,
         benchmark_ids=benchmark_ids, repeats=repeats, selection=selection,
     )
     _validate_live_provenance(plan)
@@ -2344,6 +2353,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="per-case reducer wall timeout in seconds (default: study value)",
     )
     prepare_parser.add_argument(
+        "--predicate-timeout", type=float, default=None,
+        help="oracle/solver timeout in seconds (default: study or smtbatch.toml)",
+    )
+    prepare_parser.add_argument(
         "--jobs", type=int, default=None,
         help="outer parallel jobs (default: study value)",
     )
@@ -2366,7 +2379,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.action == "prepare":
             plan = prepare(
                 args.study, args.output, reducers=args.reducers,
-                timeout_seconds=args.timeout, outer_jobs=args.jobs,
+                timeout_seconds=args.timeout,
+                predicate_timeout_seconds=args.predicate_timeout,
+                outer_jobs=args.jobs,
             )
             print(
                 f"[reduce] prepared {len(plan['benchmarks'])} benchmarks x "

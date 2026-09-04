@@ -23,6 +23,7 @@ class ManagerTests(ReductionFixture):
         self.assertTrue(catalog["valid"])
         self.assertEqual([item["id"] for item in catalog["reducers"]], ["r1", "r2"])
         self.assertEqual(catalog["default_timeout_seconds"], 30)
+        self.assertEqual(catalog["predicate_timeout_seconds"], 2)
         self.assertEqual(catalog["default_outer_jobs"], 2)
         self.assertEqual(catalog["default_repeats"], 2)
         self.assertEqual(catalog["total_benchmarks"], 1)
@@ -62,6 +63,7 @@ class ManagerTests(ReductionFixture):
         self.assertEqual(plan["selection"]["sampled_count"], 1)
         self.assertEqual(plan["repeats"], 3)
         self.assertEqual(plan["limits"]["trial_wall_sec"], 90)
+        self.assertEqual(plan["limits"]["predicate_timeout_sec"], 2)
         self.assertEqual(plan["execution"]["outer_jobs"], 5)
         self.assertEqual(len(plan["benchmarks"]), 1)
         self.assertEqual(len(plan["jobs"]), 3)
@@ -73,6 +75,20 @@ class ManagerTests(ReductionFixture):
         self.assertEqual(last_run["max_files"], 0)
         self.assertEqual(last_run["repeats"], 3)
         self.assertIn("saved_at", last_run)
+
+    def test_create_run_can_override_predicate_timeout(self) -> None:
+        with mock.patch.object(self.manager, "_launch", return_value={"run_id": "catalog-launched"}):
+            self.manager.create_run({
+                "categories": ["compact"], "reducers": ["r1"],
+                "timeout_seconds": 30, "outer_jobs": 1,
+                "max_files": 0, "repeats": 1,
+                "predicate_timeout_seconds": 90,
+            })
+        run_dirs = [path for path in (self.root / "results").iterdir() if path.is_dir()]
+        self.assertEqual(len(run_dirs), 1)
+        plan = reduce.load_plan(run_dirs[0])
+        self.assertEqual(plan["limits"]["predicate_timeout_sec"], 90)
+        self.assertEqual(self.manager.configuration()["last_run"]["predicate_timeout_seconds"], 90)
 
     def test_create_run_freezes_live_identity_after_source_commit(self) -> None:
         first = self.manager.benchmark_catalog()
@@ -110,6 +126,7 @@ class ManagerTests(ReductionFixture):
             {"categories": ["compact"], "reducers": ["r1"], "timeout_seconds": 0, "outer_jobs": 1, "max_files": 1, "repeats": 1},
             {"categories": ["compact"], "reducers": ["r1"], "timeout_seconds": 1, "outer_jobs": 0, "max_files": 1, "repeats": 1},
             {"categories": ["compact"], "reducers": ["r1"], "timeout_seconds": 1, "outer_jobs": 1, "max_files": -1, "repeats": 1},
+            {"categories": ["compact"], "reducers": ["r1"], "timeout_seconds": 1, "outer_jobs": 1, "max_files": 1, "repeats": 1, "predicate_timeout_seconds": 0},
         ]
         for body in invalid:
             with self.subTest(body=body), self.assertRaises(ValueError):

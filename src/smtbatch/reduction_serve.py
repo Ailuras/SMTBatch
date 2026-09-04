@@ -284,6 +284,7 @@ class ReductionManager:
                 value for value in request.get("reducers", []) if isinstance(value, str)
             )),
             "timeout_seconds": request.get("timeout_seconds"),
+            "predicate_timeout_seconds": request.get("predicate_timeout_seconds"),
             "outer_jobs": request.get("outer_jobs"),
             "max_files": request.get("max_files", 0),
             "repeats": request.get("repeats"),
@@ -364,6 +365,8 @@ class ReductionManager:
             input_signature,
             str(template_path) if template_path else "", _stat_signature(template_path) if template_path else None,
             str(self.config.path), _stat_signature(self.config.path),
+            str(self.config.benchmark_oracle),
+            _stat_signature(self.config.benchmark_oracle),
             _git_generation(self.project_root),
             self.config.benchmark_identity_command,
             tuple(
@@ -464,7 +467,7 @@ class ReductionManager:
                 "predicate": {
                     "command": [
                         sys.executable,
-                        str(self.project_root / "benchmarks" / "oracle.py"),
+                        str(self.config.benchmark_oracle),
                         filename,
                     ],
                     "match": predicate_match,
@@ -529,7 +532,9 @@ class ReductionManager:
         verification_repeats = template.get("verification_repeats", 1)
         limits = {
             "trial_wall_sec": template_limits.get("trial_wall_sec", 120),
-            "predicate_timeout_sec": template_limits.get("predicate_timeout_sec", 25),
+            "predicate_timeout_sec": template_limits.get(
+                "predicate_timeout_sec", self.config.predicate_timeout_sec
+            ),
             "predicate_envelope_grace_sec": template_limits.get(
                 "predicate_envelope_grace_sec", 3
             ),
@@ -715,10 +720,19 @@ class ReductionManager:
         self._refresh_config()
         if not self.branch_valid:
             raise ValueError(self.branch_error)
-        expected = {"categories", "reducers", "timeout_seconds", "outer_jobs", "max_files", "repeats"}
-        if not isinstance(body, dict) or set(body) != expected:
+        required = {
+            "categories", "reducers", "timeout_seconds",
+            "outer_jobs", "max_files", "repeats",
+        }
+        optional = {"predicate_timeout_seconds"}
+        if (
+            not isinstance(body, dict)
+            or not required <= set(body)
+            or set(body) - required - optional
+        ):
             raise ValueError(
-                "request must contain categories, reducers, timeout_seconds, outer_jobs, max_files, and repeats"
+                "request must contain categories, reducers, timeout_seconds, "
+                "outer_jobs, max_files, and repeats"
             )
         # A new run freezes the live tree. Never reuse a serve-start catalog.
         self._catalog_cache = None
@@ -740,11 +754,18 @@ class ReductionManager:
         if len(set(selected)) != len(selected):
             raise ValueError("reducers must not contain duplicates")
         timeout_seconds = body.get("timeout_seconds")
+        predicate_timeout_seconds = body.get("predicate_timeout_seconds")
         outer_jobs = body.get("outer_jobs")
         max_files = body.get("max_files")
         repeats = body.get("repeats")
         if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)) or timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be a positive number")
+        if predicate_timeout_seconds is not None and (
+            isinstance(predicate_timeout_seconds, bool)
+            or not isinstance(predicate_timeout_seconds, (int, float))
+            or predicate_timeout_seconds <= 0
+        ):
+            raise ValueError("predicate_timeout_seconds must be a positive number")
         if isinstance(outer_jobs, bool) or not isinstance(outer_jobs, int) or outer_jobs <= 0:
             raise ValueError("outer_jobs must be a positive integer")
         if isinstance(max_files, bool) or not isinstance(max_files, int) or max_files < 0:
@@ -777,7 +798,12 @@ class ReductionManager:
             raise ValueError("run id collision; retry")
         reduction.prepare(
             Path(str(catalog["manifest_path"])), run_dir,
-            reducers=selected, timeout_seconds=float(timeout_seconds), outer_jobs=outer_jobs,
+            reducers=selected, timeout_seconds=float(timeout_seconds),
+            predicate_timeout_seconds=(
+                None if predicate_timeout_seconds is None
+                else float(predicate_timeout_seconds)
+            ),
+            outer_jobs=outer_jobs,
             benchmark_ids=selected_benchmark_ids, repeats=repeats, selection=selection,
         )
         return self._launch_with_last_run(run_id, run_dir, body)

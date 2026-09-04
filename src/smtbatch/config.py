@@ -93,10 +93,12 @@ class Config:
     smtbatch_root: Path
     benchmark_database: Path
     benchmark_inputs_root: Path
+    benchmark_oracle: Path
     benchmark_template: Path | None
     benchmark_identity_command: tuple[str, ...]
     benchmark_categories: dict[str, BenchmarkCategorySpec]
     comparisons: tuple[tuple[str, str], ...]
+    predicate_timeout_sec: float = 25.0
     port: int = 8001
     target_branch: str = "main"
 
@@ -131,7 +133,8 @@ def load_config(start: Path | None = None) -> Config:
     if not isinstance(defaults, dict):
         raise RuntimeError(f"[defaults] must be a table in {path}")
     default_extras = sorted(
-        set(defaults) - {"results", "port", "target_branch", "comparisons"}
+        set(defaults)
+        - {"results", "port", "target_branch", "comparisons", "predicate_timeout_sec"}
     )
     if default_extras:
         raise RuntimeError(f"unknown [defaults] fields in {path}: {', '.join(default_extras)}")
@@ -148,7 +151,8 @@ def load_config(start: Path | None = None) -> Config:
     if not isinstance(catalog_raw, dict):
         raise RuntimeError(f"[benchmark_catalog] must be a table in {path}")
     catalog_extras = sorted(
-        set(catalog_raw) - {"database", "inputs", "template", "identity_command"}
+        set(catalog_raw)
+        - {"database", "inputs", "oracle", "template", "identity_command"}
     )
     if catalog_extras:
         raise RuntimeError(
@@ -159,6 +163,9 @@ def load_config(start: Path | None = None) -> Config:
     )
     inputs_path = _resolve_path(
         catalog_raw.get("inputs", "benchmarks/inputs"), path
+    )
+    oracle_path = _resolve_path(
+        catalog_raw.get("oracle", "benchmarks/oracle.py"), path
     )
     template_value = catalog_raw.get("template")
     template_path = _resolve_path(template_value, path) if template_value is not None else None
@@ -192,10 +199,16 @@ def load_config(start: Path | None = None) -> Config:
         smtbatch_root=(path.parent / "SMTBatch").resolve(),
         benchmark_database=database_path,
         benchmark_inputs_root=inputs_path,
+        benchmark_oracle=oracle_path,
         benchmark_template=template_path,
         benchmark_identity_command=identity_command,
         benchmark_categories=categories,
         comparisons=comparisons,
+        predicate_timeout_sec=_parse_positive_number(
+            defaults.get("predicate_timeout_sec", 25),
+            "[defaults] predicate_timeout_sec",
+            path,
+        ),
         port=_parse_port(defaults.get("port", 8001), path),
         target_branch=target_branch,
     )
@@ -233,6 +246,12 @@ def validate_target_branch(config: Config) -> str:
     if not valid:
         raise RuntimeError(error)
     return branch
+
+
+def _parse_positive_number(value: object, label: str, path: Path) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        raise RuntimeError(f"{label} must be a positive number in {path}")
+    return float(value)
 
 
 def _parse_port(value: object, path: Path) -> int:
