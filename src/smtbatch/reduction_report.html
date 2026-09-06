@@ -107,10 +107,10 @@
         </div>
         <div id="detail" class="detail">
           <h3 id="caseTitle" style="margin:0"></h3>
-          <div class="scroll" style="margin-top:10px"><table><thead><tr><th>Reducer</th><th>Status</th><th class="num">Calls</th><th class="num">Accepted</th><th class="num">Final bytes</th><th class="num">Ratio</th></tr></thead><tbody id="trialRows"></tbody></table></div>
+          <div class="scroll" style="margin-top:10px"><table><thead><tr><th>Reducer</th><th>Status</th><th class="num">Calls</th><th class="num">Preserving checks</th><th class="num">Final bytes</th><th class="num">Ratio</th></tr></thead><tbody id="trialRows"></tbody></table></div>
           <div class="legend-row"><div class="legend" id="legend"></div><label class="repeat-filter">Repeat<select id="repeatSel"></select></label></div>
           <div class="chart"><h3>Size over time (serialized bytes)</h3><svg id="sizeChart" viewBox="0 0 580 300"></svg></div>
-          <div class="chart"><h3>Accepted moves over time</h3><svg id="opsChart" viewBox="0 0 580 300"></svg></div>
+          <div class="chart"><h3>Preserving checks over time</h3><svg id="opsChart" viewBox="0 0 580 300"></svg></div>
         </div>
       </div>
     </section>
@@ -167,7 +167,7 @@
       $('evidence').innerHTML=notes.length?`<div class="notice">${esc(notes.join(' · '))}</div>`:'';
       const reducers=Object.values(r.by_reducer||[]);
       const winners=winnersOf(reducers);
-      $('reducerHead').innerHTML='<tr><th>Reducer</th><th class="num">completed</th><th class="num">AVG TIME</th><th class="num">AVG SIZE</th><th class="num">truncated</th><th class="num">invalid</th><th class="num">Calls</th><th class="num">Accepted</th></tr>';
+      $('reducerHead').innerHTML='<tr><th>Reducer</th><th class="num">completed</th><th class="num">AVG TIME</th><th class="num">AVG SIZE</th><th class="num">truncated</th><th class="num">invalid</th><th class="num">Calls</th><th class="num">Preserving checks</th></tr>';
       $('reducerRows').innerHTML=reducers.map(v=>{
         const b=bucketCounts(v.statuses);
         const timeText=v.completed_avg_sec==null?'—':seconds(v.completed_avg_sec);
@@ -246,7 +246,7 @@
         sizeSvg.insertAdjacentHTML('beforeend',`<path class="curve" stroke="${color}" d="${dPath}"/>`);
         s.pts.filter(p=>p.accepted&&Number(p.call_index||0)>0).forEach(p=>{sizeSvg.insertAdjacentHTML('beforeend',`<circle class="accept" fill="${color}" cx="${box.X(Number(p.elapsed_sec||0))}" cy="${box.Y(Number(p.byte_count||0))}" r="3.5"><title>${esc(s.t.reducer_label)} / r${esc(s.t.repeat)} · ${seconds(Number(p.elapsed_sec||0))} · ${esc(p.mutator||'')} · ${fmt(p.byte_count)} B</title></circle>`)});
       }
-      // accepted-moves chart: cumulative accepted count over wall time
+      // preserving-check chart: cumulative positive predicate count over wall time
       const opsSvg=$('opsChart');
       let opsSeries=series.map(s=>{let acc=0;const pts=[[0,0]];for(const p of s.pts){if(p.accepted){acc+=1;pts.push([Number(p.elapsed_sec||0),acc])}}return{t:s.t,pts,acc}});
       const maxA=Math.max(1,...opsSeries.map(s=>s.acc));

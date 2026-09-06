@@ -1349,7 +1349,9 @@ def trajectory_for_attempt(
         "final_replay_calls": len(final_replays),
         "candidate_calls": len(candidates),
         "preserving_calls": preserving_count,
-        "accepted_moves": accepted_count,
+        "accepted_moves": accepted_count,  # legacy alias, not actual reducer commits
+        "accepted_moves_is_exact": False,
+        "best_observed_preserving": accepted_best,
         "last_accept_call": last_accept,
         "tail_calls": max(0, len(candidates) - last_accept),
         "points": points,
@@ -1593,11 +1595,10 @@ def _execute_job(output: Path, plan: Mapping[str, object], job: Mapping[str, obj
             _seal_job(job_dir, attempt_dir, result)
             return result
 
-        # A reducer is allowed to reach a fixed point without writing its
-        # output path.  Materialize the incumbent before launch so that
-        # "no reduction" is represented by a verified original candidate,
-        # while a crash/timeout still receives its distinct reducer status.
-        shutil.copy2(input_path, attempt_dir / "output.smt2")
+        # Preserve the verified starting point separately. The reducer's
+        # output path must remain absent until the reducer actually writes it.
+        # Otherwise a crashed/no-output reducer appears to have returned input.
+        shutil.copy2(input_path, attempt_dir / "input.verified.smt2")
         command, env = _render_tool_command(plan, benchmark, reducer, enriched_job, attempt_dir)
         _write_json(attempt_dir / "command.json", {
             "argv": command, "cwd": str(root),
@@ -1673,6 +1674,7 @@ def _execute_job(output: Path, plan: Mapping[str, object], job: Mapping[str, obj
             "execution_status": ('error' if reducer_result['error'] else 'timeout' if reducer_result['timed_out']
                                  else 'reducer_error' if reducer_result['returncode'] else 'complete'),
             "output_parse_status": 'parsed' if output_quality else 'missing_or_unparseable',
+            "output_origin": 'reducer' if output_valid else 'missing',
             "behavior_status": 'verified' if verified else 'failed',
             "verified": verified,
             "evidence_ok": health["ok"], "evidence_warnings": health["warnings"],
@@ -1686,6 +1688,8 @@ def _execute_job(output: Path, plan: Mapping[str, object], job: Mapping[str, obj
             "cleanup_wall_sec": reducer_result["cleanup_wall_sec"],
             "returncode": reducer_result["returncode"], "timed_out": reducer_result["timed_out"],
             "predicate_calls": health["predicate_calls"], "accepted_moves": health["accepted_moves"],
+            "preserving_calls": trajectory["preserving_calls"],
+            "accepted_moves_is_exact": False,
             "phase_costs": phase_costs,
             "memory_limit": {"mb": limits["memory_mb"], "mechanism": "inherited RLIMIT_AS per process"},
             "output": str(attempt_dir / "output.verified.smt2") if verified else "",

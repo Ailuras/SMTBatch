@@ -160,6 +160,19 @@ class ConfigTests(ReductionFixture):
             "[defaults]", '[defaults]\nsmtbatch_root = "' + str(sibling) + '"'))
         self.assertEqual(load_config(self.root).smtbatch_root, sibling.resolve())
 
+    def test_no_output_is_not_replaced_by_verified_input(self) -> None:
+        output = self.root / "results" / "no-output"
+        plan = reduce.prepare(self.study_path, output, reducers=["r1"])
+        result = reduce._execute_job(output, plan, plan["jobs"][0])
+        self.assertEqual(result["execution_status"], "complete")
+        self.assertEqual(result["status_detail"], "invalid_output")
+        self.assertEqual(result["output_origin"], "missing")
+        self.assertFalse(result["verified"])
+        self.assertIsNone(result["output_quality"])
+        attempt = Path(result["attempt_dir"])
+        self.assertTrue((attempt / "input.verified.smt2").is_file())
+        self.assertFalse((attempt / "output.smt2").exists())
+
     def test_command_snapshot_hashes_project_files_not_the_interpreter(self) -> None:
         script = self.root / "oracle.py"
         script.write_text("print('ok')\n", encoding="utf-8")

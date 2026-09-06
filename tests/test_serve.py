@@ -427,7 +427,7 @@ class HttpTests(ReductionFixture):
         html = data.decode("utf-8")
         self.assertEqual(status, 200)
         self.assertIn("Size over time", html)
-        self.assertIn("Accepted moves over time", html)
+        self.assertIn("Preserving checks over time", html)
         self.assertIn("case-layout", html)
         self.assertIn("trajSeq", html)
         self.assertIn("state.summary.live", html)
