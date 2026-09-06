@@ -16,6 +16,11 @@ import sys
 import time
 import uuid
 
+if __package__:
+    from .oracle_protocol import decode
+else:  # Historical script-path entry used by frozen wrappers.
+    from oracle_protocol import decode
+
 
 _CORRELATION_ENV = {
     "SMTBATCH_PREDICATE_ROLE",
@@ -159,6 +164,7 @@ def _candidate_record(path: Path) -> dict[str, object]:
     }
     try:
         raw = path.read_bytes()
+        record.update(bytes=len(raw), sha256=_sha256_bytes(raw))
         text = raw.decode("utf-8")
         tokens = list(_tokens(text))
         depth = 0
@@ -189,6 +195,8 @@ def _candidate_record(path: Path) -> dict[str, object]:
                 "expression_count": expressions,
                 "node_count": nodes,
                 "byte_count": len(raw),
+                "normalized_byte_count": len(" ".join(tokens).encode("utf-8")),
+                "token_count": len(tokens),
             },
         })
     except Exception as error:  # evidence retains parse failures explicitly
@@ -452,8 +460,16 @@ def main(argv: list[str] | None = None) -> int:
             returncode = 128 + interrupted["signum"]
             error = f"predicate interrupted by signal {interrupted['signum']}"
 
+    oracle = decode(stdout, returncode)
+    if oracle and oracle.get('outcome')=='incomplete':
+        timed_out=any((oracle.get(role) or {}).get('status')=='timeout' for role in ('target','reference'))
+    if "--json" in args.command and oracle is None and not timed_out and not killed:
+        returncode = 2
+        error = "malformed oracle v3 response"
     _append(args.log, {
-        "schema_version": 3,
+        "schema_version": 4,
+        "oracle": oracle,
+        "solver_executions": oracle.get("solver_executions") if oracle else None,
         "event": "finish",
         "call_id": call_id,
         "finished_ns": time.time_ns(),

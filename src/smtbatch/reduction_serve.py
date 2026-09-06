@@ -451,12 +451,7 @@ class ReductionManager:
             if mode not in {"stderr", "stdout", "incorrect", "incorrect-unknown", "exitcode"}:
                 errors.append(f"{filename}: unsupported database match mode {mode!r}")
                 continue
-            if mode in {"stderr", "stdout"}:
-                predicate_match = {"match_stdout": "matched"}
-            elif mode in {"incorrect", "incorrect-unknown"}:
-                predicate_match = {"match_stdout": "different"}
-            else:
-                predicate_match = {}
+            predicate_match = {"ignore_stdout": True, "ignore_stderr": True}
             benchmark = {
                 "id": filename,
                 "input": str(input_path),
@@ -468,6 +463,7 @@ class ReductionManager:
                     "command": [
                         sys.executable,
                         str(self.config.benchmark_oracle),
+                        "--json",
                         filename,
                     ],
                     "match": predicate_match,
@@ -529,9 +525,9 @@ class ReductionManager:
         execution_template = template.get("execution", {})
         if not isinstance(execution_template, dict):
             execution_template = {}
-        verification_repeats = template.get("verification_repeats", 1)
+        verification_repeats = template.get("verification_repeats", 3)
         limits = {
-            "trial_wall_sec": template_limits.get("trial_wall_sec", 120),
+            "trial_wall_sec": template_limits.get("trial_wall_sec", 3600),
             "predicate_timeout_sec": template_limits.get(
                 "predicate_timeout_sec", self.config.predicate_timeout_sec
             ),
@@ -539,13 +535,13 @@ class ReductionManager:
                 "predicate_envelope_grace_sec", 3
             ),
             "memory_mb": template_limits.get("memory_mb", 8192),
-            "preflight_repeats": template_limits.get("preflight_repeats", 1),
+            "preflight_repeats": max(3, template_limits.get("preflight_repeats", 3)),
             "verification_repeats": template_limits.get(
                 "verification_repeats", verification_repeats
             ),
             "termination_grace_sec": template_limits.get("termination_grace_sec", 5),
             "analysis_horizon_sec": template_limits.get(
-                "analysis_horizon_sec", template_limits.get("trial_wall_sec", 120)
+                "analysis_horizon_sec", template_limits.get("trial_wall_sec", 3600)
             ),
         }
         wrapper_script = Path(__file__).with_name("predicate.py").resolve()
@@ -568,13 +564,13 @@ class ReductionManager:
             "study_id": "benchmark-catalog",
             "root": str(self.project_root),
             "execution": {
-                "outer_jobs": execution_template.get("outer_jobs", 1),
+                "outer_jobs": execution_template.get("outer_jobs", 32),
                 "schedule": "strict-wave",
             },
             "predicate_wrapper": predicate_wrapper,
             "benchmarks": benchmarks,
             "reducers": configured_reducers,
-            "repeats": template.get("repeats", 1),
+            "repeats": template.get("repeats", 3),
             "limits": limits,
             "comparisons": comparisons,
             "catalog": catalog_payload,
@@ -1335,6 +1331,7 @@ class ReductionManager:
                 item for item in results if str(item.get("repeat")) == repeat
             ]
             compare_plan["repeats"] = 1
+            compare_plan["comparison_repeat_ids"] = [int(repeat)]
         labels = {str(item["id"]): item["label"] for item in plan["reducers"]}
         comparisons = [
             {

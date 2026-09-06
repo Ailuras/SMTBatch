@@ -74,7 +74,7 @@ require_clean = true
         self.study_path = self.root / "studies" / "study.json"
         self.study_path.write_text(
             json.dumps({
-                "schema_version": 3,
+                "schema_version": 4,
                 "kind": "reduction",
                 "study_id": "fixture",
                 "root": "..",
@@ -224,8 +224,8 @@ class PlanTests(ReductionFixture):
         self.assertEqual(loaded["limits"]["trial_wall_sec"], 61)
         self.assertEqual(loaded["execution"]["outer_jobs"], 4)
         self.assertTrue((output / "plan.complete.json").is_file())
-        self.assertEqual(loaded["schema_version"], 3)
-        self.assertEqual(loaded["format"], "reduction-v3")
+        self.assertEqual(loaded["schema_version"], 4)
+        self.assertEqual(loaded["format"], "reduction-v4")
         self.assertIn("provenance", loaded["reducers"][0])
         self.assertIn("harness_provenance", loaded)
         self.assertEqual(

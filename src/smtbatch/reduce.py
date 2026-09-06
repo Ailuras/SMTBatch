@@ -33,11 +33,12 @@ from typing import Iterable, Mapping, Sequence
 from .config import Config, ReducerSpec, load_config, validate_target_branch
 from . import provenance
 from .predicate import is_timeout_exit
+from .oracle_protocol import decode as decode_oracle, preserving as oracle_preserving
 
 
-SCHEMA_VERSION = 3
-FORMAT = "reduction-v3"
-SUPPORTED_FORMATS = {2: "reduction-v2", 3: FORMAT}
+SCHEMA_VERSION = 4
+FORMAT = "reduction-v4"
+SUPPORTED_FORMATS = {2: "reduction-v2", 3: "reduction-v3", 4: FORMAT}
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 MAX_LOG_BYTES = 64 * 1024
 STUDY_FIELDS = {
@@ -70,8 +71,8 @@ WRAPPER_SCALAR_PLACEHOLDERS = {
 RESULT_FIELDS = [
     "job_id", "benchmark", "reducer", "repeat", "wave", "status",
     "status_detail", "verified", "evidence_ok", "input_expressions",
-    "input_nodes", "input_bytes", "output_expressions", "output_nodes",
-    "output_bytes", "size_ratio", "trial_wall_sec", "cleanup_wall_sec",
+    "input_nodes", "input_bytes", "input_normalized_bytes", "input_tokens", "output_expressions", "output_nodes",
+    "output_bytes", "output_normalized_bytes", "output_tokens", "size_ratio", "trial_wall_sec", "cleanup_wall_sec",
     "predicate_calls", "accepted_moves", "attempt", "output",
 ]
 RUNNING_STATES = {"starting", "running", "stopping", "aborting", "resuming", "paused"}
@@ -318,7 +319,7 @@ def _normalize_limits(value: object) -> dict[str, object]:
     _only_fields(raw, LIMIT_FIELDS, "limits")
     trial = _positive_number(raw.get("trial_wall_sec", 3600), "limits.trial_wall_sec")
     predicate_timeout = _positive_number(
-        raw.get("predicate_timeout_sec", 25), "limits.predicate_timeout_sec"
+        raw.get("predicate_timeout_sec", 90), "limits.predicate_timeout_sec"
     )
     return {
         "trial_wall_sec": trial,
@@ -327,12 +328,12 @@ def _normalize_limits(value: object) -> dict[str, object]:
             raw.get("predicate_envelope_grace_sec", 3),
             "limits.predicate_envelope_grace_sec",
         ),
-        "memory_mb": _positive_int(raw.get("memory_mb", 0), "limits.memory_mb", allow_zero=True),
+        "memory_mb": _positive_int(raw.get("memory_mb", 8192), "limits.memory_mb", allow_zero=True),
         "preflight_repeats": _positive_int(
-            raw.get("preflight_repeats", 1), "limits.preflight_repeats"
+            raw.get("preflight_repeats", 3), "limits.preflight_repeats"
         ),
         "verification_repeats": _positive_int(
-            raw.get("verification_repeats", 1), "limits.verification_repeats"
+            raw.get("verification_repeats", 3), "limits.verification_repeats"
         ),
         "termination_grace_sec": _positive_number(
             raw.get("termination_grace_sec", 5), "limits.termination_grace_sec"
@@ -362,7 +363,7 @@ def load_study(path: Path) -> dict[str, object]:
     raw = _mapping(_read_json(study_path, "study"), "study")
     _only_fields(raw, STUDY_FIELDS, "study")
     if raw.get("schema_version") != SCHEMA_VERSION or raw.get("kind") != "reduction":
-        raise ReductionError("study must use schema_version 3 and kind 'reduction'")
+        raise ReductionError("study must use schema_version 4 and kind 'reduction'")
     study_id = _identifier(raw.get("study_id"), "study_id")
     root = _resolve_root(study_path, raw.get("root"))
     fingerprints: dict[Path, dict[str, object]] = {}
@@ -635,6 +636,7 @@ def build_plan(
         "execution": execution,
         "predicate_wrapper": study["predicate_wrapper"],
         "harness_provenance": harness_provenance,
+        "harness_source": provenance.snapshot_path(Path(__file__).resolve().parent),
         "benchmarks": benchmarks,
         "reducers": reducers,
         "repeats": repeat_count,
@@ -681,8 +683,12 @@ def _validate_live_provenance(plan: Mapping[str, object]) -> None:
     version, _ = _schema_identity(plan, "plan")
     if version != SCHEMA_VERSION:
         raise ReductionError(
-            "reduction-v2 plans are read-only; prepare a reduction-v3 plan before execution"
+            "reduction-v2/v3 plans are read-only; prepare a reduction-v4 plan before execution"
         )
+
+    frozen_source=plan.get('harness_source')
+    if frozen_source is None or not provenance.same_snapshot(frozen_source, provenance.snapshot_path(Path(__file__).resolve().parent)):
+        raise ReductionError('SMTBatch implementation drift; prepare a new v4 freeze')
 
     source = _mapping(plan.get("source"), "plan source")
     _validate_frozen_file(source, "study source")
@@ -893,9 +899,11 @@ def _terminate_process(process: subprocess.Popen[bytes], grace: float) -> float:
 
 def _run_command(
     command: Sequence[str], *, cwd: Path, timeout: float, grace: float,
-    env: Mapping[str, str] | None = None,
+    env: Mapping[str, str] | None = None, memory_mb: int = 0,
 ) -> dict[str, object]:
     started = time.monotonic()
+    if memory_mb:
+        command=[sys.executable,str(Path(__file__).with_name('resource_exec.py')),str(memory_mb),*command]
     try:
         process = subprocess.Popen(
             list(command), cwd=cwd, env=dict(env) if env is not None else None,
@@ -946,9 +954,12 @@ def _run_command(
 def _observation(result: Mapping[str, object]) -> dict[str, object]:
     stdout = bytes(result["stdout"])
     stderr = bytes(result["stderr"])
+    oracle=decode_oracle(stdout, result['returncode'])
+    protocol_timeout=bool(oracle and any((oracle.get(role) or {}).get('status')=='timeout' for role in ('target','reference')))
     return {
+        "oracle": decode_oracle(stdout, result["returncode"]),
         "returncode": result["returncode"],
-        "timed_out": result["timed_out"],
+        "timed_out": result["timed_out"] or protocol_timeout,
         "wall_sec": result["wall_sec"],
         "stdout_bytes": len(stdout),
         "stderr_bytes": len(stderr),
@@ -1061,7 +1072,7 @@ def _run_predicate(
         cwd=Path(str(plan["root"])),
         timeout=float(plan["limits"]["predicate_timeout_sec"]) + 5,
         grace=float(plan["limits"]["termination_grace_sec"]),
-        env=env,
+        env=env, memory_mb=int(plan["limits"]["memory_mb"]),
     )
     return _observation(result)
 
@@ -1081,9 +1092,13 @@ def _stream_matches(
 def _matches_baseline(
     baseline: Mapping[str, object], candidate: Mapping[str, object], match: Mapping[str, object]
 ) -> bool:
+    if baseline.get("oracle") is not None or candidate.get("oracle") is not None:
+        return (not baseline.get("error") and not candidate.get("error")
+                and not baseline.get("timed_out") and not candidate.get("timed_out")
+                and oracle_preserving(baseline.get("oracle"), candidate.get("oracle")))
     if baseline.get("error") is not None or candidate.get("error") is not None:
         return False
-    if bool(baseline.get("timed_out")) != bool(candidate.get("timed_out")):
+    if baseline.get("timed_out") or candidate.get("timed_out"):
         return False
     if baseline.get("returncode") != candidate.get("returncode"):
         return False
@@ -1163,7 +1178,18 @@ def _quality(value: object) -> tuple[int, int, int] | None:
     values = tuple(value.get(name) for name in names)
     if not all(isinstance(item, int) and not isinstance(item, bool) and item >= 0 for item in values):
         return None
-    return values  # type: ignore[return-value]
+    return values + (value.get('normalized_byte_count'), value.get('token_count'))
+
+
+def _rank_quality(value):
+    return (value[1], value[3] if len(value) > 3 and value[3] is not None else value[2])
+
+
+def _quality_dict(value):
+    if value is None or value[0] is None:
+        return None
+    return dict(zip(('expression_count','node_count','byte_count',
+                     'normalized_byte_count','token_count'), value))
 
 
 def _candidate_quality(start: Mapping[str, object]) -> tuple[int, int, int] | None:
@@ -1189,7 +1215,7 @@ def trajectory_for_attempt(
     golden = reducer_starts[0] if reducer_starts else None
     initial = _candidate_quality(golden) if golden else None
     if initial is None:
-        initial = (0, 0, int(benchmark.get("input_bytes", 0)))
+        initial = (None, None, benchmark.get("input_bytes"), None, None)
     golden_finish = finishes.get(golden["call_id"]) if golden else None
     candidates = reducer_starts[1:]
     final_replays = [
@@ -1201,6 +1227,7 @@ def trajectory_for_attempt(
     points = [{
         "call_index": 0, "elapsed_sec": 0.0,
         "expression_count": initial[0], "node_count": initial[1], "byte_count": initial[2],
+        "normalized_byte_count": initial[3], "token_count": initial[4],
         "accepted": True, "preserving": True, "candidate_sha256": _candidate_hash(golden or {}),
         "phase": "initial", "mutator": None,
     }]
@@ -1227,7 +1254,8 @@ def trajectory_for_attempt(
                 + (f": {detail}" if detail else "")
             )
         if accepted and candidate_quality is not None:
-            best = candidate_quality
+            if best[0] is None or _rank_quality(candidate_quality) < _rank_quality(best):
+                best = candidate_quality
             accepted_count += 1
         finish_ns = int((finish or start).get("monotonic_ns", 0) or 0)
         elapsed = max(0.0, (finish_ns - start_ns) / 1_000_000_000) if start_ns and finish_ns else 0.0
@@ -1235,6 +1263,7 @@ def trajectory_for_attempt(
             "call_index": call_index,
             "elapsed_sec": elapsed,
             "expression_count": best[0], "node_count": best[1], "byte_count": best[2],
+            "normalized_byte_count": best[3], "token_count": best[4],
             "candidate_expression_count": candidate_quality[0] if candidate_quality else None,
             "candidate_node_count": candidate_quality[1] if candidate_quality else None,
             "candidate_byte_count": candidate_quality[2] if candidate_quality else None,
@@ -1261,6 +1290,7 @@ def trajectory_for_attempt(
         "node_count": best[1],
         "byte_count": best[2],
     }
+    accepted_best = _quality_dict(best)
     final_quality: dict[str, int] | None = accepted_best
     if not allow_partial:
         final_quality = None
@@ -1282,6 +1312,10 @@ def trajectory_for_attempt(
                     warnings.append("final replay quality is unavailable")
                     final_complete = False
                 call_id = replay.get("call_id")
+                if (golden_finish is None or call_id not in finishes or
+                    not _matches_journal_finish(golden_finish, finishes[call_id], match)):
+                    warnings.append('final replay did not preserve golden behavior')
+                    final_complete = False
                 if not isinstance(call_id, str) or call_id not in finishes:
                     warnings.append("final replay predicate call is incomplete")
                     final_complete = False
@@ -1304,16 +1338,12 @@ def trajectory_for_attempt(
             if final_complete:
                 quality = identities[0][2]
                 assert quality is not None
-                final_quality = {
-                    "expression_count": quality[0],
-                    "node_count": quality[1],
-                    "byte_count": quality[2],
-                }
+                final_quality = _quality_dict(quality)
     last_accept = max((point["call_index"] for point in points if point["accepted"]), default=0)
     return {
         "provisional": allow_partial,
         "exact_acceptance": exact,
-        "initial": {"expression_count": initial[0], "node_count": initial[1], "byte_count": initial[2]},
+        "initial": _quality_dict(initial),
         "accepted_best": accepted_best,
         "final": final_quality,
         "final_replay_calls": len(final_replays),
@@ -1332,7 +1362,12 @@ def trajectory_for_attempt(
 def _matches_journal_finish(
     golden: Mapping[str, object], candidate: Mapping[str, object], match: Mapping[str, object]
 ) -> bool:
-    if bool(golden.get("timed_out")) != bool(candidate.get("timed_out")):
+    if golden.get("oracle") is not None or candidate.get("oracle") is not None:
+        return (not golden.get("error") and not candidate.get("error")
+                and oracle_preserving(golden.get("oracle"), candidate.get("oracle")))
+    if golden.get("error") or candidate.get("error"):
+        return False
+    if golden.get("timed_out") or candidate.get("timed_out"):
         return False
     if candidate.get("returncode") != golden.get("returncode"):
         return False
@@ -1534,7 +1569,11 @@ def _execute_job(output: Path, plan: Mapping[str, object], job: Mapping[str, obj
                 _partial_abort(attempt_dir, "immediate stop during preflight")
                 raise ImmediateAbort("immediate stop during preflight")
         _write_json(attempt_dir / "preflight.json", {"observations": preflight})
-        stable_preflight = bool(preflight) and all(
+        strict = '--json' in benchmark['predicate']['command']
+        stable_preflight = (bool(preflight) and
+            (not strict or all(item.get('oracle', {}).get('outcome') == 'interesting'
+                               for item in preflight if item.get('oracle') is not None)
+             and all(item.get('oracle') is not None for item in preflight))) and all(
             _matches_baseline(preflight[0], item, benchmark["predicate"]["match"])
             for item in preflight
         )
@@ -1569,7 +1608,7 @@ def _execute_job(output: Path, plan: Mapping[str, object], job: Mapping[str, obj
         })
         reducer_result = _run_command(
             command, cwd=root, timeout=float(limits["trial_wall_sec"]),
-            grace=float(limits["termination_grace_sec"]), env=env,
+            grace=float(limits["termination_grace_sec"]), env=env, memory_mb=int(limits["memory_mb"]),
         )
         reducer_stdout = bytes(reducer_result.pop("stdout"))
         reducer_stderr = bytes(reducer_result.pop("stderr"))
@@ -1617,10 +1656,24 @@ def _execute_job(output: Path, plan: Mapping[str, object], job: Mapping[str, obj
         initial_quality = trajectory["initial"]
         output_quality = trajectory["final"]
         output_bytes = output_path.stat().st_size if output_valid else None
+        journal_data=_journal_events(journal,allow_partial=False)
+        phase_costs={}
+        for start in journal_data['starts']:
+            role=start.get('role',start.get('phase','unknown'))
+            finish=journal_data['finishes'].get(start['call_id'],{})
+            bucket=phase_costs.setdefault(role,dict(predicate_executions=0,solver_executions=0,incomplete_records=0))
+            bucket['predicate_executions']+=1
+            count=finish.get('solver_executions')
+            if isinstance(count,int):bucket['solver_executions']+=count
+            else:bucket['incomplete_records']+=1
         result = {
             **enriched_job,
             "schema_version": SCHEMA_VERSION, "format": FORMAT,
             "status": status_value, "status_detail": status_detail,
+            "execution_status": ('error' if reducer_result['error'] else 'timeout' if reducer_result['timed_out']
+                                 else 'reducer_error' if reducer_result['returncode'] else 'complete'),
+            "output_parse_status": 'parsed' if output_quality else 'missing_or_unparseable',
+            "behavior_status": 'verified' if verified else 'failed',
             "verified": verified,
             "evidence_ok": health["ok"], "evidence_warnings": health["warnings"],
             "input_quality": initial_quality, "output_quality": output_quality,
@@ -1633,6 +1686,8 @@ def _execute_job(output: Path, plan: Mapping[str, object], job: Mapping[str, obj
             "cleanup_wall_sec": reducer_result["cleanup_wall_sec"],
             "returncode": reducer_result["returncode"], "timed_out": reducer_result["timed_out"],
             "predicate_calls": health["predicate_calls"], "accepted_moves": health["accepted_moves"],
+            "phase_costs": phase_costs,
+            "memory_limit": {"mb": limits["memory_mb"], "mechanism": "inherited RLIMIT_AS per process"},
             "output": str(attempt_dir / "output.verified.smt2") if verified else "",
             "attempt_dir": str(attempt_dir), "finished_at": _utc_now(),
         }
@@ -1666,6 +1721,8 @@ def _quality_columns(value: object, prefix: str) -> dict[str, object]:
         f"{prefix}_expressions": quality.get("expression_count"),
         f"{prefix}_nodes": quality.get("node_count"),
         f"{prefix}_bytes": quality.get("byte_count"),
+        f"{prefix}_normalized_bytes": quality.get("normalized_byte_count"),
+        f"{prefix}_tokens": quality.get("token_count"),
     }
 
 
@@ -1860,7 +1917,7 @@ def run(output: Path) -> list[dict[str, object]]:
     version, _ = _schema_identity(plan, "plan")
     if version != SCHEMA_VERSION:
         raise ReductionError(
-            "reduction-v2 plans are read-only; prepare a reduction-v3 plan before execution"
+            "reduction-v2/v3 plans are read-only; prepare a reduction-v4 plan before execution"
         )
     lock = _RunLock(output)
     try:
@@ -2125,16 +2182,16 @@ def _quality_tuple(value: object) -> tuple[int, int, int] | None:
 def _case_reducer_quality(
     results: Sequence[Mapping[str, object]], case_id: str, reducer_id: str, repeats: int
 ) -> tuple[int, int, int] | None:
-    values = sorted(
-        value for value in (
-            _quality_tuple(item.get("output_quality")) for item in results
-            if item.get("benchmark_id") == case_id and item.get("reducer_id") == reducer_id
-            and item.get("verified") is True and item.get("evidence_ok") is True
-        ) if value is not None
-    )
-    if len(values) != repeats:
+    selected = [item for item in results
+                if item.get('benchmark_id') == case_id and item.get('reducer_id') == reducer_id
+                and item.get('verified') is True and item.get('evidence_ok') is True]
+    ids = [item.get('repeat') for item in selected]
+    if len(ids) != repeats or set(ids) != set(range(1, repeats + 1)):
         return None
-    return values[(len(values) - 1) // 2]
+    values = [_quality_tuple(item.get('output_quality')) for item in selected]
+    if any(value is None for value in values):
+        return None
+    return sorted((_rank_quality(value) for value in values))[(repeats - 1) // 2]
 
 
 def comparison_rows(
@@ -2142,25 +2199,28 @@ def comparison_rows(
 ) -> list[dict[str, object]]:
     comparisons = []
     for left, right in plan["comparisons"]:
-        wins = ties = losses = paired = 0
-        for benchmark in plan["benchmarks"]:
-            left_value = _case_reducer_quality(
-                results, str(benchmark["id"]), str(left), int(plan["repeats"])
-            )
-            right_value = _case_reducer_quality(
-                results, str(benchmark["id"]), str(right), int(plan["repeats"])
-            )
-            if left_value is None or right_value is None:
-                continue
-            paired += 1
-            if left_value < right_value:
-                wins += 1
-            elif left_value > right_value:
-                losses += 1
-            else:
-                ties += 1
+        wins = ties = losses = paired = paired_trials = 0
+        expected=set(plan.get('comparison_repeat_ids',range(1,int(plan['repeats'])+1)))
+        for benchmark in plan['benchmarks']:
+            arms=[]
+            for reducer in (left,right):
+                rows=[r for r in results if r.get('benchmark_id')==benchmark['id'] and r.get('reducer_id')==reducer]
+                ids=[r.get('repeat') for r in rows]
+                if len(ids)!=len(expected) or set(ids)!=expected or any(not r.get('verified') or not r.get('evidence_ok') or _quality(r.get('output_quality')) is None for r in rows):
+                    arms=[];break
+                arms.append({r['repeat']:_rank_quality(_quality(r['output_quality'])) for r in rows})
+            if len(arms)!=2:continue
+            # Compare each matched repetition before aggregating by parent.
+            deltas=[arms[0][i][0]-arms[1][i][0] for i in sorted(expected)]
+            delta=statistics.median(deltas)
+            if delta==0:
+                delta=statistics.median([arms[0][i][1]-arms[1][i][1] for i in sorted(expected)])
+            paired+=1;paired_trials+=len(expected)
+            if delta<0:wins+=1
+            elif delta>0:losses+=1
+            else:ties+=1
         comparisons.append({
-            "left": left, "right": right, "paired_cases": paired,
+            "left": left, "right": right, "paired_cases": paired, "paired_trials": paired_trials,
             "wins": wins, "ties": ties, "losses": losses,
         })
     return comparisons
