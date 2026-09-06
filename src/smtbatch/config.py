@@ -134,7 +134,7 @@ def load_config(start: Path | None = None) -> Config:
         raise RuntimeError(f"[defaults] must be a table in {path}")
     default_extras = sorted(
         set(defaults)
-        - {"results", "port", "target_branch", "comparisons", "predicate_timeout_sec"}
+        - {"results", "port", "target_branch", "comparisons", "predicate_timeout_sec", "smtbatch_root"}
     )
     if default_extras:
         raise RuntimeError(f"unknown [defaults] fields in {path}: {', '.join(default_extras)}")
@@ -196,7 +196,7 @@ def load_config(start: Path | None = None) -> Config:
         path=path.resolve(),
         reducers=reducers,
         results_root=_resolve_root(defaults.get("results", "results"), path),
-        smtbatch_root=(path.parent / "SMTBatch").resolve(),
+        smtbatch_root=_resolve_root(defaults.get("smtbatch_root", "SMTBatch"), path),
         benchmark_database=database_path,
         benchmark_inputs_root=inputs_path,
         benchmark_oracle=oracle_path,
