@@ -154,6 +154,12 @@ class ConfigTests(ReductionFixture):
         self.assertEqual(config.benchmark_identity_command, ("./identity.sh",))
         self.assertEqual(validate_target_branch(config), "feat/reduction")
 
+    def test_isolated_harness_root_is_resolved_from_config(self) -> None:
+        sibling = self.root.parent / (self.root.name + "-batch")
+        self.config_path.write_text(self.config_path.read_text().replace(
+            "[defaults]", '[defaults]\nsmtbatch_root = "' + str(sibling) + '"'))
+        self.assertEqual(load_config(self.root).smtbatch_root, sibling.resolve())
+
     def test_command_snapshot_hashes_project_files_not_the_interpreter(self) -> None:
         script = self.root / "oracle.py"
         script.write_text("print('ok')\n", encoding="utf-8")
