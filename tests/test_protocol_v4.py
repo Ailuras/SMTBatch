@@ -1,4 +1,5 @@
 import json
+import pytest
 from smtbatch import reduce, predicate
 from smtbatch.oracle_protocol import decode, preserving
 
@@ -64,3 +65,25 @@ def test_incomplete_evidence_is_not_automatically_timeout():
     assert reduce._observation(run)['timed_out'] is False
     record['target']={'status':'timeout'};run['stdout']=json.dumps(record).encode()
     assert reduce._observation(run)['timed_out'] is True
+
+
+@pytest.mark.parametrize('outcome,expected', [('not_interesting', True), ('interesting', False), ('incomplete', False)])
+def test_rejected_malformed_candidate_does_not_poison_verified_metrics(tmp_path, monkeypatch, outcome, expected):
+    good = tmp_path/'good.smt2'; good.write_text('(assert true)')
+    bad = tmp_path/'bad.smt2'; bad.write_text('(')
+    starts = [dict(call_id='golden', phase='reducer', monotonic_ns=1,
+                   candidate=predicate._candidate_record(good)),
+              dict(call_id='candidate', phase='reducer', monotonic_ns=2,
+                   candidate=predicate._candidate_record(bad))]
+    journal = dict(starts=starts, finishes={
+        'golden': dict(oracle=envelope(), monotonic_ns=2),
+        'candidate': dict(oracle=envelope(outcome), monotonic_ns=3)},
+        error=None, incomplete=[], truncated_tail=False)
+    monkeypatch.setattr(reduce, '_journal_events', lambda *a, **kw: journal)
+    result = reduce.trajectory_for_attempt(tmp_path,
+        dict(input_bytes=13, predicate=dict(match={})), {}, allow_partial=True)
+    assert result['evidence_ok'] is expected
+    assert result['rejected_unparseable_calls'] == int(expected)
+    assert result['points'][-1]['candidate_node_count'] is None
+    assert result['points'][-1]['candidate_quality_error']
+    assert result['accepted_best']['node_count'] == result['initial']['node_count']

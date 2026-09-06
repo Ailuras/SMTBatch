@@ -1236,6 +1236,7 @@ def trajectory_for_attempt(
     start_ns = int((golden or {}).get("monotonic_ns", 0) or 0)
     match = benchmark["predicate"]["match"]
     warnings = []
+    rejected_unparseable = 0
     for call_index, start in enumerate(candidates, 1):
         finish = finishes.get(start["call_id"])
         preserving = bool(
@@ -1249,10 +1250,20 @@ def trajectory_for_attempt(
         candidate = start.get("candidate")
         if candidate_quality is None:
             detail = candidate.get("quality_error") if isinstance(candidate, dict) else None
-            warnings.append(
-                "candidate size vector is unavailable"
-                + (f": {detail}" if detail else "")
-            )
+            oracle = (finish or {}).get('oracle')
+            completed_rejection = (finish is not None and not preserving
+                and not any(finish.get(key) for key in ('error', 'timed_out', 'killed'))
+                and (oracle is None or oracle.get('outcome') == 'not_interesting'))
+            if completed_rejection and detail and isinstance(candidate.get('sha256'), str) and len(candidate['sha256']) == 64:
+                # Token reducers routinely try malformed inputs. A completed
+                # rejection with intact identity cannot change the incumbent
+                # curve and does not invalidate a separately verified output.
+                rejected_unparseable += 1
+            else:
+                warnings.append(
+                    "candidate size vector is unavailable"
+                    + (f": {detail}" if detail else "")
+                )
         if accepted and candidate_quality is not None:
             if best[0] is None or _rank_quality(candidate_quality) < _rank_quality(best):
                 best = candidate_quality
@@ -1267,6 +1278,7 @@ def trajectory_for_attempt(
             "candidate_expression_count": candidate_quality[0] if candidate_quality else None,
             "candidate_node_count": candidate_quality[1] if candidate_quality else None,
             "candidate_byte_count": candidate_quality[2] if candidate_quality else None,
+            "candidate_quality_error": candidate.get('quality_error') if isinstance(candidate, dict) else None,
             "accepted": accepted, "preserving": preserving,
             "candidate_sha256": _candidate_hash(start),
             "predicate_call_id": start["call_id"],
@@ -1348,6 +1360,7 @@ def trajectory_for_attempt(
         "final": final_quality,
         "final_replay_calls": len(final_replays),
         "candidate_calls": len(candidates),
+        "rejected_unparseable_calls": rejected_unparseable,
         "preserving_calls": preserving_count,
         "accepted_moves": accepted_count,  # legacy alias, not actual reducer commits
         "accepted_moves_is_exact": False,
