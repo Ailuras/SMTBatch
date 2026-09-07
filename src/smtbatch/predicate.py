@@ -385,49 +385,56 @@ def main(argv: list[str] | None = None) -> int:
         if internal is not None
         else uuid.uuid4().hex
     )
-    candidate = Path(args.command[-1]).resolve()
-    _append_start(
-        args.log, call_id=call_id, phase=args.phase, candidate=candidate,
-        internal=internal,
-    )
-    started = time.monotonic()
-    returncode = 127
-    stdout = b""
-    stderr = b""
-    error = None
-    timed_out = False
-    killed = False
-    try:
-        process = subprocess.Popen(
-            [*args.command[:-1], candidate.as_posix(), f"{args.solver_timeout:g}"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
-        )
-    except OSError as exc:
-        process = None
-        error = f"{type(exc).__name__}: {exc}"
-        stderr = (error + "\n").encode("utf-8", errors="replace")
-    if process is not None:
-        interrupted: dict[str, int] = {}
+    process = None
+    interrupted: dict[str, int] = {}
 
-        def _forward(signum: int, _frame: object) -> None:
-            # SMTBatch terminates the whole process group on trial timeout.
-            # Kill the isolated solver group immediately and stay alive long
-            # enough to close this journal entry with a finish event.  A
-            # forwarded TERM can otherwise consume the reducer's entire hard
-            # kill grace and leave a start without a finish.
-            interrupted.setdefault("signum", signum)
+    def stop_child() -> None:
+        if process is not None:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
 
-        previous_handlers = {
-            signum: signal.getsignal(signum)
-            for signum in (signal.SIGTERM, signal.SIGINT)
-        }
+    def on_signal(signum: int, _frame: object) -> None:
+        # Install before publishing start, and retain through finish/output.
+        # Local reducer deadlines can expire during startup or finalization.
+        interrupted.setdefault("signum", signum)
+        stop_child()
+
+    previous_handlers = {
+        signum: signal.getsignal(signum)
+        for signum in (signal.SIGTERM, signal.SIGINT)
+    }
+    try:
         for signum in previous_handlers:
-            signal.signal(signum, _forward)
+            signal.signal(signum, on_signal)
+        candidate = Path(args.command[-1]).resolve()
+        _append_start(
+            args.log, call_id=call_id, phase=args.phase, candidate=candidate,
+            internal=internal,
+        )
+        started = time.monotonic()
+        returncode = 127
+        stdout = b""
+        stderr = b""
+        error = None
+        timed_out = False
+        killed = False
         try:
+            if not interrupted:
+                process = subprocess.Popen(
+                    [*args.command[:-1], candidate.as_posix(), f"{args.solver_timeout:g}"],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+                )
+        except OSError as exc:
+            process = None
+            error = f"{type(exc).__name__}: {exc}"
+            stderr = (error + "\n").encode("utf-8", errors="replace")
+        if process is not None:
+            # A signal can arrive while Popen is returning, before process is
+            # assigned. Recheck the latched signal before waiting on that child.
+            if interrupted:
+                stop_child()
             try:
                 stdout, stderr = process.communicate(
                     timeout=args.solver_timeout + 1.0
@@ -451,54 +458,55 @@ def main(argv: list[str] | None = None) -> int:
                 stdout, stderr = process.communicate()
                 returncode = _GNU_TIMEOUT_CODE
                 error = "predicate wrapper timeout"
-        finally:
-            for signum, handler in previous_handlers.items():
-                signal.signal(signum, handler)
+        oracle = decode(stdout, returncode)
         if interrupted:
             killed = True
             timed_out = False
             returncode = 128 + interrupted["signum"]
             error = f"predicate interrupted by signal {interrupted['signum']}"
+            oracle = None
+        if oracle and oracle.get('outcome')=='incomplete':
+            timed_out=any((oracle.get(role) or {}).get('status')=='timeout' for role in ('target','reference'))
+        if "--json" in args.command and oracle is None and not timed_out and not killed:
+            returncode = 2
+            error = "malformed oracle v3 response"
+        _append(args.log, {
+            "schema_version": 4,
+            "oracle": oracle,
+            "solver_executions": oracle.get("solver_executions") if oracle else None,
+            "event": "finish",
+            "call_id": call_id,
+            "finished_ns": time.time_ns(),
+            "monotonic_ns": time.monotonic_ns(),
+            "runtime_sec": time.monotonic() - started,
+            "returncode": returncode,
+            "timed_out": timed_out,
+            "killed": killed,
+            "stdout_bytes": len(stdout),
+            "stderr_bytes": len(stderr),
+            "stdout_sha256": _sha256_bytes(stdout),
+            "stderr_sha256": _sha256_bytes(stderr),
+            "stdout_match": (
+                None if args.match_stdout is None
+                else args.match_stdout.encode("utf-8") in stdout
+            ),
+            "stderr_match": (
+                None if args.match_stderr is None
+                else args.match_stderr.encode("utf-8") in stderr
+            ),
+            "ignore_stdout": args.ignore_stdout,
+            "ignore_stderr": args.ignore_stderr,
+            "error": error,
+        })
+        sys.stdout.buffer.write(stdout)
+        sys.stdout.buffer.flush()
+        sys.stderr.buffer.write(stderr)
+        sys.stderr.buffer.flush()
+        return returncode
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
 
-    oracle = decode(stdout, returncode)
-    if oracle and oracle.get('outcome')=='incomplete':
-        timed_out=any((oracle.get(role) or {}).get('status')=='timeout' for role in ('target','reference'))
-    if "--json" in args.command and oracle is None and not timed_out and not killed:
-        returncode = 2
-        error = "malformed oracle v3 response"
-    _append(args.log, {
-        "schema_version": 4,
-        "oracle": oracle,
-        "solver_executions": oracle.get("solver_executions") if oracle else None,
-        "event": "finish",
-        "call_id": call_id,
-        "finished_ns": time.time_ns(),
-        "monotonic_ns": time.monotonic_ns(),
-        "runtime_sec": time.monotonic() - started,
-        "returncode": returncode,
-        "timed_out": timed_out,
-        "killed": killed,
-        "stdout_bytes": len(stdout),
-        "stderr_bytes": len(stderr),
-        "stdout_sha256": _sha256_bytes(stdout),
-        "stderr_sha256": _sha256_bytes(stderr),
-        "stdout_match": (
-            None if args.match_stdout is None
-            else args.match_stdout.encode("utf-8") in stdout
-        ),
-        "stderr_match": (
-            None if args.match_stderr is None
-            else args.match_stderr.encode("utf-8") in stderr
-        ),
-        "ignore_stdout": args.ignore_stdout,
-        "ignore_stderr": args.ignore_stderr,
-        "error": error,
-    })
-    sys.stdout.buffer.write(stdout)
-    sys.stdout.buffer.flush()
-    sys.stderr.buffer.write(stderr)
-    sys.stderr.buffer.flush()
-    return returncode
 
 
 if __name__ == "__main__":
