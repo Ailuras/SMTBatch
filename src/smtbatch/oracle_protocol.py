@@ -1,7 +1,7 @@
-"""Consumer validation for the versioned oracle envelope; no solver semantics here."""
+"""Consumer validation for the oracle envelope; no solver semantics here."""
 import json
 
-SCHEMA = 'd3smt-oracle-v3'
+SCHEMA = 'smt-oracle'
 EXIT = {'interesting':0, 'not_interesting':1, 'incomplete':3, 'error':2}
 
 

@@ -417,6 +417,13 @@ class ReductionManager:
             base["error"] = "benchmark template must be a JSON object"
             self._catalog_cache = (signature, base)
             return base
+        if template_path is not None:
+            try:
+                reduction._require_format(template, "benchmark template")
+            except reduction.ReductionError as exc:
+                base["error"] = str(exc)
+                self._catalog_cache = (signature, base)
+                return base
 
         category_cases: dict[str, list[str]] = {
             name: [] for name in category_specs
@@ -525,7 +532,6 @@ class ReductionManager:
         execution_template = template.get("execution", {})
         if not isinstance(execution_template, dict):
             execution_template = {}
-        verification_repeats = template.get("verification_repeats", 3)
         limits = {
             "trial_wall_sec": template_limits.get("trial_wall_sec", 3600),
             "predicate_timeout_sec": template_limits.get(
@@ -537,7 +543,7 @@ class ReductionManager:
             "memory_mb": template_limits.get("memory_mb", 8192),
             "preflight_repeats": max(3, template_limits.get("preflight_repeats", 3)),
             "verification_repeats": template_limits.get(
-                "verification_repeats", verification_repeats
+                "verification_repeats", 3
             ),
             "termination_grace_sec": template_limits.get("termination_grace_sec", 5),
             "analysis_horizon_sec": template_limits.get(
@@ -559,7 +565,7 @@ class ReductionManager:
         configured_reducers = list(self.config.reducers)
         comparisons = [list(pair) for pair in self.config.comparisons]
         normalized_template = {
-            "schema_version": reduction.SCHEMA_VERSION,
+            "format": reduction.FORMAT,
             "kind": "reduction",
             "study_id": "benchmark-catalog",
             "root": str(self.project_root),
@@ -832,12 +838,15 @@ class ReductionManager:
         try:
             with path.open(encoding="utf-8", newline="") as handle:
                 rows = []
-                for row in csv.DictReader(handle, delimiter="\t"):
+                reader = csv.DictReader(handle, delimiter="\t")
+                if reader.fieldnames != reduction.RESULT_FIELDS:
+                    return None
+                for row in reader:
                     def opt_int(name: str) -> int | None:
                         raw = row.get(name, "")
                         if raw in ("", None):
                             return None
-                        return int(float(raw))
+                        return int(raw)
                     output_bytes = opt_int("output_bytes")
                     rows.append({
                         "job_id": row["job_id"],
@@ -849,12 +858,14 @@ class ReductionManager:
                         "verified": str(row.get("verified", "")).lower() == "true",
                         "evidence_ok": str(row.get("evidence_ok", "")).lower() == "true",
                         "predicate_calls": int(row.get("predicate_calls") or 0),
-                        "accepted_moves": int(row.get("accepted_moves") or 0),
+                        "preserving_calls": int(row.get("preserving_calls") or 0),
                         "trial_wall_sec": float(row.get("trial_wall_sec") or 0),
                         "output_quality": None if output_bytes is None else {
                             "expression_count": opt_int("output_expressions"),
                             "node_count": opt_int("output_nodes"),
                             "byte_count": output_bytes,
+                            "normalized_byte_count": opt_int("output_normalized_bytes"),
+                            "token_count": opt_int("output_tokens"),
                         },
                     })
                 return rows
@@ -1000,7 +1011,7 @@ class ReductionManager:
         keep = {0, len(points) - 1}
         keep.update(
             index for index, point in enumerate(points)
-            if isinstance(point, dict) and point.get("accepted")
+            if isinstance(point, dict) and point.get("preserving")
         )
         selected = []
         for index in sorted(keep):
@@ -1011,7 +1022,7 @@ class ReductionManager:
                 "call_index": point.get("call_index"),
                 "elapsed_sec": point.get("elapsed_sec"),
                 "byte_count": point.get("byte_count"),
-                "accepted": point.get("accepted"),
+                "preserving": point.get("preserving"),
                 "mutator": point.get("mutator"),
             })
         if len(selected) > MAX_TRAJECTORY_POINTS:
@@ -1051,8 +1062,8 @@ class ReductionManager:
         value = reduction.trajectory_for_case(
             run_dir, case_id, plan=plan, include_logs=False, verify_artifacts=False,
         )
-        # Dashboard charts only need the step endpoints: initial, accepted
-        # moves, and the last sample.  Formal report files remain complete.
+        # Dashboard charts only need the step endpoints: initial, preserving
+        # checks, and the last sample.  Formal report files remain complete.
         bounded = {**value, "trials": []}
         for trial in value.get("trials", []):
             item = dict(trial)
@@ -1268,18 +1279,18 @@ class ReductionManager:
                 {requested_reducer: by_reducer.get(requested_reducer, {})}
                 if requested_reducer else by_reducer
             )
-            calls = accepted = 0
+            calls = preserving = 0
             current_quality: dict[str, object] = {}
             for reducer_id, info in selected_items.items():
                 if not isinstance(info, dict):
                     continue
                 calls += int(info.get("predicate_calls", 0) or 0)
-                accepted += int(info.get("accepted_moves", 0) or 0)
+                preserving += int(info.get("preserving_calls", 0) or 0)
                 qualities = info.get("final_quality")
                 if isinstance(qualities, list) and qualities:
                     current_quality[str(reducer_id)] = qualities[-1]
             enriched.append({
-                **row, "realtime_calls": calls, "realtime_accepted": accepted,
+                **row, "realtime_calls": calls, "realtime_preserving_calls": preserving,
                 "current_quality": current_quality,
             })
         return {
@@ -1321,7 +1332,7 @@ class ReductionManager:
                 "completed_avg_bytes": (sum(completed_sizes) / len(completed_sizes)) if completed_sizes else None,
                 "truncated_avg_bytes": (sum(truncated_sizes) / len(truncated_sizes)) if truncated_sizes else None,
                 "predicate_calls": sum(int(item.get("predicate_calls", 0) or 0) for item in selected),
-                "accepted_moves": sum(int(item.get("accepted_moves", 0) or 0) for item in selected),
+                "preserving_calls": sum(int(item.get("preserving_calls", 0) or 0) for item in selected),
                 "statuses": dict(Counter(str(item.get("status")) for item in selected)),
             }
         compare_plan = dict(plan)
@@ -1342,11 +1353,11 @@ class ReductionManager:
             for row in reduction.comparison_rows(compare_plan, compare_results)
         ]
         sealed_calls = sum(int(item.get("predicate_calls", 0) or 0) for item in results)
-        sealed_accepted = sum(int(item.get("accepted_moves", 0) or 0) for item in results)
+        sealed_preserving = sum(int(item.get("preserving_calls", 0) or 0) for item in results)
         active = progress.get("active", [])
         if not isinstance(active, list):
             active = []
-        realtime_calls = realtime_accepted = 0
+        realtime_calls = realtime_preserving = 0
         current_quality: list[dict[str, object]] = []
         seen_cases: set[str] = set()
         for item in active[:64]:
@@ -1365,13 +1376,13 @@ class ReductionManager:
                 if not isinstance(trial_value, dict):
                     continue
                 calls = int(trial_value.get("candidate_calls", 0) or 0)
-                accepted = int(trial_value.get("accepted_moves", 0) or 0)
+                preserving = int(trial_value.get("preserving_calls", 0) or 0)
                 realtime_calls += calls
-                realtime_accepted += accepted
+                realtime_preserving += preserving
                 current_quality.append({
                     "case_id": case_id, "reducer": trial.get("reducer_id"),
                     "repeat": trial.get("repeat"), "calls": calls,
-                    "accepted": accepted, "quality": trial_value.get("final"),
+                    "preserving_calls": preserving, "quality": trial_value.get("final"),
                     "provisional": trial_value.get("provisional", True),
                 })
         return {
@@ -1400,9 +1411,9 @@ class ReductionManager:
             "comparisons": comparisons,
             "repeats": sorted({int(item.get("repeat", 0)) for item in results}),
             "realtime_calls": realtime_calls,
-            "realtime_accepted": realtime_accepted,
+            "realtime_preserving_calls": realtime_preserving,
             "calls": realtime_calls + sealed_calls,
-            "accepted": realtime_accepted + sealed_accepted,
+            "preserving_calls": realtime_preserving + sealed_preserving,
             "current_quality": current_quality,
         }
 
@@ -1428,7 +1439,7 @@ class ReductionManager:
 
 def handler_factory(manager: ReductionManager):
     class Handler(BaseHTTPRequestHandler):
-        server_version = "SMTBatchReduction/2"
+        server_version = "SMTBatchReduction"
 
         def log_message(self, fmt: str, *args: object) -> None:
             sys.stderr.write("[serve] " + fmt % args + "\n")

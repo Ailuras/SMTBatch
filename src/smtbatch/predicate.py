@@ -18,7 +18,7 @@ import uuid
 
 if __package__:
     from .oracle_protocol import decode
-else:  # Historical script-path entry used by frozen wrappers.
+else:  # Direct script entry used by predicate wrappers.
     from oracle_protocol import decode
 
 
@@ -255,7 +255,7 @@ def _internal_context(
         raise ValueError("candidate correlation requires SMTBATCH_PROPOSAL_ID")
 
     result: dict[str, object] = {
-        "source": "d3smt",
+        "source": "reducer",
         "predicate_call_id": call_id,
         "role": role,
         "proposal_id": proposal_id,
@@ -302,6 +302,8 @@ def _append_start(
     with path.open("a+", encoding="utf-8") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         rows = _read_rows(handle)
+        if any(row.get("format") != "predicate" or "schema_version" in row for row in rows):
+            raise ValueError("unsupported predicate journal format; start a new attempt")
         starts = [row for row in rows if row.get("event") == "start"]
         reducer_starts = [row for row in starts if row.get("phase") == "reducer"]
         role = phase
@@ -331,7 +333,7 @@ def _append_start(
                     "internal candidate hash does not match wrapper candidate"
                 )
         event = {
-            "schema_version": 3,
+            "format": "predicate",
             "event": "start",
             "call_id": call_id,
             "call_seq": call_seq,
@@ -469,9 +471,9 @@ def main(argv: list[str] | None = None) -> int:
             timed_out=any((oracle.get(role) or {}).get('status')=='timeout' for role in ('target','reference'))
         if "--json" in args.command and oracle is None and not timed_out and not killed:
             returncode = 2
-            error = "malformed oracle v3 response"
+            error = "malformed oracle response"
         _append(args.log, {
-            "schema_version": 4,
+            "format": "predicate",
             "oracle": oracle,
             "solver_executions": oracle.get("solver_executions") if oracle else None,
             "event": "finish",

@@ -36,13 +36,11 @@ from .predicate import is_timeout_exit
 from .oracle_protocol import decode as decode_oracle, preserving as oracle_preserving
 
 
-SCHEMA_VERSION = 4
-FORMAT = "reduction-v4"
-SUPPORTED_FORMATS = {2: "reduction-v2", 3: "reduction-v3", 4: FORMAT}
+FORMAT = "reduction"
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 MAX_LOG_BYTES = 64 * 1024
 STUDY_FIELDS = {
-    "schema_version", "kind", "study_id", "root", "execution",
+    "format", "kind", "study_id", "root", "execution",
     "predicate_wrapper", "benchmarks", "reducers", "repeats",
     "limits", "comparisons", "catalog",
 }
@@ -73,7 +71,7 @@ RESULT_FIELDS = [
     "status_detail", "verified", "evidence_ok", "input_expressions",
     "input_nodes", "input_bytes", "input_normalized_bytes", "input_tokens", "output_expressions", "output_nodes",
     "output_bytes", "output_normalized_bytes", "output_tokens", "size_ratio", "trial_wall_sec", "cleanup_wall_sec",
-    "predicate_calls", "accepted_moves", "attempt", "output",
+    "predicate_calls", "preserving_calls", "attempt", "output",
 ]
 RUNNING_STATES = {"starting", "running", "stopping", "aborting", "resuming", "paused"}
 FINAL_STATES = {"complete", "interrupted", "failed"}
@@ -90,16 +88,9 @@ class ImmediateAbort(ReductionError):
     """Stop one in-flight trial without sealing it as complete."""
 
 
-def _schema_identity(value: Mapping[str, object], label: str) -> tuple[int, str]:
-    version = value.get("schema_version")
-    format_value = value.get("format")
-    if (
-        isinstance(version, bool)
-        or not isinstance(version, int)
-        or SUPPORTED_FORMATS.get(version) != format_value
-    ):
-        raise ReductionError(f"unsupported {label} schema/format")
-    return version, str(format_value)
+def _require_format(value: Mapping[str, object], label: str) -> None:
+    if value.get("format") != FORMAT or "schema_version" in value:
+        raise ReductionError(f"unsupported {label} format; prepare a new study")
 
 
 class _RunLock:
@@ -362,8 +353,9 @@ def load_study(path: Path) -> dict[str, object]:
     study_path = path.expanduser().resolve()
     raw = _mapping(_read_json(study_path, "study"), "study")
     _only_fields(raw, STUDY_FIELDS, "study")
-    if raw.get("schema_version") != SCHEMA_VERSION or raw.get("kind") != "reduction":
-        raise ReductionError("study must use schema_version 4 and kind 'reduction'")
+    _require_format(raw, "study")
+    if raw.get("kind") != "reduction":
+        raise ReductionError("study must use kind 'reduction'")
     study_id = _identifier(raw.get("study_id"), "study_id")
     root = _resolve_root(study_path, raw.get("root"))
     fingerprints: dict[Path, dict[str, object]] = {}
@@ -475,7 +467,7 @@ def load_study(path: Path) -> dict[str, object]:
         raise ReductionError("catalog must be an object")
 
     return {
-        "schema_version": SCHEMA_VERSION,
+        "format": FORMAT,
         "kind": "reduction",
         "study_id": study_id,
         "root": str(root),
@@ -628,7 +620,6 @@ def build_plan(
     except provenance.ProvenanceError as exc:
         raise ReductionError(f"unable to freeze predicate wrapper: {exc}") from exc
     plan = {
-        "schema_version": SCHEMA_VERSION,
         "format": FORMAT,
         "study_id": study["study_id"],
         "created_at": _utc_now(),
@@ -678,17 +669,13 @@ def _validate_frozen_file(value: object, label: str) -> None:
 
 
 def _validate_live_provenance(plan: Mapping[str, object]) -> None:
-    """Reject any live asset that differs from a freshly prepared v3 plan."""
+    """Reject any live asset that differs from a freshly prepared plan."""
 
-    version, _ = _schema_identity(plan, "plan")
-    if version != SCHEMA_VERSION:
-        raise ReductionError(
-            "reduction-v2/v3 plans are read-only; prepare a reduction-v4 plan before execution"
-        )
+    _require_format(plan, "plan")
 
     frozen_source=plan.get('harness_source')
     if frozen_source is None or not provenance.same_snapshot(frozen_source, provenance.snapshot_path(Path(__file__).resolve().parent)):
-        raise ReductionError('SMTBatch implementation drift; prepare a new v4 freeze')
+        raise ReductionError('SMTBatch implementation drift; prepare a new study')
 
     source = _mapping(plan.get("source"), "plan source")
     _validate_frozen_file(source, "study source")
@@ -780,7 +767,6 @@ def prepare(
     _write_json(
         output / "provenance.json",
         {
-            "schema_version": SCHEMA_VERSION,
             "format": FORMAT,
             "study_source": study["source"],
             "environment": study["environment"],
@@ -798,7 +784,6 @@ def prepare(
     _write_json(
         output / "plan.complete.json",
         {
-            "schema_version": SCHEMA_VERSION,
             "format": FORMAT,
             "plan_sha256": _sha256_path(output / "plan.json"),
             "jobs_sha256": _sha256_path(output / "jobs.tsv"),
@@ -809,7 +794,6 @@ def prepare(
     _write_json(
         output / "progress.json",
         {
-            "schema_version": SCHEMA_VERSION,
             "format": FORMAT,
             "study_id": plan["study_id"],
             "status": "prepared",
@@ -827,12 +811,10 @@ def load_plan(output: Path) -> dict[str, object]:
     output = output.expanduser().resolve()
     plan = _mapping(_read_json(output / "plan.json", "plan"), "plan")
     marker = _mapping(_read_json(output / "plan.complete.json", "plan marker"), "plan marker")
-    plan_version, plan_format = _schema_identity(plan, "plan")
-    marker_version, marker_format = _schema_identity(marker, "plan marker")
+    _require_format(plan, "plan")
+    _require_format(marker, "plan marker")
     if (
-        marker_version != plan_version
-        or marker_format != plan_format
-        or marker.get("plan_sha256") != _sha256_path(output / "plan.json")
+        marker.get("plan_sha256") != _sha256_path(output / "plan.json")
         or marker.get("jobs_sha256") != _sha256_path(output / "jobs.tsv")
         or marker.get("study_sha256") != _sha256_path(output / "study.json")
         or marker.get("provenance_sha256") != _sha256_path(output / "provenance.json")
@@ -1141,6 +1123,9 @@ def _journal_events(path: Path, *, allow_partial: bool) -> dict[str, object]:
     seen_starts: set[str] = set()
     previous_seq = 0
     for row in rows:
+        if row.get("format") != "predicate" or "schema_version" in row:
+            error = error or "unsupported predicate journal format"
+            continue
         event = row.get("event")
         call_id = row.get("call_id")
         if event not in {"start", "finish"} or not isinstance(call_id, str):
@@ -1171,18 +1156,18 @@ def _journal_events(path: Path, *, allow_partial: bool) -> dict[str, object]:
     }
 
 
-def _quality(value: object) -> tuple[int, int, int] | None:
+def _quality(value: object) -> tuple[int, int, int, int, int] | None:
     if not isinstance(value, dict):
         return None
-    names = ("expression_count", "node_count", "byte_count")
+    names = ("expression_count", "node_count", "byte_count", "normalized_byte_count", "token_count")
     values = tuple(value.get(name) for name in names)
     if not all(isinstance(item, int) and not isinstance(item, bool) and item >= 0 for item in values):
         return None
-    return values + (value.get('normalized_byte_count'), value.get('token_count'))
+    return values
 
 
 def _rank_quality(value):
-    return (value[1], value[3] if len(value) > 3 and value[3] is not None else value[2])
+    return (value[1], value[3])
 
 
 def _quality_dict(value):
@@ -1192,7 +1177,7 @@ def _quality_dict(value):
                      'normalized_byte_count','token_count'), value))
 
 
-def _candidate_quality(start: Mapping[str, object]) -> tuple[int, int, int] | None:
+def _candidate_quality(start: Mapping[str, object]) -> tuple[int, int, int, int, int] | None:
     candidate = start.get("candidate")
     return _quality(candidate.get("quality")) if isinstance(candidate, dict) else None
 
@@ -1222,16 +1207,14 @@ def trajectory_for_attempt(
         row for row in starts if row.get("phase") == "final-replay"
     ]
     phase_boundaries = []
-    exact = False
     best = initial
     points = [{
         "call_index": 0, "elapsed_sec": 0.0,
         "expression_count": initial[0], "node_count": initial[1], "byte_count": initial[2],
         "normalized_byte_count": initial[3], "token_count": initial[4],
-        "accepted": True, "preserving": True, "candidate_sha256": _candidate_hash(golden or {}),
+        "preserving": True, "candidate_sha256": _candidate_hash(golden or {}),
         "phase": "initial", "mutator": None,
     }]
-    accepted_count = 0
     preserving_count = 0
     start_ns = int((golden or {}).get("monotonic_ns", 0) or 0)
     match = benchmark["predicate"]["match"]
@@ -1245,7 +1228,6 @@ def trajectory_for_attempt(
         )
         if preserving:
             preserving_count += 1
-        accepted = preserving
         candidate_quality = _candidate_quality(start)
         candidate = start.get("candidate")
         if candidate_quality is None:
@@ -1264,10 +1246,9 @@ def trajectory_for_attempt(
                     "candidate size vector is unavailable"
                     + (f": {detail}" if detail else "")
                 )
-        if accepted and candidate_quality is not None:
+        if preserving and candidate_quality is not None:
             if best[0] is None or _rank_quality(candidate_quality) < _rank_quality(best):
                 best = candidate_quality
-            accepted_count += 1
         finish_ns = int((finish or start).get("monotonic_ns", 0) or 0)
         elapsed = max(0.0, (finish_ns - start_ns) / 1_000_000_000) if start_ns and finish_ns else 0.0
         points.append({
@@ -1279,7 +1260,7 @@ def trajectory_for_attempt(
             "candidate_node_count": candidate_quality[1] if candidate_quality else None,
             "candidate_byte_count": candidate_quality[2] if candidate_quality else None,
             "candidate_quality_error": candidate.get('quality_error') if isinstance(candidate, dict) else None,
-            "accepted": accepted, "preserving": preserving,
+            "preserving": preserving,
             "candidate_sha256": _candidate_hash(start),
             "predicate_call_id": start["call_id"],
             "phase": None,
@@ -1297,13 +1278,8 @@ def trajectory_for_attempt(
         warnings.append(f"{len(journal['incomplete'])} predicate calls lack finish events")
     if journal["truncated_tail"] and not allow_partial:
         warnings.append("evidence has a truncated tail")
-    accepted_best = {
-        "expression_count": best[0],
-        "node_count": best[1],
-        "byte_count": best[2],
-    }
-    accepted_best = _quality_dict(best)
-    final_quality: dict[str, int] | None = accepted_best
+    best_observed_preserving = _quality_dict(best)
+    final_quality: dict[str, int] | None = best_observed_preserving
     if not allow_partial:
         final_quality = None
         if not final_replays:
@@ -1351,22 +1327,18 @@ def trajectory_for_attempt(
                 quality = identities[0][2]
                 assert quality is not None
                 final_quality = _quality_dict(quality)
-    last_accept = max((point["call_index"] for point in points if point["accepted"]), default=0)
+    last_preserving = max((point["call_index"] for point in points if point["preserving"]), default=0)
     return {
         "provisional": allow_partial,
-        "exact_acceptance": exact,
         "initial": _quality_dict(initial),
-        "accepted_best": accepted_best,
+        "best_observed_preserving": best_observed_preserving,
         "final": final_quality,
         "final_replay_calls": len(final_replays),
         "candidate_calls": len(candidates),
         "rejected_unparseable_calls": rejected_unparseable,
         "preserving_calls": preserving_count,
-        "accepted_moves": accepted_count,  # legacy alias, not actual reducer commits
-        "accepted_moves_is_exact": False,
-        "best_observed_preserving": accepted_best,
-        "last_accept_call": last_accept,
-        "tail_calls": max(0, len(candidates) - last_accept),
+        "last_preserving_call": last_preserving,
+        "tail_calls": max(0, len(candidates) - last_preserving),
         "points": points,
         "phase_boundaries": phase_boundaries,
         "warnings": warnings,
@@ -1413,17 +1385,17 @@ def _artifact_records(directory: Path) -> list[dict[str, object]]:
     return records
 
 
-def _marker_valid(job_dir: Path) -> bool:
+def _marker_valid(job_dir: Path, *, verify_hash: bool = True) -> bool:
     marker_path = job_dir / "job.complete.json"
     result_path = job_dir / "result.json"
     if not marker_path.is_file() or not result_path.is_file():
         return False
     try:
         marker = _mapping(_read_json(marker_path, "job marker"), "job marker")
-        return (
-            marker.get("schema_version") in SUPPORTED_FORMATS
-            and marker.get("result_sha256") == _sha256_path(result_path)
-        )
+        result = _mapping(_read_json(result_path, "job result"), "job result")
+        _require_format(marker, "job marker")
+        _require_format(result, "job result")
+        return not verify_hash or marker.get("result_sha256") == _sha256_path(result_path)
     except (OSError, ReductionError):
         return False
 
@@ -1441,17 +1413,17 @@ def _next_attempt(job_dir: Path) -> tuple[int, Path]:
 def _seal_job(job_dir: Path, attempt_dir: Path, result: dict[str, object]) -> None:
     _write_json(attempt_dir / "result.json", result)
     _write_json(attempt_dir / "artifacts.json", {
-        "schema_version": SCHEMA_VERSION,
+        "format": FORMAT,
         "files": _artifact_records(attempt_dir),
     })
     _write_json(attempt_dir / "attempt.complete.json", {
-        "schema_version": SCHEMA_VERSION,
+        "format": FORMAT,
         "result_sha256": _sha256_path(attempt_dir / "result.json"),
         "artifacts_sha256": _sha256_path(attempt_dir / "artifacts.json"),
     })
     _write_json(job_dir / "result.json", result)
     _write_json(job_dir / "job.complete.json", {
-        "schema_version": SCHEMA_VERSION,
+        "format": FORMAT,
         "result_sha256": _sha256_path(job_dir / "result.json"),
     })
 
@@ -1474,6 +1446,7 @@ def _control_mode(output: Path) -> str:
         return ""
     try:
         value = _mapping(_read_json(path, "run control"), "run control")
+        _require_format(value, "run control")
     except ReductionError:
         return "immediate"
     mode = value.get("mode")
@@ -1485,14 +1458,12 @@ def request_stop(output: Path, mode: str) -> dict[str, object]:
         raise ReductionError("stop mode must be pause, graceful, or immediate")
     output = output.expanduser().resolve()
     plan = load_plan(output)
-    version, _ = _schema_identity(plan, "plan")
-    if version != SCHEMA_VERSION:
-        raise ReductionError("reduction-v2 plans are read-only and cannot be stopped")
+    _require_format(plan, "plan")
     requested = _stored_control_mode(mode)
     current = _control_mode(output)
     effective = requested if _CONTROL_RANK[requested] >= _CONTROL_RANK.get(current, 0) else current
     request = {
-        "schema_version": SCHEMA_VERSION,
+        "format": FORMAT,
         "mode": effective,
         "requested_at": _utc_now(),
         "requested_by_pid": os.getpid(),
@@ -1527,7 +1498,7 @@ def _evidence_health(
         "ok": not warnings,
         "warnings": list(dict.fromkeys(warnings)),
         "predicate_calls": trajectory["candidate_calls"],
-        "accepted_moves": trajectory["accepted_moves"],
+        "preserving_calls": trajectory["preserving_calls"],
         "trajectory": trajectory,
     }
 
@@ -1538,7 +1509,7 @@ def _partial_abort(attempt_dir: Path, reason: str) -> None:
     except ReductionError:
         artifacts = []
     _write_json(attempt_dir / "partial.json", {
-        "schema_version": SCHEMA_VERSION,
+        "format": FORMAT,
         "status": "aborted",
         "reason": reason,
         "at": _utc_now(),
@@ -1595,14 +1566,14 @@ def _execute_job(output: Path, plan: Mapping[str, object], job: Mapping[str, obj
         if not stable_preflight:
             result = {
                 **enriched_job,
-                "schema_version": SCHEMA_VERSION, "format": FORMAT,
+                "format": FORMAT,
                 "status": "invalid", "status_detail": "preflight_failed",
                 "verified": False,
                 "evidence_ok": False, "evidence_warnings": ["preflight is unstable"],
                 "input_quality": None, "output_quality": None,
                 "input_bytes": benchmark["input_bytes"], "output_bytes": None,
                 "size_ratio": None, "trial_wall_sec": 0.0, "cleanup_wall_sec": 0.0,
-                "predicate_calls": 0, "accepted_moves": 0, "output": "",
+                "predicate_calls": 0, "preserving_calls": 0, "output": "",
                 "attempt_dir": str(attempt_dir), "finished_at": _utc_now(),
             }
             _seal_job(job_dir, attempt_dir, result)
@@ -1673,7 +1644,7 @@ def _execute_job(output: Path, plan: Mapping[str, object], job: Mapping[str, obj
         journal_data=_journal_events(journal,allow_partial=False)
         phase_costs={}
         for start in journal_data['starts']:
-            role=start.get('role',start.get('phase','unknown'))
+            role=start.get('role', 'unknown')
             finish=journal_data['finishes'].get(start['call_id'],{})
             bucket=phase_costs.setdefault(role,dict(predicate_executions=0,solver_executions=0,incomplete_records=0))
             bucket['predicate_executions']+=1
@@ -1682,7 +1653,7 @@ def _execute_job(output: Path, plan: Mapping[str, object], job: Mapping[str, obj
             else:bucket['incomplete_records']+=1
         result = {
             **enriched_job,
-            "schema_version": SCHEMA_VERSION, "format": FORMAT,
+            "format": FORMAT,
             "status": status_value, "status_detail": status_detail,
             "execution_status": ('error' if reducer_result['error'] else 'timeout' if reducer_result['timed_out']
                                  else 'reducer_error' if reducer_result['returncode'] else 'complete'),
@@ -1700,9 +1671,7 @@ def _execute_job(output: Path, plan: Mapping[str, object], job: Mapping[str, obj
             "trial_wall_sec": reducer_result["wall_sec"],
             "cleanup_wall_sec": reducer_result["cleanup_wall_sec"],
             "returncode": reducer_result["returncode"], "timed_out": reducer_result["timed_out"],
-            "predicate_calls": health["predicate_calls"], "accepted_moves": health["accepted_moves"],
-            "preserving_calls": trajectory["preserving_calls"],
-            "accepted_moves_is_exact": False,
+            "predicate_calls": health["predicate_calls"], "preserving_calls": health["preserving_calls"],
             "phase_costs": phase_costs,
             "memory_limit": {"mb": limits["memory_mb"], "mechanism": "inherited RLIMIT_AS per process"},
             "output": str(attempt_dir / "output.verified.smt2") if verified else "",
@@ -1723,10 +1692,7 @@ def completed_results(
     results = []
     for job in plan["jobs"]:
         job_dir = output / "jobs" / str(job["job_id"])
-        sealed = (
-            _marker_valid(job_dir) if verify_markers
-            else (job_dir / "job.complete.json").is_file() and (job_dir / "result.json").is_file()
-        )
+        sealed = _marker_valid(job_dir, verify_hash=verify_markers)
         if sealed:
             results.append(_mapping(_read_json(job_dir / "result.json", "job result"), "job result"))
     return results
@@ -1764,7 +1730,7 @@ def write_results_index(output: Path, plan: Mapping[str, object]) -> list[dict[s
                     "trial_wall_sec": result.get("trial_wall_sec", 0),
                     "cleanup_wall_sec": result.get("cleanup_wall_sec", 0),
                     "predicate_calls": result.get("predicate_calls", 0),
-                    "accepted_moves": result.get("accepted_moves", 0),
+                    "preserving_calls": result.get("preserving_calls", 0),
                     "attempt": result["attempt"], "output": result.get("output", ""),
                 }
                 writer.writerow(row)
@@ -1801,7 +1767,7 @@ def _progress(
         for item in running_jobs
     ]
     _write_json(output / "progress.json", {
-        "schema_version": SCHEMA_VERSION, "format": FORMAT,
+        "format": FORMAT,
         "study_id": plan["study_id"], "status": status_value, "updated_at": _utc_now(),
         "total_jobs": len(plan["jobs"]), "completed_jobs": len(results),
         "running_jobs": len(running), "pending_jobs": len(plan["jobs"]) - len(results) - len(running),
@@ -1811,7 +1777,7 @@ def _progress(
 
 def _append_resume(output: Path, event: str, **values: object) -> None:
     _append_jsonl(output / "resume_history.jsonl", {
-        "schema_version": SCHEMA_VERSION, "event": event, "at": _utc_now(),
+        "format": FORMAT, "event": event, "at": _utc_now(),
         "pid": os.getpid(), **values,
     })
 
@@ -1931,11 +1897,7 @@ def _run_locked(output: Path, plan: Mapping[str, object]) -> list[dict[str, obje
 def run(output: Path) -> list[dict[str, object]]:
     output = output.expanduser().resolve()
     plan = load_plan(output)
-    version, _ = _schema_identity(plan, "plan")
-    if version != SCHEMA_VERSION:
-        raise ReductionError(
-            "reduction-v2/v3 plans are read-only; prepare a reduction-v4 plan before execution"
-        )
+    _require_format(plan, "plan")
     lock = _RunLock(output)
     try:
         lock.acquire()
@@ -1943,7 +1905,7 @@ def run(output: Path) -> list[dict[str, object]]:
             _validate_live_provenance(plan)
         except ReductionError as exc:
             _append_jsonl(output / "resume_history.jsonl", {
-                "schema_version": SCHEMA_VERSION,
+                "format": FORMAT,
                 "event": "run_rejected",
                 "at": _utc_now(),
                 "pid": os.getpid(),
@@ -2013,7 +1975,7 @@ def _compact_chart_trajectory(trajectory: Mapping[str, object]) -> dict[str, obj
     keep = {0, len(points) - 1} if points else set()
     keep.update(
         index for index, point in enumerate(points)
-        if isinstance(point, dict) and point.get("accepted")
+        if isinstance(point, dict) and point.get("preserving")
     )
     compact_points = []
     for index in sorted(keep):
@@ -2024,7 +1986,7 @@ def _compact_chart_trajectory(trajectory: Mapping[str, object]) -> dict[str, obj
             "call_index": point.get("call_index"),
             "elapsed_sec": point.get("elapsed_sec"),
             "byte_count": point.get("byte_count"),
-            "accepted": point.get("accepted"),
+            "preserving": point.get("preserving"),
             "mutator": point.get("mutator"),
         })
     value = dict(trajectory)
@@ -2079,10 +2041,7 @@ def trajectory_for_case(
         if job["benchmark_id"] != case_id:
             continue
         job_dir = output / "jobs" / str(job["job_id"])
-        if verify_artifacts:
-            sealed = _marker_valid(job_dir)
-        else:
-            sealed = (job_dir / "job.complete.json").is_file() and (job_dir / "result.json").is_file()
+        sealed = _marker_valid(job_dir, verify_hash=verify_artifacts)
         result = (
             _mapping(_read_json(job_dir / "result.json", "job result"), "job result")
             if sealed else {}
@@ -2091,10 +2050,10 @@ def trajectory_for_case(
         reducer = _lookup(plan, "reducers", str(job["reducer_id"]))
         if attempt_dir is None or not attempt_dir.is_dir():
             trajectory = {
-                "provisional": True, "exact_acceptance": False,
+                "provisional": True,
                 "initial": None, "final": None, "candidate_calls": 0,
-                "preserving_calls": 0, "accepted_moves": 0,
-                "last_accept_call": 0, "tail_calls": 0,
+                "preserving_calls": 0,
+                "last_preserving_call": 0, "tail_calls": 0,
                 "points": [], "phase_boundaries": [], "warnings": ["trial has not started"],
                 "evidence_ok": False,
             }
@@ -2131,7 +2090,7 @@ def trajectory_for_case(
             trial["logs"] = logs
         trials.append(trial)
     return {
-        "schema_version": plan["schema_version"], "format": plan["format"],
+        "format": FORMAT,
         "study_id": plan["study_id"],
         "case": {
             "id": benchmark["id"], "family": benchmark["family"],
@@ -2167,7 +2126,7 @@ def case_rows(
                 "evidence_ok": sum(bool(item.get("evidence_ok")) for item in reducer_results),
                 "statuses": dict(Counter(str(item["status"]) for item in reducer_results)),
                 "predicate_calls": sum(int(item.get("predicate_calls", 0)) for item in reducer_results),
-                "accepted_moves": sum(int(item.get("accepted_moves", 0)) for item in reducer_results),
+                "preserving_calls": sum(int(item.get("preserving_calls", 0)) for item in reducer_results),
                 "final_quality": [item.get("output_quality") for item in reducer_results],
             }
         rows.append({
@@ -2192,20 +2151,16 @@ def _median(values: Iterable[object]) -> float | None:
     return statistics.median(numbers) if numbers else None
 
 
-def _quality_tuple(value: object) -> tuple[int, int, int] | None:
-    return _quality(value)
-
-
 def _case_reducer_quality(
     results: Sequence[Mapping[str, object]], case_id: str, reducer_id: str, repeats: int
-) -> tuple[int, int, int] | None:
+) -> tuple[int, int] | None:
     selected = [item for item in results
                 if item.get('benchmark_id') == case_id and item.get('reducer_id') == reducer_id
                 and item.get('verified') is True and item.get('evidence_ok') is True]
     ids = [item.get('repeat') for item in selected]
     if len(ids) != repeats or set(ids) != set(range(1, repeats + 1)):
         return None
-    values = [_quality_tuple(item.get('output_quality')) for item in selected]
+    values = [_quality(item.get('output_quality')) for item in selected]
     if any(value is None for value in values):
         return None
     return sorted((_rank_quality(value) for value in values))[(repeats - 1) // 2]
@@ -2262,7 +2217,7 @@ def build_report(output: Path) -> tuple[dict[str, object], list[dict[str, object
             "verified": bool(result and result.get("verified")),
             "evidence_ok": bool(result and result.get("evidence_ok")),
             "predicate_calls": result.get("predicate_calls") if result else None,
-            "accepted_moves": result.get("accepted_moves") if result else None,
+            "preserving_calls": result.get("preserving_calls") if result else None,
             "trial_wall_sec": result.get("trial_wall_sec") if result else None,
             **_quality_columns(result.get("input_quality") if result else None, "input"),
             **_quality_columns(result.get("output_quality") if result else None, "output"),
@@ -2289,7 +2244,7 @@ def build_report(output: Path) -> tuple[dict[str, object], list[dict[str, object
             "evidence_ok": sum(bool(item.get("evidence_ok")) for item in selected),
             "statuses": dict(Counter(str(item["status"]) for item in selected)),
             "median_predicate_calls": _median(item.get("predicate_calls") for item in formal),
-            "median_accepted_moves": _median(item.get("accepted_moves") for item in formal),
+            "median_preserving_calls": _median(item.get("preserving_calls") for item in formal),
             "median_trial_wall_sec": _median(item.get("trial_wall_sec") for item in formal),
             "median_expression_ratio": _median(
                 item["output_quality"]["expression_count"] / item["input_quality"]["expression_count"]
@@ -2312,7 +2267,7 @@ def build_report(output: Path) -> tuple[dict[str, object], list[dict[str, object
     except ReductionError:
         pass
     summary = {
-        "schema_version": plan["schema_version"], "format": plan["format"],
+        "format": FORMAT,
         "study_id": plan["study_id"], "generated_at": _utc_now(),
         "status": progress.get("status", "unknown"),
         "total_jobs": len(plan["jobs"]), "completed_jobs": len(results),
@@ -2347,8 +2302,7 @@ def report(output: Path) -> dict[str, object]:
     _write_json(report_dir / "summary.json", summary)
     plan = load_plan(output)
     _write_json(report_dir / "report.complete.json", {
-        "schema_version": plan["schema_version"],
-        "format": plan["format"],
+        "format": FORMAT,
         "plan_sha256": plan.get("plan_sha256"),
         "results_sha256": _sha256_path(output / "results.tsv") if (output / "results.tsv").is_file() else None,
         "summary_sha256": _sha256_path(report_dir / "summary.json"),
@@ -2388,13 +2342,13 @@ def export_xlsx(output: Path, destination: Path | None = None) -> Path:
                 json.dumps(row.get("by_reducer", {}), ensure_ascii=False),
             ])
     reducer_sheet = workbook.create_sheet("reducers")
-    reducer_sheet.append(["reducer_id", "label", "planned", "completed", "verified", "evidence_ok", "predicate_calls", "accepted_moves", "statuses"])
+    reducer_sheet.append(["reducer_id", "label", "planned", "completed", "verified", "evidence_ok", "predicate_calls", "preserving_calls", "statuses"])
     for reducer_id, value in summary.get("reducers", {}).items():
         reducer_sheet.append([
             reducer_id, value.get("label"), value.get("planned"),
             value.get("completed"), value.get("verified"), value.get("evidence_ok"),
-            value.get("median_predicate_calls", value.get("predicate_calls")),
-            value.get("median_accepted_moves", value.get("accepted_moves")),
+            value.get("median_predicate_calls"),
+            value.get("median_preserving_calls"),
             json.dumps(value.get("statuses", {}), ensure_ascii=False),
         ])
     curves_sheet = workbook.create_sheet("trajectory")
@@ -2418,7 +2372,7 @@ def export_xlsx(output: Path, destination: Path | None = None) -> Path:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="action", required=True)
-    prepare_parser = commands.add_parser("prepare", help="validate a v3 study and freeze its job plan")
+    prepare_parser = commands.add_parser("prepare", help="validate a study and freeze its job plan")
     prepare_parser.add_argument("study", type=Path)
     prepare_parser.add_argument("--output", required=True, type=Path)
     prepare_parser.add_argument(

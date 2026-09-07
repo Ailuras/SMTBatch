@@ -1,1 +1,0 @@
-"""SMTBatch test suite."""

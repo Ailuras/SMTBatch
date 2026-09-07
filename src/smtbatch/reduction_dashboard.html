@@ -302,7 +302,7 @@
         const status=run.status||'unknown',live=Boolean(run.live),url='/runs/'+encodeURIComponent(run.run_id)+'/report';
         const buckets={completed:0,truncated:0,invalid:0};
         Object.values(run.by_reducer||{}).forEach(function(item){Object.entries(item.statuses||{}).forEach(function(entry){buckets[entry[0] in buckets?entry[0]:'invalid']+=Number(entry[1])||0})});
-        const calls=run.calls||0,accepted=run.accepted||0;
+        const calls=run.calls||0,preserving=run.preserving_calls||0;
         const reducers=Object.values(run.by_reducer||{}).map(function(item){return item.label||item.id}).join(' · ')||'—';
         const created=run.created_at?new Date(run.created_at).toLocaleString():'unknown';
         const elapsed=run.elapsed_sec==null?'—':duration(run.elapsed_sec);
@@ -329,7 +329,7 @@
           '</div><div class="performance-grid">'+
             perfMetric('Runtime',elapsed,'Wall-clock duration of this run')+
             perfMetric('Predicate calls',fmt(calls),'Predicate (oracle) invocations — totals across sealed and live trials')+
-            perfMetric('Accepted moves',fmt(accepted),'Reduction moves that kept the predicate true — totals across sealed and live trials')+
+            perfMetric('Preserving checks',fmt(preserving),'Predicate checks that preserved the target signal — totals across sealed and live trials')+
           '</div></a></article>';
       }).join('');
       updateHeader();

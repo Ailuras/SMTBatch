@@ -215,7 +215,7 @@ def snapshot_reducer(
     ))
     assets = [snapshot_path(path) for path in paths]
     return {
-        "schema_version": 1,
+        "format": "provenance",
         "require_clean": require_clean,
         "executable": str(executable_path),
         "declared_paths": [str(path) for path in paths],
@@ -229,7 +229,9 @@ def resnapshot_reducer(frozen: Mapping[str, object]) -> dict[str, object]:
     declared = frozen.get("declared_paths")
     require_clean = frozen.get("require_clean")
     if (
-        not isinstance(executable, str)
+        frozen.get("format") != "provenance"
+        or "schema_version" in frozen
+        or not isinstance(executable, str)
         or not isinstance(declared, list)
         or not all(isinstance(item, str) for item in declared)
         or not isinstance(require_clean, bool)
@@ -273,7 +275,7 @@ def snapshot_command(
         raise ProvenanceError(f"identity command cwd is not a directory: {root}")
     paths = _command_asset_paths(command, root)
     record: dict[str, object] = {
-        "schema_version": 1,
+        "format": "provenance",
         "command": list(command),
         "cwd": str(root),
         "execute": execute,
@@ -308,7 +310,9 @@ def resnapshot_command(frozen: Mapping[str, object]) -> dict[str, object]:
     execute = frozen.get("execute")
     timeout = frozen.get("timeout_seconds")
     if (
-        not isinstance(command, list)
+        frozen.get("format") != "provenance"
+        or "schema_version" in frozen
+        or not isinstance(command, list)
         or not all(isinstance(item, str) for item in command)
         or not isinstance(cwd, str)
         or not isinstance(execute, bool)
@@ -323,41 +327,22 @@ def _comparable_snapshot(record: Mapping[str, object]) -> dict[str, object]:
     """Compare identity by project files and command output, not interpreter bytes."""
 
     if "command" in record and "cwd" in record:
-        root = Path(str(record.get("cwd") or ".")).expanduser()
-        assets = [
-            asset for asset in record.get("assets") or []
-            if isinstance(asset, dict) and isinstance(asset.get("path"), str)
-            and _under_root(Path(asset["path"]), root)
-        ]
-        repositories = [
-            repo for repo in record.get("repositories") or []
-            if isinstance(repo, dict) and isinstance(repo.get("root"), str)
-            and _under_root(Path(repo["root"]), root)
-        ]
         return {
+            "format": record.get("format"),
             "command": record.get("command"),
             "cwd": record.get("cwd"),
             "execute": record.get("execute"),
             "stdout_sha256": record.get("stdout_sha256"),
-            "assets": assets,
-            "repositories": repositories,
+            "assets": record.get("assets"),
+            "repositories": record.get("repositories"),
         }
     if "executable" in record:
-        declared = [
-            str(Path(item).expanduser().resolve())
-            for item in record.get("declared_paths") or []
-            if isinstance(item, str)
-        ]
-        declared_set = set(declared)
-        assets = [
-            asset for asset in record.get("assets") or []
-            if isinstance(asset, dict) and asset.get("path") in declared_set
-        ]
         return {
+            "format": record.get("format"),
             "executable": record.get("executable"),
             "require_clean": record.get("require_clean"),
-            "declared_paths": declared,
-            "assets": assets,
+            "declared_paths": record.get("declared_paths"),
+            "assets": record.get("assets"),
         }
     comparable = dict(record)
     comparable.pop("snapshot_sha256", None)

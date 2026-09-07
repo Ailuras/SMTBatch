@@ -74,7 +74,7 @@
     .grid{stroke:#22374a;stroke-width:1}
     .axis{stroke:#51687c;stroke-width:1}
     .curve{fill:none;stroke-width:2}
-    .accept{stroke:var(--page);stroke-width:1.5}
+    .preserving{stroke:var(--page);stroke-width:1.5}
     .error{color:var(--red)}
     @media(max-width:1050px){.case-layout{grid-template-columns:1fr}.case-list .scroll{flex:none;max-height:620px}.case-list .toolbar{display:flex}.case-list .toolbar label{flex:1 1 0}}
   </style>
@@ -137,7 +137,7 @@
       return {
         truncated:win(reducers.map(v=>bucketCounts(v.statuses).truncated)),
         time:win(reducers.map(v=>v.completed_avg_sec)),
-        size:win(reducers.map(v=>v.avg_bytes ?? v.completed_avg_bytes)),
+        size:win(reducers.map(v=>v.avg_bytes)),
       };
     }
     function renderComparisons(){
@@ -171,10 +171,10 @@
       $('reducerRows').innerHTML=reducers.map(v=>{
         const b=bucketCounts(v.statuses);
         const timeText=v.completed_avg_sec==null?'—':seconds(v.completed_avg_sec);
-        const sizeValue=v.avg_bytes ?? v.completed_avg_bytes;
+        const sizeValue=v.avg_bytes;
         const sizeText=sizeValue==null?'—':fmt(Math.round(sizeValue));
         const truncTitle=v.truncated_avg_bytes==null?'':'Mean final bytes of truncated trials: '+fmt(Math.round(v.truncated_avg_bytes));
-        return `<tr><td>${esc(v.label)}</td><td class="num">${fmt(b.completed)}</td><td class="num">${boldIf(winners.time.has(v.id),timeText)}</td><td class="num" title="Mean final bytes of completed and truncated trials">${boldIf(winners.size.has(v.id),sizeText)}</td><td class="num"${truncTitle?` title="${esc(truncTitle)}"`:''}>${boldIf(winners.truncated.has(v.id),fmt(b.truncated))}</td><td class="num">${fmt(b.invalid)}</td><td class="num">${fmt(v.predicate_calls)}</td><td class="num">${fmt(v.accepted_moves)}</td></tr>`;
+        return `<tr><td>${esc(v.label)}</td><td class="num">${fmt(b.completed)}</td><td class="num">${boldIf(winners.time.has(v.id),timeText)}</td><td class="num" title="Mean final bytes of completed and truncated trials">${boldIf(winners.size.has(v.id),sizeText)}</td><td class="num"${truncTitle?` title="${esc(truncTitle)}"`:''}>${boldIf(winners.truncated.has(v.id),fmt(b.truncated))}</td><td class="num">${fmt(b.invalid)}</td><td class="num">${fmt(v.predicate_calls)}</td><td class="num">${fmt(v.preserving_calls)}</td></tr>`;
       }).join('')||'<tr><td class="muted">No reducers in this run.</td></tr>';
       renderComparisons();
       const selectedReducer=$('reducer').value;
@@ -244,11 +244,11 @@
         let dPath=`M ${box.X(Number(s.pts[0].elapsed_sec||0))} ${box.Y(Number(s.pts[0].byte_count||0))}`;
         for(let i=1;i<s.pts.length;i++)dPath+=` H ${box.X(Number(s.pts[i].elapsed_sec||0))} V ${box.Y(Number(s.pts[i].byte_count||0))}`;
         sizeSvg.insertAdjacentHTML('beforeend',`<path class="curve" stroke="${color}" d="${dPath}"/>`);
-        s.pts.filter(p=>p.accepted&&Number(p.call_index||0)>0).forEach(p=>{sizeSvg.insertAdjacentHTML('beforeend',`<circle class="accept" fill="${color}" cx="${box.X(Number(p.elapsed_sec||0))}" cy="${box.Y(Number(p.byte_count||0))}" r="3.5"><title>${esc(s.t.reducer_label)} / r${esc(s.t.repeat)} · ${seconds(Number(p.elapsed_sec||0))} · ${esc(p.mutator||'')} · ${fmt(p.byte_count)} B</title></circle>`)});
+        s.pts.filter(p=>p.preserving&&Number(p.call_index||0)>0).forEach(p=>{sizeSvg.insertAdjacentHTML('beforeend',`<circle class="preserving" fill="${color}" cx="${box.X(Number(p.elapsed_sec||0))}" cy="${box.Y(Number(p.byte_count||0))}" r="3.5"><title>${esc(s.t.reducer_label)} / r${esc(s.t.repeat)} · ${seconds(Number(p.elapsed_sec||0))} · ${esc(p.mutator||'')} · ${fmt(p.byte_count)} B</title></circle>`)});
       }
       // preserving-check chart: cumulative positive predicate count over wall time
       const opsSvg=$('opsChart');
-      let opsSeries=series.map(s=>{let acc=0;const pts=[[0,0]];for(const p of s.pts){if(p.accepted){acc+=1;pts.push([Number(p.elapsed_sec||0),acc])}}return{t:s.t,pts,acc}});
+      let opsSeries=series.map(s=>{let acc=0;const pts=[[0,0]];for(const p of s.pts){if(p.preserving&&Number(p.call_index||0)>0){acc+=1;pts.push([Number(p.elapsed_sec||0),acc])}}return{t:s.t,pts,acc}});
       const maxA=Math.max(1,...opsSeries.map(s=>s.acc));
       const obox=axisBox(opsSvg,580,300,maxT,maxA);
       for(const s of opsSeries){
@@ -265,7 +265,7 @@
       const d=state.trajectory,trials=d.trials||[];
       $('detail').classList.add('open');
       $('caseTitle').textContent=`${d.case.id}`;
-      $('trialRows').innerHTML=trials.map(t=>{const tr=t.trajectory||{},fin=tr.final||{},init=tr.initial||{},ratio=init.byte_count?fin.byte_count/init.byte_count:null;return `<tr><td>${esc(t.reducer_label)} <span class="muted">r${esc(t.repeat)}</span></td><td>${badge(t.status)}</td><td class="num">${fmt(tr.candidate_calls)}</td><td class="num">${fmt(tr.accepted_moves)}</td><td class="num">${fmt(fin.byte_count)}</td><td class="num">${ratio==null?'—':(ratio*100).toFixed(1)+'%'}</td></tr>`}).join('');
+      $('trialRows').innerHTML=trials.map(t=>{const tr=t.trajectory||{},fin=tr.final||{},init=tr.initial||{},ratio=init.byte_count?fin.byte_count/init.byte_count:null;return `<tr><td>${esc(t.reducer_label)} <span class="muted">r${esc(t.repeat)}</span></td><td>${badge(t.status)}</td><td class="num">${fmt(tr.candidate_calls)}</td><td class="num">${fmt(tr.preserving_calls)}</td><td class="num">${fmt(fin.byte_count)}</td><td class="num">${ratio==null?'—':(ratio*100).toFixed(1)+'%'}</td></tr>`}).join('');
       const repeats=[...new Set(trials.map(t=>t.repeat))].sort((a,b)=>Number(a)-Number(b));
       const repeatOptions=repeats.map(String);
       if(!repeatOptions.includes(state.repeatFilter))state.repeatFilter=repeatOptions[0]||'';
