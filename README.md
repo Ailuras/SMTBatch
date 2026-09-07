@@ -45,6 +45,32 @@ provenance_paths = ["tools/candidate"]
 require_clean = true
 ```
 
+Command placeholders are `{input}`, `{output}`, `{workdir}`, `{predicate_timeout}`,
+`{predicate_envelope_timeout}`, and `{trial_timeout}`. Timeouts are in seconds:
+the predicate envelope includes the configured wrapper grace, and the trial
+timeout is the run's selected per-reducer wall budget, including UI/CLI overrides.
+`{predicate}` must occupy a separate command token and expands to the complete
+predicate argument list. A reducer with its own total-budget option can receive
+`{trial_timeout}`; SMTBatch enforces the outer deadline for every reducer.
+Reducers with a different CLI can use a project-owned adapter in their command.
+
+Dashboard benchmark groups are configured with `[benchmark_categories.<id>]`.
+Use `metadata` to match database fields by exact string equality, for example:
+
+```toml
+[benchmark_categories.published]
+label = "Published"
+metadata = { corpus = "published" }
+
+[benchmark_categories.collected]
+label = "Collected"
+metadata = { corpus = "collected" }
+```
+
+Metadata conditions combine with any configured size or feature conditions.
+Every database row must match exactly one group. Without category configuration,
+the dashboard shows a single group containing all benchmarks.
+
 The default evidence path is external: SMTBatch wraps every predicate call, records the
 candidate size vector, file hashes, solver outcome, elapsed time, and reducer stdout/stderr.
 The report therefore gives a generic size-decline curve for every reducer.

@@ -348,6 +348,7 @@ class ReductionManager:
                 any_features=(),
                 required_features=(),
                 forbidden_features=(),
+                metadata={},
                 fallback=True,
             )
         }
@@ -372,7 +373,7 @@ class ReductionManager:
             tuple(
                 (name, spec.label, spec.description, spec.min_bytes, spec.max_bytes,
                  spec.any_features, spec.required_features, spec.forbidden_features,
-                 spec.fallback)
+                 tuple(sorted(spec.metadata.items())), spec.fallback)
                 for name, spec in category_specs.items()
             ),
         )
@@ -445,7 +446,7 @@ class ReductionManager:
             features = _benchmark_features(input_path)
             matches = [
                 spec for spec in category_specs.values()
-                if spec.matches(input_path.stat().st_size, features)
+                if spec.matches(input_path.stat().st_size, features, entry)
             ]
             if len(matches) != 1:
                 errors.append(

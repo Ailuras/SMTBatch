@@ -20,7 +20,7 @@ CONFIG_NAME = "smtbatch.toml"
 _PLACEHOLDER = re.compile(r"\{(\w+)\}")
 _REDUCER_PLACEHOLDERS = {
     "input", "output", "workdir", "predicate_timeout",
-    "predicate_envelope_timeout", "predicate",
+    "predicate_envelope_timeout", "trial_timeout", "predicate",
 }
 _CATEGORY_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -58,9 +58,10 @@ class BenchmarkCategorySpec:
     any_features: tuple[str, ...]
     required_features: tuple[str, ...]
     forbidden_features: tuple[str, ...]
+    metadata: dict[str, str]
     fallback: bool
 
-    def matches(self, size_bytes: int, features: set[str]) -> bool:
+    def matches(self, size_bytes: int, features: set[str], entry: dict[str, object]) -> bool:
         if self.fallback:
             return True
         return (
@@ -69,6 +70,7 @@ class BenchmarkCategorySpec:
             and (not self.any_features or bool(set(self.any_features) & features))
             and set(self.required_features).issubset(features)
             and not (set(self.forbidden_features) & features)
+            and all(entry.get(key) == value for key, value in self.metadata.items())
         )
 
     @property
@@ -82,6 +84,7 @@ class BenchmarkCategorySpec:
             "any_features": list(self.any_features),
             "required_features": list(self.required_features),
             "forbidden_features": list(self.forbidden_features),
+            "metadata": dict(self.metadata),
         }
 
 
@@ -338,7 +341,7 @@ def _parse_category(name: str, value: object, path: Path) -> BenchmarkCategorySp
         raise RuntimeError(f"[benchmark_categories.{name}] must be a table in {path}")
     allowed = {
         "label", "description", "min_bytes", "max_bytes", "any_features",
-        "required_features", "forbidden_features", "fallback",
+        "required_features", "forbidden_features", "metadata", "fallback",
     }
     extras = sorted(set(value) - allowed)
     if extras:
@@ -367,10 +370,18 @@ def _parse_category(name: str, value: object, path: Path) -> BenchmarkCategorySp
     forbidden_features = _string_tuple(
         value.get("forbidden_features"), f"[benchmark_categories.{name}] forbidden_features"
     )
+    metadata = value.get("metadata", {})
+    if not isinstance(metadata, dict) or not all(
+        isinstance(key, str) and key.strip() and isinstance(item, str) and item
+        for key, item in metadata.items()
+    ):
+        raise RuntimeError(
+            f"[benchmark_categories.{name}] metadata must map non-empty field names to non-empty strings"
+        )
     fallback = value.get("fallback", False)
     if not isinstance(fallback, bool):
         raise RuntimeError(f"[benchmark_categories.{name}] fallback must be boolean")
-    if not fallback and min_bytes is None and max_bytes is None and not (any_features or required_features or forbidden_features):
+    if not fallback and min_bytes is None and max_bytes is None and not (any_features or required_features or forbidden_features or metadata):
         raise RuntimeError(
             f"[benchmark_categories.{name}] needs a matcher or fallback=true"
         )
@@ -383,6 +394,7 @@ def _parse_category(name: str, value: object, path: Path) -> BenchmarkCategorySp
         any_features=any_features,
         required_features=required_features,
         forbidden_features=forbidden_features,
+        metadata=dict(metadata),
         fallback=fallback,
     )
 

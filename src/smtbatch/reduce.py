@@ -60,7 +60,7 @@ LIMIT_FIELDS = {
 TOOL_LIST_PLACEHOLDERS = {"{predicate}"}
 TOOL_SCALAR_PLACEHOLDERS = {
     "input", "output", "workdir", "predicate_timeout",
-    "predicate_envelope_timeout",
+    "predicate_envelope_timeout", "trial_timeout",
 }
 WRAPPER_LIST_PLACEHOLDERS = {"{command}", "{match_args}"}
 WRAPPER_SCALAR_PLACEHOLDERS = {
@@ -1022,6 +1022,7 @@ def _render_tool_command(
         "workdir": str(attempt_dir),
         "predicate_timeout": f"{float(limits['predicate_timeout_sec']):g}",
         "predicate_envelope_timeout": f"{predicate_envelope_timeout:g}",
+        "trial_timeout": f"{float(limits['trial_wall_sec']):g}",
     }
     command: list[str] = []
     for token in reducer["command"]:
