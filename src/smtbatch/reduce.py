@@ -55,7 +55,7 @@ EXECUTION_FIELDS = {"outer_jobs", "schedule"}
 LIMIT_FIELDS = {
     "trial_wall_sec", "predicate_timeout_sec", "memory_mb",
     "preflight_repeats", "verification_repeats", "termination_grace_sec",
-    "analysis_horizon_sec", "predicate_envelope_grace_sec",
+    "predicate_envelope_grace_sec",
 }
 TOOL_LIST_PLACEHOLDERS = {"{predicate}"}
 TOOL_SCALAR_PLACEHOLDERS = {
@@ -319,7 +319,7 @@ def _normalize_limits(value: object) -> dict[str, object]:
             raw.get("predicate_envelope_grace_sec", 3),
             "limits.predicate_envelope_grace_sec",
         ),
-        "memory_mb": _positive_int(raw.get("memory_mb", 8192), "limits.memory_mb", allow_zero=True),
+        "memory_mb": _positive_int(raw.get("memory_mb", 16384), "limits.memory_mb", allow_zero=True),
         "preflight_repeats": _positive_int(
             raw.get("preflight_repeats", 3), "limits.preflight_repeats"
         ),
@@ -328,9 +328,6 @@ def _normalize_limits(value: object) -> dict[str, object]:
         ),
         "termination_grace_sec": _positive_number(
             raw.get("termination_grace_sec", 5), "limits.termination_grace_sec"
-        ),
-        "analysis_horizon_sec": _positive_number(
-            raw.get("analysis_horizon_sec", trial), "limits.analysis_horizon_sec"
         ),
     }
 

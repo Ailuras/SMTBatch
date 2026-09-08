@@ -102,6 +102,7 @@ class Config:
     benchmark_categories: dict[str, BenchmarkCategorySpec]
     comparisons: tuple[tuple[str, str], ...]
     predicate_timeout_sec: float = 25.0
+    memory_mb: int = 16384
     port: int = 8001
     target_branch: str = "main"
 
@@ -137,7 +138,10 @@ def load_config(start: Path | None = None) -> Config:
         raise RuntimeError(f"[defaults] must be a table in {path}")
     default_extras = sorted(
         set(defaults)
-        - {"results", "port", "target_branch", "comparisons", "predicate_timeout_sec", "smtbatch_root"}
+        - {
+            "results", "port", "target_branch", "comparisons",
+            "predicate_timeout_sec", "memory_mb", "smtbatch_root",
+        }
     )
     if default_extras:
         raise RuntimeError(f"unknown [defaults] fields in {path}: {', '.join(default_extras)}")
@@ -212,6 +216,7 @@ def load_config(start: Path | None = None) -> Config:
             "[defaults] predicate_timeout_sec",
             path,
         ),
+        memory_mb=_parse_memory_mb(defaults.get("memory_mb", 16384), path),
         port=_parse_port(defaults.get("port", 8001), path),
         target_branch=target_branch,
     )
@@ -255,6 +260,14 @@ def _parse_positive_number(value: object, label: str, path: Path) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
         raise RuntimeError(f"{label} must be a positive number in {path}")
     return float(value)
+
+
+def _parse_memory_mb(value: object, path: Path) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise RuntimeError(
+            f"[defaults] memory_mb must be a non-negative integer in {path}"
+        )
+    return value
 
 
 def _parse_port(value: object, path: Path) -> int:

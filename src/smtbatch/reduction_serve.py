@@ -541,15 +541,12 @@ class ReductionManager:
             "predicate_envelope_grace_sec": template_limits.get(
                 "predicate_envelope_grace_sec", 3
             ),
-            "memory_mb": template_limits.get("memory_mb", 8192),
+            "memory_mb": template_limits.get("memory_mb", self.config.memory_mb),
             "preflight_repeats": max(3, template_limits.get("preflight_repeats", 3)),
             "verification_repeats": template_limits.get(
                 "verification_repeats", 3
             ),
             "termination_grace_sec": template_limits.get("termination_grace_sec", 5),
-            "analysis_horizon_sec": template_limits.get(
-                "analysis_horizon_sec", template_limits.get("trial_wall_sec", 3600)
-            ),
         }
         wrapper_script = Path(__file__).with_name("predicate.py").resolve()
         predicate_wrapper = {
