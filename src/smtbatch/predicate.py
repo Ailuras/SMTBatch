@@ -216,6 +216,81 @@ def _read_rows(handle) -> list[dict[str, object]]:
     return rows
 
 
+def _cursor_checksum(cursor: dict[str, object]) -> str:
+    payload = {key: value for key, value in cursor.items() if key != 'checksum'}
+    return _sha256_bytes(_json_line(payload).encode('utf-8'))
+
+
+def _journal_tail_checksum(handle, offset: int) -> str:
+    size = min(512, offset)
+    return _sha256_bytes(os.pread(handle.fileno(), size, offset - size))
+
+
+def _journal_cursor(path: Path, handle) -> dict[str, object]:
+    """Recover sequence metadata, reading only the unindexed journal suffix.
+
+    The journal remains authoritative. A lost/stale cursor costs one scan;
+    publishing it only after the journal is flushed makes interrupted writes
+    safe to recover. Callers hold the journal's exclusive lock throughout.
+    """
+    stat = os.fstat(handle.fileno())
+    cursor_path = path.with_name(path.name + '.cursor')
+    initial = dict(device=stat.st_dev, inode=stat.st_ino, offset=0,
+                   next_call_seq=1, reducer_seen=False)
+    try:
+        cursor = json.loads(cursor_path.read_text(encoding='utf-8'))
+        if (not isinstance(cursor, dict)
+                or cursor.get('device') != stat.st_dev
+                or cursor.get('inode') != stat.st_ino
+                or type(cursor.get('offset')) is not int
+                or not 0 <= cursor['offset'] <= stat.st_size
+                or type(cursor.get('next_call_seq')) is not int
+                or cursor['next_call_seq'] < 1
+                or type(cursor.get('reducer_seen')) is not bool
+                or cursor.get('checksum') != _cursor_checksum(cursor)
+                or cursor.get('tail_checksum') != _journal_tail_checksum(handle, cursor['offset'])):
+            cursor = initial
+    except (OSError, ValueError):
+        cursor = initial
+    handle.seek(cursor['offset'])
+    for line in handle:
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if not isinstance(row, dict):
+            continue
+        if row.get('format') != 'predicate' or 'schema_version' in row:
+            raise ValueError('unsupported predicate journal format; start a new attempt')
+        if row.get('event') == 'start':
+            seq = row.get('call_seq')
+            if type(seq) is int:
+                cursor['next_call_seq'] = max(cursor['next_call_seq'], seq + 1)
+            cursor['reducer_seen'] |= row.get('phase') == 'reducer'
+    handle.seek(0, os.SEEK_END)
+    cursor['offset'] = handle.tell()
+    return cursor
+
+
+def _save_journal_cursor(path: Path, cursor: dict[str, object]) -> None:
+    cursor_path = path.with_name(path.name + '.cursor')
+    temporary = cursor_path.with_name(cursor_path.name + f'.{os.getpid()}.tmp')
+    try:
+        cursor['checksum'] = _cursor_checksum(cursor)
+        temporary.write_text(_json_line(cursor), encoding='utf-8')
+        os.replace(temporary, cursor_path)
+    except OSError:
+        # This is a disposable index, never evidence of an oracle decision.
+        try:
+            cursor_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def _append(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
@@ -301,14 +376,10 @@ def _append_start(
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+", encoding="utf-8") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        rows = _read_rows(handle)
-        if any(row.get("format") != "predicate" or "schema_version" in row for row in rows):
-            raise ValueError("unsupported predicate journal format; start a new attempt")
-        starts = [row for row in rows if row.get("event") == "start"]
-        reducer_starts = [row for row in starts if row.get("phase") == "reducer"]
+        cursor = _journal_cursor(path, handle)
         role = phase
         if phase == "reducer":
-            role = "golden" if not reducer_starts else "candidate"
+            role = "candidate" if cursor['reducer_seen'] else "golden"
         if internal is not None:
             internal_role = internal.get("role")
             if internal_role in {"golden", "candidate"} and internal_role != role:
@@ -316,15 +387,7 @@ def _append_start(
                     f"internal predicate role {internal_role!r} does not match "
                     f"external role {role!r}"
                 )
-        call_seq = max(
-            (
-                int(row["call_seq"])
-                for row in starts
-                if isinstance(row.get("call_seq"), int)
-                and not isinstance(row.get("call_seq"), bool)
-            ),
-            default=0,
-        ) + 1
+        call_seq = cursor['next_call_seq']
         candidate_record = _candidate_record(candidate)
         if internal is not None:
             internal_sha256 = internal.get("candidate_raw_sha256")
@@ -355,6 +418,10 @@ def _append_start(
         handle.write(_json_line(event))
         handle.flush()
         os.fsync(handle.fileno())
+        cursor.update(offset=handle.tell(), next_call_seq=call_seq + 1,
+                      reducer_seen=cursor['reducer_seen'] or phase == 'reducer')
+        cursor['tail_checksum'] = _journal_tail_checksum(handle, cursor['offset'])
+        _save_journal_cursor(path, cursor)
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     return event
 
