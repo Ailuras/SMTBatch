@@ -79,7 +79,15 @@ Reducer logs may be inspected for implementation-specific diagnosis. Optional
 with external predicate events; reducers without these fields work normally.
 SMTBatch does not import the consuming project's modules or require its observer.
 
-A reduction study contains benchmark predicates, default resource limits, repeats, comparisons, and a list of allowed reducer IDs. Reducer commands are not duplicated in the study. When a run is created, SMTBatch freezes the selected reducer definitions, executable and declared-source hashes, relevant Git identities and scoped dirty state, predicate-wrapper assets, input hashes, and an optional executed benchmark identity command together with the timeout, outer jobs, and strict-wave job matrix. Prepare rejects a dirty reducer marked `require_clean`; resume re-snapshots every frozen asset and rejects any drift before starting jobs. Only the current data format is supported; old experiment files must not be reused.
+A reduction study contains benchmark predicates, default resource limits, repeats, comparisons, and a list of allowed reducer IDs. Reducer commands are not duplicated in the study. When a run is created, SMTBatch freezes the selected reducer definitions, executable and declared-source hashes, relevant Git identities and scoped dirty state, predicate-wrapper assets, input hashes, and an optional executed benchmark identity command together with the timeout, outer jobs, and ordered job queue. Prepare rejects a dirty reducer marked `require_clean`; resume re-snapshots every frozen asset and rejects any drift before starting jobs. Only the current data format is supported; old experiment files must not be reused.
+
+The scheduler uses one queue (`execution.schedule = "queue"`) and keeps up to
+`outer_jobs` trials in flight. Each completion frees a slot for the next queued
+trial, including across reducers and repeats. Queue order is frozen at preparation;
+the reducer order rotates deterministically for each benchmark and repeat.
+Resume skips sealed trials and retries unfinished trials in that same order.
+The dashboard's budget durations use the total trial count and concurrent slots;
+they assume full timeouts rather than predicting observed trial runtimes.
 
 The SMTBatch checkout selected by `[defaults] smtbatch_root` (default:
 `<project-root>/SMTBatch`) must match `target_branch` to launch or resume work.

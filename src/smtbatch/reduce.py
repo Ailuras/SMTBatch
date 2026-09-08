@@ -37,6 +37,7 @@ from .oracle_protocol import decode as decode_oracle, preserving as oracle_prese
 
 
 FORMAT = "reduction"
+SCHEDULE = "queue"
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 MAX_LOG_BYTES = 64 * 1024
 STUDY_FIELDS = {
@@ -67,7 +68,7 @@ WRAPPER_SCALAR_PLACEHOLDERS = {
     "journal", "phase", "predicate_timeout", "run_id", "job_id", "attempt",
 }
 RESULT_FIELDS = [
-    "job_id", "benchmark", "reducer", "repeat", "wave", "status",
+    "job_id", "benchmark", "reducer", "repeat", "status",
     "status_detail", "verified", "evidence_ok", "input_expressions",
     "input_nodes", "input_bytes", "input_normalized_bytes", "input_tokens", "output_expressions", "output_nodes",
     "output_bytes", "output_normalized_bytes", "output_tokens", "size_ratio", "trial_wall_sec", "cleanup_wall_sec",
@@ -359,9 +360,9 @@ def load_study(path: Path) -> dict[str, object]:
 
     execution_raw = _mapping(raw.get("execution"), "execution")
     _only_fields(execution_raw, EXECUTION_FIELDS, "execution")
-    schedule = execution_raw.get("schedule", "strict-wave")
-    if schedule != "strict-wave":
-        raise ReductionError("execution.schedule must be 'strict-wave'")
+    schedule = execution_raw.get("schedule", SCHEDULE)
+    if schedule != SCHEDULE:
+        raise ReductionError(f"execution.schedule must be '{SCHEDULE}'")
     execution = {
         "outer_jobs": _positive_int(execution_raw.get("outer_jobs"), "execution.outer_jobs"),
         "schedule": schedule,
@@ -557,7 +558,7 @@ def build_plan(
         limits["predicate_timeout_sec"] = _positive_number(
             predicate_timeout_seconds, "predicate_timeout_seconds"
         )
-    execution = {"outer_jobs": workers, "schedule": "strict-wave"}
+    execution = {"outer_jobs": workers, "schedule": SCHEDULE}
     configured_comparisons = list(config.comparisons) or list(study["comparisons"])
     comparisons = [
         list(pair) for pair in configured_comparisons
@@ -595,7 +596,6 @@ def build_plan(
             for benchmark in benchmarks
         }
         for slot in range(reducer_count):
-            wave = (repeat - 1) * reducer_count + slot + 1
             for benchmark_index, benchmark in enumerate(benchmarks, start=1):
                 reducer = reducers[(offsets[benchmark["id"]] + slot) % reducer_count]
                 order += 1
@@ -603,7 +603,6 @@ def build_plan(
                 jobs.append({
                     "job_id": hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20],
                     "order": order,
-                    "wave": wave,
                     "slot": slot + 1,
                     "benchmark_index": benchmark_index,
                     "benchmark_id": benchmark["id"],
@@ -636,17 +635,16 @@ def build_plan(
         "environment": study["environment"],
         "jobs": jobs,
         "job_count": len(jobs),
-        "wave_count": repeat_count * reducer_count,
     }
     plan["plan_sha256"] = _hash_json(plan)
     return plan
 
 
 def _write_jobs(path: Path, jobs: Sequence[Mapping[str, object]]) -> None:
-    lines = ["job_id\torder\twave\tbenchmark\treducer\trepeat\n"]
+    lines = ["job_id\torder\tbenchmark\treducer\trepeat\n"]
     for job in jobs:
         lines.append(
-            f"{job['job_id']}\t{job['order']}\t{job['wave']}\t{job['benchmark_id']}\t"
+            f"{job['job_id']}\t{job['order']}\t{job['benchmark_id']}\t"
             f"{job['reducer_id']}\t{job['repeat']}\n"
         )
     _atomic_write(path, "".join(lines).encode("utf-8"))
@@ -1707,8 +1705,12 @@ def _quality_columns(value: object, prefix: str) -> dict[str, object]:
     }
 
 
-def write_results_index(output: Path, plan: Mapping[str, object]) -> list[dict[str, object]]:
-    results = completed_results(output, plan)
+def write_results_index(
+    output: Path, plan: Mapping[str, object], *,
+    results: list[dict[str, object]] | None = None,
+) -> list[dict[str, object]]:
+    if results is None:
+        results = completed_results(output, plan)
     temporary = output / ".results.tsv.tmp"
     try:
         with temporary.open("w", encoding="utf-8", newline="") as handle:
@@ -1718,7 +1720,7 @@ def write_results_index(output: Path, plan: Mapping[str, object]) -> list[dict[s
                 row = {
                     "job_id": result["job_id"], "benchmark": result["benchmark_id"],
                     "reducer": result["reducer_id"], "repeat": result["repeat"],
-                    "wave": result["wave"], "status": result["status"],
+                    "status": result["status"],
                     "status_detail": result.get("status_detail", ""),
                     "verified": str(bool(result["verified"])).lower(),
                     "evidence_ok": str(bool(result["evidence_ok"])).lower(),
@@ -1743,8 +1745,10 @@ def write_results_index(output: Path, plan: Mapping[str, object]) -> list[dict[s
 def _progress(
     output: Path, plan: Mapping[str, object], status_value: str,
     running_jobs: Sequence[Mapping[str, object]] = (),
+    *, results: Sequence[Mapping[str, object]] | None = None,
 ) -> None:
-    results = completed_results(output, plan)
+    if results is None:
+        results = completed_results(output, plan)
     statuses = Counter(str(item["status"]) for item in results)
     by_reducer: dict[str, dict[str, object]] = {}
     for reducer in plan["reducers"]:
@@ -1760,7 +1764,7 @@ def _progress(
     running = [
         {
             "job_id": item["job_id"], "benchmark": item["benchmark_id"],
-            "reducer": item["reducer_id"], "repeat": item["repeat"], "wave": item["wave"],
+            "reducer": item["reducer_id"], "repeat": item["repeat"],
         }
         for item in running_jobs
     ]
@@ -1787,11 +1791,14 @@ def _run_locked(output: Path, plan: Mapping[str, object]) -> list[dict[str, obje
     plan["run_id"] = output.name
     clear_control_for_resume(output)
     workers = int(plan["execution"]["outer_jobs"])
+    results = completed_results(output, plan)
+    completed_ids = {item["job_id"] for item in results}
+    pending = iter(job for job in plan["jobs"] if job["job_id"] not in completed_ids)
     _append_resume(
         output, "run_started", outer_jobs=workers,
-        completed_before=len(completed_results(output, plan)),
+        completed_before=len(results),
     )
-    _progress(output, plan, "running")
+    _progress(output, plan, "running", results=results)
     stopped = ""
     active: dict[concurrent.futures.Future[dict[str, object]], Mapping[str, object]] = {}
 
@@ -1812,25 +1819,26 @@ def _run_locked(output: Path, plan: Mapping[str, object]) -> list[dict[str, obje
     signal.signal(signal.SIGINT, signal_stop)
     signal.signal(signal.SIGTERM, signal_stop)
     try:
-        waves = sorted({int(job["wave"]) for job in plan["jobs"]})
-        for wave in waves:
-            pending = [
-                job for job in plan["jobs"]
-                if int(job["wave"]) == wave
-                and not _marker_valid(output / "jobs" / str(job["job_id"]))
-            ]
-            if not pending:
-                continue
-            pending_iter = iter(pending)
-            exhausted = False
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=workers, thread_name_prefix="reduction-job"
-            ) as executor:
+        exhausted = False
+        done = set()
+        index_dirty = True
+        next_progress = 0.0
+        last_status = ""
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="reduction-job"
+        ) as executor:
+            try:
                 while active or not exhausted:
+                    for future in done:
+                        active.pop(future)
+                        try:
+                            results.append(future.result())
+                            index_dirty = True
+                        except ImmediateAbort:
+                            stopped = "immediate"
                     mode = _control_mode(output)
-                    if mode == "immediate":
+                    if mode == "immediate" or stopped == "immediate":
                         stopped = "immediate"
-                        _progress(output, plan, "aborting", list(active.values()))
                         PROCESS_REGISTRY.terminate_all(float(plan["limits"]["termination_grace_sec"]))
                     elif mode == "graceful":
                         stopped = "graceful"
@@ -1838,8 +1846,13 @@ def _run_locked(output: Path, plan: Mapping[str, object]) -> list[dict[str, obje
                         not stopped and mode != "paused"
                         and len(active) < workers and not exhausted
                     ):
+                        # Check between submissions so a stop during a large refill
+                        # does not dispatch the rest of the available slots.
+                        mode = _control_mode(output)
+                        if mode:
+                            break
                         try:
-                            job = next(pending_iter)
+                            job = next(pending)
                         except StopIteration:
                             exhausted = True
                             break
@@ -1848,43 +1861,49 @@ def _run_locked(output: Path, plan: Mapping[str, object]) -> list[dict[str, obje
                     if not active:
                         if mode == "paused":
                             stopped = "paused"
+                        elif mode in {"graceful", "immediate"}:
+                            stopped = mode
                         break
-                    _progress(output, plan, progress_status(mode), list(active.values()))
+                    # Refill first. Sealed job records remain the source of truth;
+                    # these derived views need at most one refresh per second.
+                    current_status = progress_status(mode)
+                    now = time.monotonic()
+                    if now >= next_progress or current_status != last_status:
+                        if index_dirty:
+                            write_results_index(output, plan, results=results)
+                            index_dirty = False
+                        _progress(output, plan, current_status, list(active.values()), results=results)
+                        next_progress = time.monotonic() + 1.0
+                        last_status = current_status
                     done, _ = concurrent.futures.wait(
                         active, timeout=0.2, return_when=concurrent.futures.FIRST_COMPLETED
                     )
-                    for future in done:
-                        active.pop(future)
-                        try:
-                            future.result()
-                        except ImmediateAbort:
-                            stopped = "immediate"
-                        write_results_index(output, plan)
-                    if stopped and not active:
-                        break
-            if stopped:
-                break
-        results = write_results_index(output, plan)
+            except BaseException:
+                # Tell workers to abort before the executor waits for them.
+                request_stop(output, "immediate")
+                PROCESS_REGISTRY.terminate_all(float(plan["limits"]["termination_grace_sec"]))
+                raise
+        write_results_index(output, plan, results=results)
         if stopped:
-            _progress(output, plan, "interrupted")
+            _progress(output, plan, "interrupted", results=results)
             _append_resume(
                 output, "run_finished", status="interrupted", stop_mode=stopped,
                 completed_jobs=len(results), remaining_jobs=len(plan["jobs"]) - len(results),
             )
         else:
-            _progress(output, plan, "complete")
+            _progress(output, plan, "complete", results=results)
             _append_resume(
                 output, "run_finished", status="complete", completed_jobs=len(results), remaining_jobs=0,
             )
         return results
-    except Exception as exc:
+    except BaseException as exc:
         PROCESS_REGISTRY.terminate_all(float(plan["limits"]["termination_grace_sec"]))
-        write_results_index(output, plan)
-        _progress(output, plan, "failed")
+        results = write_results_index(output, plan)
+        _progress(output, plan, "failed", results=results)
         _append_resume(
             output, "run_finished", status="failed",
             error=f"{type(exc).__name__}: {exc}",
-            completed_jobs=len(completed_results(output, plan)),
+            completed_jobs=len(results),
         )
         raise
     finally:
@@ -2079,7 +2098,7 @@ def trajectory_for_case(
         trial = {
             "job_id": job["job_id"], "reducer_id": reducer["id"],
             "reducer_label": reducer["label"], "repeat": job["repeat"],
-            "wave": job["wave"], "status": result.get("status", "running" if attempt_dir else "pending"),
+            "status": result.get("status", "running" if attempt_dir else "pending"),
             "verified": result.get("verified"), "evidence_ok": result.get("evidence_ok"),
             "attempt": result.get("attempt", int(attempt_dir.name) if attempt_dir and attempt_dir.name.isdigit() else None),
             "trajectory": trajectory,
@@ -2207,7 +2226,7 @@ def build_report(output: Path) -> tuple[dict[str, object], list[dict[str, object
         benchmark = _lookup(plan, "benchmarks", str(job["benchmark_id"]))
         reducer = _lookup(plan, "reducers", str(job["reducer_id"]))
         row = {
-            "order": job["order"], "job_id": job["job_id"], "wave": job["wave"],
+            "order": job["order"], "job_id": job["job_id"],
             "case_id": job["benchmark_id"], "family": benchmark["family"],
             "theory": benchmark["theory"], "predicate_mode": benchmark["predicate_mode"],
             "reducer_id": job["reducer_id"], "repeat": job["repeat"],

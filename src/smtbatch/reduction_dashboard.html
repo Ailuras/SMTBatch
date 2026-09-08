@@ -177,7 +177,7 @@
           <section class="field-grid">
             <label class="field">Per-case timeout<input id="timeout" type="number" min="0.001" step="1"><span class="field-note">Maximum wall-clock seconds for one benchmark × reducer × repeat.</span></label>
             <label class="field">Predicate timeout<input id="predicateTimeout" type="number" min="0.001" step="1"><span class="field-note">Seconds for one oracle/solver call. Independent of the per-case trial wall.</span></label>
-            <label class="field">Parallel jobs<input id="jobs" type="number" min="1" step="1"><span class="field-note">Outer jobs in the frozen schedule.</span></label>
+            <label class="field">Parallel jobs<input id="jobs" type="number" min="1" step="1"><span class="field-note">Maximum concurrent trials. Free slots take the next queued trial.</span></label>
             <label class="field">Maximum files<input id="maxFiles" type="number" min="0" step="1" value="0"><span class="field-note">0 = all selected cases; otherwise a random sample cap.</span></label>
             <label class="field">Repeats<input id="repeats" type="number" min="1" step="1"><span class="field-note">Repeat the same sample for comparison.</span></label>
           </section>
@@ -198,7 +198,7 @@
     <div class="dialog-content">
       <div class="eyebrow">FREEZE RUN PLAN</div>
       <h2>Start this reduction run?</h2>
-      <p>This is the calculated workload that will be frozen into the run. The estimate uses the per-case reducer timeout; the worst case also includes predicate verification budgets and termination grace.</p>
+      <p>Free slots take the next queued trial. Budget durations assume every trial uses its full timeout; the extended budget includes preflight, verification, and termination grace. Actual completion depends on trial runtimes and recording overhead.</p>
       <div id="confirmBody" class="confirm-grid"></div>
       <div class="dialog-actions"><button id="confirmCancel" class="secondary-button" type="button">Cancel</button><button id="confirmGo" class="primary-button" type="button">Start run</button></div>
     </div>
@@ -335,8 +335,12 @@
       updateHeader();
     }
     function renderConfirmation(payload){
-      const catalog=state.catalog||{},sample=sampleCount(poolSize(),payload.max_files),waves=payload.reducers.length*payload.repeats,batchesPerWave=sample?Math.ceil(sample/payload.outer_jobs):0,executionBatches=waves*batchesPerWave,estimatedSeconds=executionBatches*payload.timeout_seconds,predicatePasses=Number(catalog.preflight_repeats||1)+Number(catalog.verification_repeats||1),predicateTimeout=Number(payload.predicate_timeout_seconds||catalog.predicate_timeout_seconds||25),worstPerTrial=payload.timeout_seconds+Number(catalog.termination_grace_seconds||5)+predicatePasses*predicateTimeout,worstSeconds=executionBatches*worstPerTrial;
-      $('confirmBody').innerHTML=metric('Planned trials',fmt(sample*payload.reducers.length*payload.repeats))+metric('Execution batches',fmt(executionBatches))+metric('Estimated completion',duration(estimatedSeconds))+metric('Worst-case completion',duration(worstSeconds));
+      const catalog=state.catalog||{},sample=sampleCount(poolSize(),payload.max_files);
+      const trials=sample*payload.reducers.length*payload.repeats,slots=Math.min(trials,payload.outer_jobs),budgetUnits=slots?Math.ceil(trials/slots):0;
+      const predicatePasses=Number(catalog.preflight_repeats||1)+Number(catalog.verification_repeats||1),predicateTimeout=Number(payload.predicate_timeout_seconds||catalog.predicate_timeout_seconds||25),grace=Number(catalog.termination_grace_seconds||5);
+      // Preflight and final replay allow five seconds beyond the predicate timeout.
+      const trialBudget=payload.timeout_seconds,extendedBudget=trialBudget+grace+predicatePasses*(predicateTimeout+5+grace);
+      $('confirmBody').innerHTML=metric('Planned trials',fmt(trials))+metric('Concurrent slots',fmt(slots))+metric('Full-timeout duration',duration(budgetUnits*trialBudget))+metric('With verification budgets',duration(budgetUnits*extendedBudget));
     }
     function confirmRun(payload){
       renderConfirmation(payload);
