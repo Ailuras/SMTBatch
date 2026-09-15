@@ -47,7 +47,10 @@ Relative `binary` paths are resolved from the directory containing
 The TOML table is the complete solver menu: the dashboard exposes every
 configured entry and refreshes the menu when the file changes. Solver labels
 are optional; when omitted, the table key is shown.
-See `smtbatch.toml`.
+Copy [smtbatch.example.toml](smtbatch.example.toml) to your project's
+`smtbatch.toml` and replace its example solver paths. The example uses a
+different filename so a tool checkout inside a project does not hide that
+project's configuration.
 
 ## Usage
 

@@ -1,5 +1,5 @@
-# smtbatch solver configuration. Discovered automatically (nearest
-# smtbatch.toml walking upward from the current directory).
+# Example solver configuration. Copy to your project's smtbatch.toml and
+# replace the solver paths. This example is not discovered automatically.
 
 [defaults]
 inputs = "benchmarks"
