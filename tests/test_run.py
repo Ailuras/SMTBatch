@@ -6,6 +6,7 @@ import io
 import json
 import os
 import signal
+import subprocess
 import tempfile
 import threading
 import time
@@ -257,6 +258,34 @@ class ResumeLogicTests(unittest.TestCase):
         args = parse_args(["--resume", "--output", str(run_dir)])
         with self.assertRaisesRegex(ValueError, "no job queue found"):
             _prepare_resume(args)
+
+    def test_prepare_fresh_records_config_repository_from_nested_checkout(self) -> None:
+        def commit_empty(repository: Path, message: str) -> str:
+            subprocess.run(["git", "init", "-q", str(repository)], check=True)
+            subprocess.run([
+                "git", "-C", str(repository), "-c", "user.name=SMTBatch Test",
+                "-c", "user.email=smtbatch@example.invalid", "commit",
+                "--allow-empty", "-qm", message,
+            ], check=True)
+            return subprocess.check_output(
+                ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True
+            ).strip()
+
+        project_commit = commit_empty(self.root, "project")
+        nested = self.root / "tools"
+        nested.mkdir()
+        nested_commit = commit_empty(nested, "nested checkout")
+        self.assertNotEqual(project_commit, nested_commit)
+        os.chdir(nested)
+        output = self.root / "results" / "nested"
+        _prepare_fresh(parse_args([
+            "--solver", "alpha", "--input", str(self.root / "inputs"),
+            "--output", str(output), "--limit", "1",
+        ]))
+        metadata = dict(line.split("=", 1) for line in
+                        (output / "metadata.txt").read_text().splitlines())
+        self.assertEqual(metadata["solver_config"], str(self.config_path))
+        self.assertEqual(metadata["repository_commit"], project_commit)
 
     def test_prepare_fresh_requires_solver_and_input(self) -> None:
         with self.assertRaisesRegex(ValueError, "required unless --resume"):

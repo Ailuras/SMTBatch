@@ -99,4 +99,6 @@ debugging). Resumed runs additionally contain append-only
 Solver provenance in `metadata.txt` includes the resolved artifact inventory
 and a path-independent bundle hash. It also records the commit and dirty state
 of both the project being measured and the SMTBatch runner repository. The
+project revision is taken from the configuration directory, including when
+the command is launched inside a nested tool checkout. The
 Excel export contains only log paths.

@@ -379,8 +379,8 @@ def _git_provenance(root: Path) -> dict[str, str]:
     }
 
 
-def repository_provenance() -> dict[str, str]:
-    project = _git_provenance(Path.cwd())
+def repository_provenance(project_root: Path) -> dict[str, str]:
+    project = _git_provenance(project_root)
     runner = _git_provenance(Path(__file__).resolve().parent)
     return {
         "repository_commit": project["commit"],
@@ -774,7 +774,7 @@ def _prepare_fresh(args: argparse.Namespace) -> _RunPlan:
     for solver, values in provenance.items():
         for key, value in values.items():
             metadata[f"{solver}_{key}"] = value
-    metadata.update(repository_provenance())
+    metadata.update(repository_provenance(config.path.parent))
     write_metadata(output_dir, metadata)
     return _RunPlan(
         output_dir=output_dir,
