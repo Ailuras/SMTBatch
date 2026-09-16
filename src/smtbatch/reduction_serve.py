@@ -456,7 +456,10 @@ class ReductionManager:
                 continue
             category = matches[0]
             mode = entry.get("match")
-            if mode not in {"stderr", "stdout", "incorrect", "incorrect-unknown", "exitcode"}:
+            if mode not in {
+                "stderr", "stdout", "incorrect", "incorrect-unknown", "exitcode",
+                "invalid-model",
+            }:
                 errors.append(f"{filename}: unsupported database match mode {mode!r}")
                 continue
             predicate_match = {"ignore_stdout": True, "ignore_stderr": True}
